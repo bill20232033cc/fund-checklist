@@ -1,0 +1,31 @@
+# Python runtime and test artifacts
+.venv/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+*$py.class
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# macOS local metadata
+.DS_Store
+
+# Local environment and secrets
+.env
+.env.*
+*.pem
+*.key
+*.secret
+*.secrets
+secrets/
+credentials/
+
+# Local fund documents and generated analysis material
+基金年报/
+.docling_cache/
+docling_cache/
+.cache/docling/
+tmp/
+temp/

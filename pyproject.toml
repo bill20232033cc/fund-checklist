@@ -1,0 +1,17 @@
+[project]
+name = "fund-checklist"
+version = "0.1.0"
+description = "基金年报阅读工具层 MVP"
+requires-python = ">=3.11"
+dependencies = [
+    "docling>=2.90.0,<3.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
