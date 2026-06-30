@@ -108,6 +108,47 @@ MVP 不接受 only ToolService tests。MVP closeout 必须同时通过：
 - 没有 diff，不算实现；没有测试命令和输出，不算完成；没有 review agent 独立检查，不算 accepted。
 - Controller 不为每个 slice 同步长 control checkpoint。
 
+## 多 Agent 协作模式
+
+多 Agent 的目的不是增加流程产物，而是防止单 Agent 走捷径、漏测或谎报完成。
+
+推荐三角色：
+
+```text
+Controller Agent
+Implementation Agent
+Review Agent
+```
+
+可以用 3 个 tmux pane，也可以用 3 个 Codex thread；tmux 只是角色隔离方式，不是必须条件。
+
+职责固定：
+
+- Controller Agent：派发当前唯一 slice，约束 allowed write set、stop conditions、测试命令；只采信 diff、测试输出和 review verdict。
+- Implementation Agent：只写当前 slice 的代码和测试；不得写 plan、review、evidence、control-sync artifact；不得扩大 scope。
+- Review Agent：只 review 当前 diff + tests；不得写代码；不得产出新 plan；不得开启新路线；输出只能是 `ACCEPTED` 或 `NEEDS_FIX`。
+
+每个 slice 的唯一流程：
+
+```text
+implement -> tests -> diff review
+```
+
+交接材料必须包含：
+
+- Controller -> Implementation：slice 目标、allowed write set、禁止事项、必须运行的测试命令。
+- Implementation -> Controller：changed files、diff 摘要、实际测试命令、测试输出；失败时报告最小失败原因，不得声称完成。
+- Controller -> Review：当前 diff、测试输出、相关真源文件路径。
+- Review -> Controller：`ACCEPTED` 或 `NEEDS_FIX`；`NEEDS_FIX` 只能列最小修复项。
+
+禁止事项：
+
+- 禁止 Review Agent 要求新增 plan-fix / re-review / evidence gate。
+- 禁止 Controller 因 review comments 新建长期流程链。
+- 禁止 Implementation Agent 用 mock / fake fixture 证明 production conversion path。
+- 禁止任何 Agent 用“逻辑上完成”“应该通过”“已按计划完成”替代测试输出。
+- 若调用 code-is-cheap 相关 skill，必须显式声明本项目使用 CIC-lite；不得启用完整 gateflow / phaseflow / release-readiness。
+
 ## 测试规则
 
 - 每次代码修改必须同步新增或更新测试。

@@ -1,6 +1,6 @@
 # fund-checklist implementation-control
 
-更新时间：2026-06-28  
+更新时间：2026-06-29
 当前阶段：`SLICE_0_DEPENDENCY_PREFLIGHT`  
 当前角色：control / CIC-lite controller  
 当前目标：把 `pyproject.toml` / `uv.lock` / `.gitignore` 作为正式 dependency preflight 纳入控制面板，并初始化 git 首个提交。
@@ -32,6 +32,8 @@
 - `.gitignore` 必须排除 `.venv/`、`.pytest_cache/`、`.DS_Store`、`基金年报/` 本地材料目录、Docling/cache 临时目录和常见 secret 文件。
 - `docling` 版本策略：`pyproject.toml` 使用 `docling>=2.90.0,<3.0.0`；`uv.lock` 锁定实际解析版本，常规开发不得无故升级锁。
 - Slice 2 conversion smoke 允许首次联网下载 Docling runtime/model 资源；缓存产物不得纳入 git。若后续要求完全离线/CI 稳定运行，另开预缓存策略，只固定资源版本/校验和。
+- Slice 2 timeout：单份真实 PDF smoke 默认 300 秒；cold start download 单独计量，不作为 production conversion SLA。
+- Slice 2 batch：5 份年报 batch 默认总预算 1800 秒；batch 必须按 document 独立 timeout、独立失败分类、可断点续跑，单份失败不得静默吞并整批结果。
 
 ## CIC-lite Rules
 

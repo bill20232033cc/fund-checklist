@@ -128,7 +128,10 @@ implement -> tests -> diff review
 
 Slice 2 conversion smoke 建议口径：
 
-- 超时：单份真实 PDF conversion smoke 默认 180 秒；超过则分类为 `unavailable` 或 `docling_convert_failed`，以实际异常区分。
+- 超时：`single_pdf_smoke_timeout_seconds = 300`；超过则分类为 `unavailable` 或 `docling_convert_failed`，以实际异常区分。
+- cold start download 单独计量，不作为 production conversion SLA。
+- batch conversion 使用 per-document timeout 和 resumable queue，不用单个长同步任务吞并所有年份。
+- 5 份年报 batch 默认 `max_runtime_seconds = 1800`；单份失败或超时必须返回 per-document classified failure，不得静默失败或让整批结果不可用。
 - 输出目录：测试使用 `tmp_path` 下的受控 output/cache，不写入 `基金年报/` 或源码目录。
 - 缓存目录：测试通过环境变量把 Docling/HuggingFace/模型缓存固定到 `tmp_path` 或 `.docling_cache/`；`.gitignore` 排除该目录。
 - 失败分类：缺少依赖或模型资源临时不可用为 `unavailable`；转换 API 抛出的 PDF 转换失败为 `docling_convert_failed`；转换成功但受控 parser contract 不满足为 `schema_drift` 或 `parser_health_failed`。
