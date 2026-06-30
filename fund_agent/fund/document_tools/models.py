@@ -113,6 +113,39 @@ class ToolFailure:
 
 
 @dataclass(frozen=True)
+class ReportSummary:
+    """安全报告摘要。
+
+    参数:
+        document_id: public reading tools 使用的内容身份。
+        fund_code: 基金代码。
+        fund_name: 基金名称。
+        year: 报告年份。
+        report_type: 报告类型。
+        source_kind: 来源类型。
+        source_summary: 不含本地路径和 local_import_id 的来源摘要。
+        content_fingerprint: PDF bytes 的稳定内容指纹。
+        share_class: 可选份额类别。
+
+    返回:
+        可安全返回给 Agent 或 UI 的报告摘要。
+
+    异常:
+        本模型不抛出业务异常。
+    """
+
+    document_id: str
+    fund_code: str
+    fund_name: str
+    year: int
+    report_type: str
+    source_kind: str
+    source_summary: str
+    content_fingerprint: str
+    share_class: str | None = None
+
+
+@dataclass(frozen=True)
 class Locator:
     """年报内容定位信息。
 
@@ -305,6 +338,29 @@ class SearchResult:
     section_ref: str
     title: str
     excerpt: str
+    locator: Locator
+    citation: Citation
+
+
+@dataclass(frozen=True)
+class ExcerptContent:
+    """受控 locator 对应的有界摘录。
+
+    参数:
+        text: 有界摘录文本。
+        truncated: 摘录是否被截断。
+        locator: 摘录来源 locator。
+        citation: citation metadata。
+
+    返回:
+        上层可安全展示或喂给 Agent 的摘录。
+
+    异常:
+        本模型不抛出业务异常。
+    """
+
+    text: str
+    truncated: bool
     locator: Locator
     citation: Citation
 

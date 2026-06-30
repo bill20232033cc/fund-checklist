@@ -1,9 +1,9 @@
 # Tests
 
-当前 Slice 1/2 测试覆盖本地 PDF 导入、Docling conversion 和 DoclingDocumentStore：
+当前 Slice 1/2/3 测试覆盖本地 PDF 导入、Docling conversion、DoclingDocumentStore 和 FundDocumentToolService：
 
 ```bash
-uv run pytest tests/fund/document_tools/test_docling_conversion.py tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_local_pdf_source.py
+uv run pytest tests/fund/document_tools/test_service.py tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_docling_conversion.py tests/fund/document_tools/test_local_pdf_source.py
 ```
 
 测试范围：
@@ -16,6 +16,11 @@ uv run pytest tests/fund/document_tools/test_docling_conversion.py tests/fund/do
 - Docling conversion 失败分类为 `docling_convert_failed`。
 - Docling JSON 无可读文本/章节索引时分类为 `parser_health_failed`。
 - DoclingDocumentStore 返回带 locator 的章节、bounded section content、表格投影和 ranked search excerpt。
+- FundDocumentToolService 使用内存 `document_id -> DoclingDocumentStore` registry 暴露七个 reading tools。
+- `list_reports` 返回 safe source summary，不暴露 `local_import_id`、本地路径或 Docling cache path。
+- `read_section`、`search_document`、`read_table` 返回 citation 和 locator，且不暴露 raw Docling JSON。
+- public tools 捕获 `DocumentToolError` 并返回 `ToolFailure`；unknown locator 返回 `not_found`。
+- `get_excerpt` 只接受 prior tools 返回的受控 `Locator`，按 section/table/excerpt locator kind 路由。
 
 MVP 完整验证命令将在后续 Slice 补齐 Docling、ToolService 和 Agent loop 后使用：
 
