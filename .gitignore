@@ -24,6 +24,7 @@ credentials/
 
 # Local fund documents and generated analysis material
 基金年报/
+.fund_checklist/
 .docling_cache/
 docling_cache/
 .cache/docling/

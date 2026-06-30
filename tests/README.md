@@ -1,10 +1,11 @@
 # Tests
 
-当前 Slice 1/2/3/4 测试覆盖本地 PDF 导入、Docling conversion、DoclingDocumentStore、FundDocumentToolService 和最小 Host/Agent tool loop：
+当前 Slice 1/2/3/4 与 CLI Read Command Gate 测试覆盖本地 PDF 导入、Docling conversion、DoclingDocumentStore、FundDocumentToolService、最小 Host/Agent tool loop 和 `fund-checklist read`：
 
 ```bash
 uv run pytest tests/fund/document_tools/test_service.py tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_docling_conversion.py tests/fund/document_tools/test_local_pdf_source.py
 uv run pytest tests/fund/agent/test_minimal_tool_loop.py
+uv run pytest tests/fund/cli/test_cli.py
 ```
 
 测试范围：
@@ -27,9 +28,13 @@ uv run pytest tests/fund/agent/test_minimal_tool_loop.py
 - `ToolTraceEntry` 记录工具名、显式参数、success/failure 和可选失败码。
 - `search_document` 无命中时返回 `AgentRunResult.failure`，不猜测章节。
 - `MinimalHost` 只调用 Agent loop，不访问 Docling store、raw Docling JSON 或本地路径。
+- `fund-checklist read` 使用 argparse 参数解析，只实现 read 子命令。
+- CLI happy path 串起 import、converter/store、service、host/agent；CLI 单测用 fake converter 或预置 Docling JSON，避免重复真实 Docling conversion。
+- CLI classified failure 输出稳定 failure code 且退出码为 2；unexpected exception 退出码为 1。
+- CLI 输出不得包含 raw Docling JSON、本地 cache path 或 `local_import_id`。
 
 MVP 完整验证命令：
 
 ```bash
-uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.py
+uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.py tests/fund/cli/test_cli.py
 ```
