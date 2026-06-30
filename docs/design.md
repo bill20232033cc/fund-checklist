@@ -151,12 +151,14 @@ PdfSourceProvider
 - 管理 session / run 生命周期。
 - 管理并发、取消、超时、事件、恢复、reply outbox。
 - 托管 Agent 或 direct operation。
+- Slice 4 当前已实现 `MinimalHost`：只接收 `document_id` 与 `query`，调用 `MinimalFundDocumentAgent.run()` 并返回 `AgentRunResult`。
 
 禁止：
 
 - 理解基金领域知识。
 - 解析 PDF / Docling。
 - 读取 Fund 文档私有存储。
+- 在 Host 层读取 raw PDF、raw Docling JSON、本地路径或 Docling cache path。
 
 ### 3.4 Agent / Fund
 
@@ -165,11 +167,16 @@ PdfSourceProvider
 - `fund_agent/fund` 承载基金文档领域能力包。
 - 实现 PDF source abstraction、blob store、Docling converter、Docling document store、FundDocumentToolService。
 - Agent 层负责 ToolRegistry / ToolTrace / context budget / tool loop。
+- Slice 4 当前已实现 `MinimalFundDocumentAgent`：固定执行 `search_document -> read_section`，成功时 `answer` 只由 `read_section` 返回的 `title`、`text` 生成，`citations` 只使用 `read_section` 返回的 citation。
+- `AgentRunResult` 至少包含 `answer`、`citations`、`tool_trace`、`failure`。
+- `ToolTraceEntry` 至少包含 `tool_name`、`arguments`、`result_kind`、`failure_code`。
+- `search_document` 无命中时不猜测章节，返回 `AgentRunResult.failure`。
 
 禁止：
 
 - 把 dayu 的 `dayu.host` / `dayu.engine` 作为生产 runtime 直接依赖。
 - 绕过 Fund documents / tool service 边界向上层暴露 raw PDF / raw Docling。
+- 在 Agent 层直接读取 store 私有字段、raw Docling payload、PDF cache 或本地路径。
 
 ## 4. Fund 文档域模型
 
@@ -436,6 +443,8 @@ MVP 不允许只以 `FundDocumentToolService` 离线测试通过收口。MVP clo
 3. Agent 调用 read_section(document_id, section_ref)
 4. 最终回答只引用 tool result，不泄漏本地路径或 raw Docling JSON
 ```
+
+Slice 4 当前实现为 deterministic loop，不接真实 LLM，不调用外部模型，不做字段抽取、自动报告或投资判断。`ToolFailure` 传播到 `AgentRunResult.failure`，不向 Host/UI 抛内部异常。
 
 ### 8.3 Locator 最低标准
 

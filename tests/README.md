@@ -1,9 +1,10 @@
 # Tests
 
-当前 Slice 1/2/3 测试覆盖本地 PDF 导入、Docling conversion、DoclingDocumentStore 和 FundDocumentToolService：
+当前 Slice 1/2/3/4 测试覆盖本地 PDF 导入、Docling conversion、DoclingDocumentStore、FundDocumentToolService 和最小 Host/Agent tool loop：
 
 ```bash
 uv run pytest tests/fund/document_tools/test_service.py tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_docling_conversion.py tests/fund/document_tools/test_local_pdf_source.py
+uv run pytest tests/fund/agent/test_minimal_tool_loop.py
 ```
 
 测试范围：
@@ -21,8 +22,13 @@ uv run pytest tests/fund/document_tools/test_service.py tests/fund/document_tool
 - `read_section`、`search_document`、`read_table` 返回 citation 和 locator，且不暴露 raw Docling JSON。
 - public tools 捕获 `DocumentToolError` 并返回 `ToolFailure`；unknown locator 返回 `not_found`。
 - `get_excerpt` 只接受 prior tools 返回的受控 `Locator`，按 section/table/excerpt locator kind 路由。
+- `MinimalFundDocumentAgent` 固定执行 `search_document -> read_section`。
+- `AgentRunResult.answer` 成功时只由 `read_section` tool result 生成。
+- `ToolTraceEntry` 记录工具名、显式参数、success/failure 和可选失败码。
+- `search_document` 无命中时返回 `AgentRunResult.failure`，不猜测章节。
+- `MinimalHost` 只调用 Agent loop，不访问 Docling store、raw Docling JSON 或本地路径。
 
-MVP 完整验证命令将在后续 Slice 补齐 Docling、ToolService 和 Agent loop 后使用：
+MVP 完整验证命令：
 
 ```bash
 uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.py
