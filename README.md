@@ -26,7 +26,11 @@ local PDF
 - locator、citation、bounded output 和 safe redaction。
 - 最小 Host / Agent loop：固定执行 `search_document -> read_section`，最终回答只使用 `read_section` tool result。
 
-固定验证命令：
+安装/测试命令：
+
+```bash
+uv sync
+```
 
 ```bash
 uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.py

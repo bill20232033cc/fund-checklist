@@ -1,19 +1,26 @@
 # fund-checklist implementation-control
 
-更新时间：2026-06-29
-当前阶段：`SLICE_0_DEPENDENCY_PREFLIGHT`  
+更新时间：2026-06-30
+当前阶段：`MVP_VALIDATED`
 当前角色：control / CIC-lite controller  
-当前目标：把 `pyproject.toml` / `uv.lock` / `.gitignore` 作为正式 dependency preflight 纳入控制面板，并初始化 git 首个提交。
+当前目标：MVP closeout control sync。只记录已验证的阅读工具 MVP 状态；不进入 release readiness，不开启新 feature slice。
 
 ## 当前事实
 
-- 当前已有 `fund_agent/` 代码目录和 `tests/` 目录；Slice 1 本地 PDF ingestion 代码与测试已存在。
-- 当前已有 `pyproject.toml`、`uv.lock` 和 `.gitignore`。
-- `uv run python -c "import docling; ..."` 已通过，输出 `docling import ok`。
-- `uv run pytest tests/fund/document_tools/test_local_pdf_source.py` 已通过，输出 `3 passed`。
+- Slice 1-4 已完成并通过 CIC-lite diff review。
+- 当前已实现本地 PDF 导入、Docling conversion/store、`FundDocumentToolService` 七个 reading tools 和最小 Host / Agent loop。
+- MVP closeout 命令已通过：
+
+```bash
+uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.py
+```
+
+结果：`17 passed, 1 warning`。
+
+- warning 是 Docling internal deprecation warning，不改变 MVP closeout 结论。
+- 根 `README.md` 只写 public repo 用户成功路径、安装/测试命令、本地 PDF 不入库和当前不支持能力。
 - 当前有样本 PDF 和历史分析报告；`基金年报/` 作为本地材料目录不纳入 public git，后续按分析需求下载或本地提供。
 - `AGENTS.md` 是执行规则入口；`docs/design.md` 是设计真源。
-- 当前目录此前不是 git repository；本次允许执行 git 初始化和首个 commit。
 
 ## Accepted Decisions
 
@@ -34,6 +41,8 @@
 - Slice 2 conversion smoke 允许首次联网下载 Docling runtime/model 资源；缓存产物不得纳入 git。若后续要求完全离线/CI 稳定运行，另开预缓存策略，只固定资源版本/校验和。
 - Slice 2 timeout：单份真实 PDF smoke 默认 300 秒；cold start download 单独计量，不作为 production conversion SLA。
 - Slice 2 batch：5 份年报 batch 默认总预算 1800 秒；batch 必须按 document 独立 timeout、独立失败分类、可断点续跑，单份失败不得静默吞并整批结果。
+- Slice 4 closeout 后，最小 Agent loop 固定执行 `search_document -> read_section`，最终回答只使用 `read_section` tool result。
+- MVP closeout accepted 只表示本地阅读工具 MVP 已通过固定测试；不表示 release ready、CI ready、真实 LLM ready、CLI/UI ready、batch queue ready 或字段抽取 ready。
 
 ## CIC-lite Rules
 
@@ -50,20 +59,7 @@
 
 ## Next Action
 
-完成 Slice 0 收口：
-
-- 更新 `.gitignore`。
-- 将 `docling` 依赖范围收敛到 `docling>=2.90.0,<3.0.0`。
-- 更新 `uv.lock`。
-- 将 dependency preflight 写入 MVP plan 和本控制面板。
-- 执行 git 初始化和首个 commit。
-
-Slice 0 后续最小验证：
-
-```bash
-uv run python -c "import docling; print('docling import ok')"
-uv run pytest tests/fund/document_tools/test_local_pdf_source.py
-```
+停止在 MVP closeout control sync。后续若要继续，只能另开明确任务；不得把 release readiness、CI、真实 LLM、CLI/UI、downloader、batch queue、persistent repository、字段抽取、自动报告或投资判断混入当前 closeout。
 
 ## Implementation Slices
 
@@ -105,8 +101,14 @@ rg -n "SLICE_0_DEPENDENCY_PREFLIGHT|docling>=2.90.0,<3.0.0|基金年报/|test_ag
 wc -l AGENTS.md docs/implementation-control.md
 ```
 
-后续代码实现最小验证命令：
+MVP closeout 固定验证命令：
 
 ```bash
 uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.py
+```
+
+最近已知结果：
+
+```text
+17 passed, 1 warning
 ```
