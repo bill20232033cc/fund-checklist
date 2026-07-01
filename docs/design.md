@@ -167,7 +167,8 @@ PdfSourceProvider
 - `fund_agent/fund` 承载基金文档领域能力包。
 - 实现 PDF source abstraction、blob store、Docling converter、Docling document store、FundDocumentToolService。
 - Agent 层负责 ToolRegistry / ToolTrace / context budget / tool loop。
-- Slice 4 当前已实现 `MinimalFundDocumentAgent`：固定执行 `search_document -> read_section`，成功时 `answer` 只由 `read_section` 返回的 `title`、`text` 生成，`citations` 只使用 `read_section` 返回的 citation。
+- MVP Slice 4 已实现 `MinimalFundDocumentAgent` 的最小 loop：`search_document -> read_section`。
+- Post-MVP Slice 5 扩展为 table-aware retrieval / citation loop：先读取命中章节，再通过 `list_tables` / `read_table` 读取同 section、同页或相邻页候选表格，按 query 命中和 proximity 排序；成功时 `answer` 只由 section/table tool result 生成，`citations` 同时包含 section/table citation。
 - `AgentRunResult` 至少包含 `answer`、`citations`、`tool_trace`、`failure`。
 - `ToolTraceEntry` 至少包含 `tool_name`、`arguments`、`result_kind`、`failure_code`。
 - `search_document` 无命中时不猜测章节，返回 `AgentRunResult.failure`。
@@ -231,7 +232,77 @@ PdfSourceProvider
 
 raw Docling JSON 只能作为 store 内部中间态，不是上层事实源。
 
-### 4.4 Tool Service
+### 4.4 Persistent Repository
+
+Post-MVP Slice 6 引入 local persistent repository，用于把已完成的本地年报导入/转换结果登记为可恢复的 report catalog。首个实现只使用 filesystem JSON catalog，不引入 SQLite。
+
+最小路径：
+
+```text
+PdfBlobStore
+ -> DoclingConverter
+ -> DoclingDocumentStore(parser_health passed)
+ -> PersistentReportRepository catalog record
+ -> repository-backed loader
+ -> FundDocumentToolService
+```
+
+repository-backed loader 是内部装配层，不是新的 public reading tool。它负责：
+
+- 按 `document_id` 读取 completed catalog record。
+- 校验 catalog schema、identity、Docling JSON 引用和 parser_health。
+- 构造 `DoclingDocumentStore(identity, json_path)`。
+- 将 store 注册给 `FundDocumentToolService`，或返回可注册的 store。
+
+它不得：
+
+- 改变七个 public reading tools API。
+- 接受 `local_import_id` 作为 public route。
+- 向 Agent / Host / UI 暴露 raw Docling JSON、本地 PDF path、Docling cache path、absolute path 或 `local_import_id`。
+- 自动 repair、rebuild 或 reconvert 缺失的 Docling JSON。
+
+Slice 6 最小 catalog record 字段：
+
+- `schema_version`
+- `document_id`
+- `fund_code`
+- `fund_name`
+- `year`
+- `report_type`
+- `share_class`
+- `source_kind`
+- `content_fingerprint`
+- `stored_blob_ref`
+- `docling_json_ref`
+- parser health summary
+- `created_at`
+- `updated_at`
+
+`local_import_id` 仍只属于导入审计 metadata，不进入 public tool route；Slice 6 不要求把导入事件历史纳入 catalog public contract。
+
+Failure mapping:
+
+- catalog missing -> `not_found`
+- catalog schema incompatible -> `schema_drift`
+- catalog identity 与 `document_id` 不一致 -> `identity_mismatch`
+- completed record 指向的 Docling JSON 缺失或不可读 -> `unavailable`
+- Docling JSON 顶层结构 drift -> `schema_drift`
+- parser_health 不通过 -> `parser_health_failed`
+- blob fingerprint mismatch -> `integrity_error`
+
+Slice 6 非目标：
+
+- SQLite 或外部数据库。
+- catalog schema migration。
+- concurrent write locking。
+- repair / rebuild / reconvert。
+- downloader。
+- batch queue。
+- delete/update lifecycle。
+- true LLM integration。
+- release readiness。
+
+### 4.5 Tool Service
 
 `FundDocumentToolService` 是工具边界的唯一入口。它负责：
 
@@ -444,7 +515,14 @@ MVP 不允许只以 `FundDocumentToolService` 离线测试通过收口。MVP clo
 4. 最终回答只引用 tool result，不泄漏本地路径或 raw Docling JSON
 ```
 
-Slice 4 当前实现为 deterministic loop，不接真实 LLM，不调用外部模型，不做字段抽取、自动报告或投资判断。`ToolFailure` 传播到 `AgentRunResult.failure`，不向 Host/UI 抛内部异常。
+MVP Slice 4 实现为 deterministic minimal loop；Post-MVP Slice 5 在该 loop 上增加 table-aware retrieval。当前仍不接真实 LLM，不调用外部模型，不做字段抽取、自动报告或投资判断。`ToolFailure` 传播到 `AgentRunResult.failure`，不向 Host/UI 抛内部异常。
+
+Post-MVP Slice 5 的 table-aware loop 仍属于阅读工具层泛化，不是完整 LLM Agent 真源系统：
+
+- LLM/Agent 输入真源是受控 tool result + locator/citation。
+- raw Docling JSON、本地 PDF path、Docling cache path、`local_import_id` 仍不得进入 Agent / Host / UI 输出。
+- table-aware retrieval 可泛化到章节 + 表格里的公开披露信息问答，例如基金经理、持仓、资产配置、费用等；不得扩展成字段抽取 correctness benchmark、自动报告或投资判断。
+- 当没有相邻或相关表格时，Agent 保持 section-only answer，不硬拼不相关表格。
 
 ### 8.3 Locator 最低标准
 
@@ -538,6 +616,9 @@ tests/fund/document_tools/test_service.py
 
 tests/fund/agent/test_minimal_tool_loop.py
 - test_agent_tool_loop_searches_then_reads_section
+- test_agent_table_aware_loop_answers_manager_table_information
+- test_agent_table_aware_loop_answers_holding_table_information
+- test_agent_table_aware_loop_keeps_section_only_answer_when_no_nearby_table
 - test_agent_tool_loop_does_not_receive_raw_docling_json
 ```
 

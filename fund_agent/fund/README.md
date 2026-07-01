@@ -20,4 +20,28 @@
 - `get_excerpt` 只接受 prior tools 返回的受控 `Locator`；section/table/excerpt locator 均按 kind 路由，unknown `section_ref`、`table_ref` 或 document mismatch 返回 `not_found`。
 - `list_tables` 返回空列表表示当前文档或范围内无可用表格投影，不是失败。
 
-未实现：Host/Agent tool loop。
+Host/Agent tool loop 已实现；Fund 层仍只提供受控文档工具，不理解 Agent 策略。
+
+## Post-MVP Slice 6 Persistent repository
+
+当前已实现 local persistent repository：
+
+- 使用 filesystem JSON catalog 登记 completed report。
+- 只登记已通过 PDF integrity、Docling conversion 和 parser_health 的本地年报。
+- 通过 repository-backed loader 按 `document_id` 恢复 `DoclingDocumentStore`，再交给 `FundDocumentToolService`。
+- 保持七个 public reading tools API 不变。
+- CLI `fund-checklist read` 优先按 catalog 复用 completed report；只有 catalog missing 时才执行首次 Docling conversion。
+
+catalog 最小记录 safe identity、`stored_blob_ref`、`docling_json_ref`、parser health summary 和创建/更新时间；不得把 raw Docling JSON、本地绝对路径、Docling cache path 或 `local_import_id` 暴露给 Agent/Host/UI。
+
+Slice 6 failure mapping：
+
+- catalog missing -> `not_found`
+- catalog schema incompatible -> `schema_drift`
+- identity mismatch -> `identity_mismatch`
+- Docling JSON missing/unreadable -> `unavailable`
+- Docling JSON schema drift -> `schema_drift`
+- parser health failed -> `parser_health_failed`
+- blob fingerprint mismatch -> `integrity_error`
+
+Slice 6 不做 SQLite、schema migration、concurrent write locking、repair/rebuild/reconvert、downloader、batch queue、delete/update lifecycle、true LLM 或 release readiness。

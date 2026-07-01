@@ -23,12 +23,13 @@ uv run pytest tests/fund/cli/test_cli.py
 - `read_section`、`search_document`、`read_table` 返回 citation 和 locator，且不暴露 raw Docling JSON。
 - public tools 捕获 `DocumentToolError` 并返回 `ToolFailure`；unknown locator 返回 `not_found`。
 - `get_excerpt` 只接受 prior tools 返回的受控 `Locator`，按 section/table/excerpt locator kind 路由。
-- `MinimalFundDocumentAgent` 固定执行 `search_document -> read_section`。
-- `AgentRunResult.answer` 成功时只由 `read_section` tool result 生成。
+- `MinimalFundDocumentAgent` 先执行 `search_document -> read_section`，再通过 `list_tables/read_table` 补充相关表格。
+- `AgentRunResult.answer` 成功时只由 section/table tool result 生成。
+- table-aware loop 覆盖人物表格信息、持仓表格信息和无相邻表格的 section-only answer。
 - `ToolTraceEntry` 记录工具名、显式参数、success/failure 和可选失败码。
 - `search_document` 无命中时返回 `AgentRunResult.failure`，不猜测章节。
 - `MinimalHost` 只调用 Agent loop，不访问 Docling store、raw Docling JSON 或本地路径。
-- `fund-checklist read` 使用 argparse 参数解析，只实现 read 子命令。
+- `fund-checklist read` 使用 argparse 参数解析，只实现 read 子命令；console script entrypoint 指向 `fund_agent.cli.main:main`。
 - CLI happy path 串起 import、converter/store、service、host/agent；CLI 单测用 fake converter 或预置 Docling JSON，避免重复真实 Docling conversion。
 - CLI classified failure 输出稳定 failure code 且退出码为 2；unexpected exception 退出码为 1。
 - CLI 输出不得包含 raw Docling JSON、本地 cache path 或 `local_import_id`。
@@ -38,3 +39,35 @@ MVP 完整验证命令：
 ```bash
 uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.py tests/fund/cli/test_cli.py
 ```
+
+Post-MVP Slice 6 persistent repository 测试范围：
+
+- completed report 写入 filesystem JSON catalog 后可按 `document_id` 恢复 `DoclingDocumentStore`。
+- 恢复后的 `FundDocumentToolService` 可 `search_document`、`read_section`、`list_tables`、`read_table`。
+- 重复导入同一 PDF 复用 `document_id` 和 catalog record。
+- catalog missing 返回 `not_found`。
+- Docling JSON missing/unreadable 返回 `unavailable`。
+- catalog identity mismatch 返回 `identity_mismatch`。
+- blob fingerprint mismatch 返回 `integrity_error`。
+- public output 不泄漏 raw Docling JSON、本地路径、Docling cache path 或 `local_import_id`。
+- CLI happy path 写入 completed report catalog，后续同 `document_id` 可复用。
+
+Slice 6 验证命令：
+
+```bash
+uv run pytest tests/fund/document_tools/test_persistent_repository.py
+uv run pytest tests/fund/document_tools/test_persistent_repository.py tests/fund/document_tools/test_service.py tests/fund/agent/test_minimal_tool_loop.py tests/fund/cli/test_cli.py
+```
+
+Slice 6 暂不测试 schema migration、concurrent writes、repair/rebuild、batch、downloader、delete/update lifecycle、SQLite performance、true LLM 或 release readiness。
+
+Post-MVP Slice 7 CLI packaging 验证命令：
+
+```bash
+uv sync
+uv run fund-checklist read --help
+uv run python -m fund_agent.cli.main read --help
+uv run pytest tests/fund/cli/test_cli.py
+```
+
+Slice 7 只验证 documented console script entrypoint 和 Python module fallback；不新增 CLI 子命令，不做 release packaging、installer、shell completion、downloader、batch 或 true LLM。

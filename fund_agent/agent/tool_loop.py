@@ -1,4 +1,4 @@
-"""确定性的基金文档最小工具调用循环。"""
+"""确定性的基金文档工具调用循环。"""
 
 from __future__ import annotations
 
@@ -6,13 +6,23 @@ from dataclasses import dataclass
 from typing import Literal
 
 from fund_agent.fund.document_tools.constants import FailureCode, ToolName
-from fund_agent.fund.document_tools.models import Citation, SearchResult, SectionContent, ToolFailure
+from fund_agent.fund.document_tools.models import (
+    Citation,
+    SearchResult,
+    SectionContent,
+    TableContent,
+    TableSummary,
+    ToolFailure,
+)
 from fund_agent.fund.document_tools.service import FundDocumentToolService
 
 ToolResultKind = Literal["success", "failure"]
 ToolArgumentValue = str | int | None
 
 _NO_SEARCH_HIT_MESSAGE = "未找到可读取的匹配章节"
+_TABLE_PAGE_WINDOW = 1
+_MAX_TABLE_CANDIDATES = 3
+_MAX_TABLE_ROWS = 8
 
 
 @dataclass(frozen=True)
@@ -40,12 +50,12 @@ class ToolTraceEntry:
 
 @dataclass(frozen=True)
 class AgentRunResult:
-    """最小 Agent loop 的统一返回值。
+    """Agent loop 的统一返回值。
 
     参数:
-        answer: 最终回答；成功时只由 read_section 结果生成。
-        citations: read_section 返回的 citation 元组。
-        tool_trace: search_document/read_section 的调用轨迹。
+        answer: 最终回答；成功时只由 public reading tool result 生成。
+        citations: section/table reading tools 返回的 citation 元组。
+        tool_trace: public reading tool 调用轨迹。
         failure: 失败分类；成功时为 None。
 
     返回:
@@ -62,7 +72,7 @@ class AgentRunResult:
 
 
 class MinimalFundDocumentAgent:
-    """只执行 search_document -> read_section 的确定性阅读 Agent。
+    """执行 section-first、table-aware 的确定性阅读 Agent。
 
     参数:
         tool_service: FundDocumentToolService，是 Agent 访问基金文档的唯一边界。
@@ -84,10 +94,10 @@ class MinimalFundDocumentAgent:
 
         参数:
             document_id: public reading tools 使用的内容身份。
-            query: 检索关键词；Slice 4 验收使用“基金经理”。
+            query: 检索关键词。
 
         返回:
-            AgentRunResult；成功时 answer 只来自 read_section 的 title/text/citation。
+            AgentRunResult；成功时 answer 只来自 section/table tool result。
 
         异常:
             不抛出 ToolFailure 或 DocumentToolError；失败写入 AgentRunResult.failure。
@@ -121,12 +131,55 @@ class MinimalFundDocumentAgent:
             return _failed_result(tuple(trace), section_result)
 
         trace.append(_success_trace(ToolName.READ_SECTION, read_arguments))
+        table_results = self._read_relevant_tables(
+            document_id=document_id,
+            query=query,
+            section=section_result,
+            trace=trace,
+        )
+        citations = (section_result.citation,) + tuple(table.citation for table in table_results)
         return AgentRunResult(
-            answer=_answer_from_section(section_result),
-            citations=(section_result.citation,),
+            answer=_answer_from_section_and_tables(section_result, table_results),
+            citations=citations,
             tool_trace=tuple(trace),
             failure=None,
         )
+
+    def _read_relevant_tables(
+        self,
+        *,
+        document_id: str,
+        query: str,
+        section: SectionContent,
+        trace: list[ToolTraceEntry],
+    ) -> tuple[TableContent, ...]:
+        """按章节和页码邻近性读取相关表格。"""
+
+        list_arguments = _list_tables_arguments(document_id)
+        tables = self._tool_service.list_tables(document_id)
+        if isinstance(tables, ToolFailure):
+            trace.append(_failure_trace(ToolName.LIST_TABLES, list_arguments, tables))
+            return ()
+        trace.append(_success_trace(ToolName.LIST_TABLES, list_arguments))
+
+        candidates = _rank_table_summaries(tables, section=section, query=query)
+        if not candidates:
+            return ()
+
+        read_tables: list[tuple[int, TableContent]] = []
+        for table in candidates[:_MAX_TABLE_CANDIDATES]:
+            read_arguments = _read_table_arguments(document_id, table.table_ref, _MAX_TABLE_ROWS)
+            table_result = self._tool_service.read_table(document_id, table.table_ref, max_rows=_MAX_TABLE_ROWS)
+            if isinstance(table_result, ToolFailure):
+                trace.append(_failure_trace(ToolName.READ_TABLE, read_arguments, table_result))
+                continue
+            trace.append(_success_trace(ToolName.READ_TABLE, read_arguments))
+            score = _score_table_content(table_result, query=query, section=section)
+            if score > 0:
+                read_tables.append((score, table_result))
+
+        read_tables.sort(key=lambda item: (-item[0], item[1].table_ref))
+        return tuple(table for _, table in read_tables[:1])
 
 
 def _section_ref_from_hit(hit: SearchResult) -> str | None:
@@ -135,10 +188,101 @@ def _section_ref_from_hit(hit: SearchResult) -> str | None:
     return hit.locator.section_ref or hit.section_ref
 
 
-def _answer_from_section(section: SectionContent) -> str:
-    """只使用 read_section 输出组装最终回答。"""
+def _answer_from_section_and_tables(section: SectionContent, tables: tuple[TableContent, ...]) -> str:
+    """只使用 section/table tool 输出组装最终回答。"""
 
-    return f"{section.title}\n\n{section.text}"
+    parts = [f"{section.title}\n\n{section.text}"]
+    if tables:
+        parts.append("相关表格:\n" + "\n\n".join(_format_table(table) for table in tables))
+    return "\n\n".join(parts)
+
+
+def _format_table(table: TableContent) -> str:
+    """把有界表格行格式化为可读文本。"""
+
+    lines: list[str] = []
+    if table.caption:
+        lines.append(table.caption)
+    lines.extend(" | ".join(cell for cell in row if cell) for row in table.rows)
+    return "\n".join(line for line in lines if line)
+
+
+def _rank_table_summaries(
+    tables: tuple[TableSummary, ...],
+    *,
+    section: SectionContent,
+    query: str,
+) -> tuple[TableSummary, ...]:
+    """按 query、section 和页码邻近性排序表格摘要。"""
+
+    scored = [
+        (score, table)
+        for table in tables
+        if (score := _score_table_summary(table, query=query, section=section)) > 0
+    ]
+    scored.sort(key=lambda item: (-item[0], item[1].table_ref))
+    return tuple(table for _, table in scored)
+
+
+def _score_table_summary(table: TableSummary, *, query: str, section: SectionContent) -> int:
+    """计算表格摘要与当前章节的相关性分数。"""
+
+    score = 0
+    normalized_query = query.strip()
+    if normalized_query and table.caption and normalized_query in table.caption:
+        score += 8
+    if table.section_ref == section.section_ref:
+        score += 6
+    if _same_page(table.locator.page_no, section.locator.page_no):
+        score += 5
+    elif _page_near(table.locator.page_no, section.locator.page_no):
+        score += 3
+    return score
+
+
+def _score_table_content(table: TableContent, *, query: str, section: SectionContent) -> int:
+    """计算读取后的表格内容相关性分数。"""
+
+    score = _score_table_summary(
+        TableSummary(
+            table_ref=table.table_ref,
+            caption=table.caption,
+            section_ref=table.section_ref,
+            locator=table.locator,
+            row_count=len(table.rows),
+            column_count=max((len(row) for row in table.rows), default=0),
+        ),
+        query=query,
+        section=section,
+    )
+    table_text = "\n".join(" ".join(row) for row in table.rows)
+    normalized_query = query.strip()
+    if normalized_query:
+        score += table_text.count(normalized_query) * 10
+        for token in _query_tokens(normalized_query):
+            if token in table_text:
+                score += 2
+    return score
+
+
+def _query_tokens(query: str) -> tuple[str, ...]:
+    """把短查询拆成保守 token，供表格内容弱匹配。"""
+
+    if len(query) <= 2:
+        return (query,)
+    return tuple(query[index : index + 2] for index in range(0, len(query) - 1, 2))
+
+
+def _same_page(left: int | None, right: int | None) -> bool:
+    """判断两个 locator 是否位于同页。"""
+
+    return left is not None and right is not None and left == right
+
+
+def _page_near(left: int | None, right: int | None) -> bool:
+    """判断表格是否位于章节相邻页范围内。"""
+
+    return left is not None and right is not None and abs(left - right) <= _TABLE_PAGE_WINDOW
 
 
 def _failed_result(trace: tuple[ToolTraceEntry, ...], failure: ToolFailure) -> AgentRunResult:
@@ -157,6 +301,18 @@ def _read_section_arguments(document_id: str, section_ref: str) -> dict[str, Too
     """构造 read_section trace 参数。"""
 
     return {"document_id": document_id, "section_ref": section_ref}
+
+
+def _list_tables_arguments(document_id: str) -> dict[str, ToolArgumentValue]:
+    """构造 list_tables trace 参数。"""
+
+    return {"document_id": document_id}
+
+
+def _read_table_arguments(document_id: str, table_ref: str, max_rows: int) -> dict[str, ToolArgumentValue]:
+    """构造 read_table trace 参数。"""
+
+    return {"document_id": document_id, "table_ref": table_ref, "max_rows": max_rows}
 
 
 def _success_trace(tool_name: ToolName, arguments: dict[str, ToolArgumentValue]) -> ToolTraceEntry:

@@ -1,14 +1,22 @@
 # fund-checklist implementation-control
 
-更新时间：2026-06-30
-当前阶段：`MVP_VALIDATED`
+更新时间：2026-07-01
+当前阶段：`POST_MVP_SLICE_5_7_COMMIT_READY`
 当前角色：control / CIC-lite controller  
-当前目标：MVP closeout control sync。只记录已验证的阅读工具 MVP 状态；不进入 release readiness，不开启新 feature slice。
+当前目标：Slice 5-7 commit 前 closeout。只记录已验证的本地阅读工具增强、persistent repository 与 CLI entrypoint 当前事实；不进入 release readiness、downloader、字段抽取、自动报告或投资判断。
 
 ## 当前事实
 
 - Slice 1-4 已完成并通过 CIC-lite diff review。
 - 当前已实现本地 PDF 导入、Docling conversion/store、`FundDocumentToolService` 七个 reading tools 和最小 Host / Agent loop。
+- Post-MVP Slice 5 当前实现 table-aware Agent loop：`search_document -> read_section -> list_tables -> read_table`，按 query、section proximity、page proximity 选择相关表格，最终回答只使用 section/table tool result。
+- 真实样本 CLI smoke 已验证 `query="基金经理"` 时，Answer 包含基金经理表格中的“张明”，并输出 section citation 与 table citation。
+- MiMo review 已按 Post-MVP Slice 5 口径输出 `ACCEPTED`；Slice 5 可视为本地 accepted。
+- Post-MVP Slice 6 当前实现 filesystem JSON catalog persistent repository：只记录 completed report，并可按 `document_id` 恢复 `DoclingDocumentStore` 给 `FundDocumentToolService` 使用。
+- `fund-checklist read` 已接入 repository-backed loader；catalog 中已有 completed report 时复用 store，不重复调用 Docling converter。
+- Slice 6 review 已结束；P0 audit 确认 identity mismatch、private output redaction、incomplete/unhealthy fail-closed 和 stable failure mapping 达到 Slice 6 最小接受标准。
+- Post-MVP Slice 7 当前实现 CLI packaging / command entry polish：`uv run fund-checklist read --help` 与 `uv run python -m fund_agent.cli.main read --help` 均可用。
+- `uv sync` 已验证不再出现 project scripts entrypoint 被跳过的警告。
 - MVP closeout 命令已通过：
 
 ```bash
@@ -41,7 +49,12 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - Slice 2 conversion smoke 允许首次联网下载 Docling runtime/model 资源；缓存产物不得纳入 git。若后续要求完全离线/CI 稳定运行，另开预缓存策略，只固定资源版本/校验和。
 - Slice 2 timeout：单份真实 PDF smoke 默认 300 秒；cold start download 单独计量，不作为 production conversion SLA。
 - Slice 2 batch：5 份年报 batch 默认总预算 1800 秒；batch 必须按 document 独立 timeout、独立失败分类、可断点续跑，单份失败不得静默吞并整批结果。
-- Slice 4 closeout 后，最小 Agent loop 固定执行 `search_document -> read_section`，最终回答只使用 `read_section` tool result。
+- MVP Slice 4 closeout 时，最小 Agent loop 固定执行 `search_document -> read_section`；该事实是 MVP 历史验收口径，不是当前 Post-MVP Slice 5 的上限。
+- Post-MVP Slice 5 允许 Agent 在 `read_section` 后读取同 section、同页或相邻页的候选表格；LLM/Agent 输入真源仍是受控 tool result + locator/citation，不是 raw Docling JSON。
+- Post-MVP Slice 6 采用 filesystem JSON catalog 作为 local persistent repository 起点；不引入 SQLite，不新增 downloader，不改变七个 public reading tools API。
+- Slice 6 repository-backed loader 的职责是从 completed catalog record 恢复 `DoclingDocumentStore` 或装配 `FundDocumentToolService`；不得向 Agent/Host/UI 暴露 raw Docling JSON、本地路径、cache path 或 `local_import_id`。
+- Slice 6 只登记已完成 local PDF + Docling JSON + parser_health 通过的 report；catalog 有记录但 Docling JSON 缺失时 fail-closed，不自动 reconvert 或 repair。
+- Post-MVP Slice 7 只修 CLI packaging / command entry；不新增 CLI 子命令，不改变 repository、Agent 或 Fund public tool 行为。
 - MVP closeout accepted 只表示本地阅读工具 MVP 已通过固定测试；不表示 release ready、CI ready、真实 LLM ready、CLI/UI ready、batch queue ready 或字段抽取 ready。
 
 ## CIC-lite Rules
@@ -59,7 +72,7 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## Next Action
 
-停止在 MVP closeout control sync。后续若要继续，只能另开明确任务；不得把 release readiness、CI、真实 LLM、CLI/UI、downloader、batch queue、persistent repository、字段抽取、自动报告或投资判断混入当前 closeout。
+Slice 5-7 当前已完成本地 closeout，下一步只允许 stage/commit 用户授权的文件，或在用户明确授权后进入后续 slice。不得把 release readiness、CI、真实 LLM、downloader、batch queue、字段抽取、自动报告或投资判断混入本 commit。
 
 ## Implementation Slices
 
@@ -68,6 +81,9 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 2. Docling conversion/store：`DoclingConverter`、`DoclingDocumentStore`、parser_health、raw payload redaction。
 3. FundDocumentToolService：7 个 reading tools、bounded output、citation、locator、safe redaction。
 4. Minimal Agent loop：`search_document -> read_section` trace，最终回答只引用 tool result。
+5. Table-aware Agent retrieval：在 section-first 检索后读取相关表格，回答表格型人物/资产信息，并同时返回 section/table citation。
+6. Persistent repository：filesystem JSON catalog + repository-backed loader，支持 completed report 跨进程恢复为 reading tools 可用文档。
+7. CLI packaging / command entry polish：打包配置安装 `fund-checklist` console script，README 主命令 `uv run fund-checklist read ...` 可用，并保留 `python -m fund_agent.cli.main` fallback。
 
 ## MVP Acceptance Matrix
 
@@ -79,6 +95,51 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - locator + citation + redaction
 - `test_agent_tool_loop_searches_then_reads_section`
 - `test_agent_tool_loop_does_not_receive_raw_docling_json`
+- `test_agent_table_aware_loop_answers_manager_table_information`
+- `test_agent_table_aware_loop_answers_holding_table_information`
+- `test_agent_table_aware_loop_keeps_section_only_answer_when_no_nearby_table`
+
+## Slice 6 Design Boundary
+
+最小持久化对象：
+
+- `schema_version`
+- `document_id`
+- `ReportIdentity` safe fields
+- `stored_blob_ref`
+- `docling_json_ref`
+- parser health summary
+- `created_at` / `updated_at`
+
+禁止进入 public tool 输入或输出：
+
+- `local_import_id`
+- absolute local path
+- raw Docling JSON
+- Docling/model cache path
+- URL secret
+
+Failure mapping:
+
+- catalog missing -> `not_found`
+- catalog schema incompatible -> `schema_drift`
+- catalog identity 与 `document_id` 不一致 -> `identity_mismatch`
+- completed record 指向的 Docling JSON 缺失或不可读 -> `unavailable`
+- Docling JSON 顶层结构 drift -> `schema_drift`
+- parser_health 不通过 -> `parser_health_failed`
+- blob fingerprint mismatch -> `integrity_error`
+
+Slice 6 不做：
+
+- SQLite
+- catalog schema migration
+- concurrent write locking
+- repair / rebuild / reconvert
+- downloader
+- batch queue
+- delete/update lifecycle
+- true LLM
+- release readiness
 
 ## Stop Conditions
 
@@ -107,8 +168,39 @@ MVP closeout 固定验证命令：
 uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.py
 ```
 
+Post-MVP Slice 5 验证命令：
+
+```bash
+uv run pytest tests/fund/agent/test_minimal_tool_loop.py tests/fund/cli/test_cli.py
+uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '基金经理' --work-dir .fund_checklist_cli_smoke
+```
+
+Post-MVP Slice 6 预期验证命令：
+
+```bash
+uv run pytest tests/fund/document_tools/test_persistent_repository.py tests/fund/document_tools/test_service.py tests/fund/agent/test_minimal_tool_loop.py tests/fund/cli/test_cli.py
+```
+
+Post-MVP Slice 7 验证命令：
+
+```bash
+uv sync
+uv run fund-checklist read --help
+uv run python -m fund_agent.cli.main read --help
+uv run pytest tests/fund/cli/test_cli.py
+```
+
 最近已知结果：
 
 ```text
-17 passed, 1 warning
+MVP closeout: 17 passed, 1 warning
+Post-MVP Slice 5 full local regression: 26 passed, 1 warning
+Real CLI smoke: query="基金经理" answer includes "张明" with section/table citations
+Post-MVP Slice 6 repository unit: 8 passed
+Post-MVP Slice 6/5/CLI targeted regression: 20 passed
+Post-MVP Slice 7 CLI test: 7 passed
+uv sync: passed, no skipped-entrypoint warning
+uv run fund-checklist read --help: passed
+uv run python -m fund_agent.cli.main read --help: passed
+Full local regression before commit: 35 passed, 1 warning
 ```

@@ -9,11 +9,12 @@ from typing import Sequence, TextIO
 
 from fund_agent.agent import MinimalFundDocumentAgent
 from fund_agent.fund.document_tools.constants import DOCLING_JSON_SUFFIX, FailureCode, ReportType
-from fund_agent.fund.document_tools.docling_converter import DoclingConverter
+from fund_agent.fund.document_tools.docling_converter import DoclingConverter, make_docling_json_ref
 from fund_agent.fund.document_tools.docling_store import DoclingDocumentStore
 from fund_agent.fund.document_tools.errors import DocumentToolError
 from fund_agent.fund.document_tools.local_pdf_source import LocalPdfSourceProvider
 from fund_agent.fund.document_tools.models import PdfImportRequest, ToolFailure
+from fund_agent.fund.document_tools.persistent_repository import CATALOG_FILENAME, FilesystemReportRepository
 from fund_agent.fund.document_tools.service import FundDocumentToolService
 from fund_agent.host import MinimalHost
 
@@ -135,15 +136,30 @@ def _run_read_command(args: argparse.Namespace, *, stdout: TextIO, stderr: TextI
     )
 
     docling_root = work_dir / DOCLING_JSON_DIRNAME
-    json_path = _docling_json_path(docling_root, import_result.identity.document_id)
-    if not json_path.exists():
-        converter = DoclingConverter(docling_root)
-        converter.convert_pdf(
+    repository = FilesystemReportRepository(
+        catalog_path=work_dir / CATALOG_FILENAME,
+        blob_root=work_dir / PDF_BLOB_DIRNAME,
+        docling_json_root=docling_root,
+    )
+    try:
+        store = repository.load_store(import_result.identity.document_id)
+    except DocumentToolError as exc:
+        if exc.code is not FailureCode.NOT_FOUND:
+            raise
+        json_path = _docling_json_path(docling_root, import_result.identity.document_id)
+        if not json_path.exists():
+            converter = DoclingConverter(docling_root)
+            converter.convert_pdf(
+                identity=import_result.identity,
+                pdf_bytes=provider.blob_store.read_pdf(import_result.stored_blob_ref),
+            )
+        store = DoclingDocumentStore(identity=import_result.identity, json_path=json_path)
+        repository.record_completed_report(
             identity=import_result.identity,
-            pdf_bytes=provider.blob_store.read_pdf(import_result.stored_blob_ref),
+            stored_blob_ref=import_result.stored_blob_ref,
+            docling_json_ref=make_docling_json_ref(import_result.identity.document_id),
+            parser_health=store.parser_health,
         )
-
-    store = DoclingDocumentStore(identity=import_result.identity, json_path=json_path)
     service = FundDocumentToolService({import_result.identity.document_id: store})
     host = MinimalHost(MinimalFundDocumentAgent(service))
     result = host.run(document_id=import_result.identity.document_id, query=args.query)

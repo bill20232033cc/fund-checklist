@@ -24,7 +24,8 @@ local PDF
   - `read_table`
   - `get_excerpt`
 - locator、citation、bounded output 和 safe redaction。
-- 最小 Host / Agent loop：固定执行 `search_document -> read_section`，最终回答只使用 `read_section` tool result。
+- Host / Agent loop：先执行 `search_document -> read_section`，再按 query 与章节/页码邻近性读取相关表格，最终回答只使用 section/table tool result。
+- 本地 persistent repository：completed report 写入 filesystem JSON catalog，后续同 `document_id` 可恢复并复用。
 - 最小 CLI 用户入口：`fund-checklist read`。
 
 安装命令：
@@ -49,7 +50,7 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 - 不接真实 LLM。
 - 不实现 UI。
-- 不实现 downloader、batch queue 或 persistent repository。
+- 不实现 downloader 或 batch queue。
 - 不做字段抽取、自动报告或投资判断。
 - 不声明 release ready。
 

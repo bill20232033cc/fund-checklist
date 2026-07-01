@@ -10,6 +10,13 @@ dependencies = [
 [project.scripts]
 fund-checklist = "fund_agent.cli.main:main"
 
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["fund_agent*"]
+
 [dependency-groups]
 dev = [
     "pytest",

@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import importlib
 import json
+from importlib.metadata import entry_points
 from pathlib import Path
 
 from fund_agent.cli.main import (
@@ -15,6 +16,7 @@ from fund_agent.cli.main import (
     run_cli,
 )
 from fund_agent.fund.document_tools.constants import DOCLING_JSON_SUFFIX
+from fund_agent.fund.document_tools.persistent_repository import CATALOG_FILENAME
 
 cli_module = importlib.import_module("fund_agent.cli.main")
 
@@ -142,6 +144,7 @@ def test_cli_happy_path_orchestrates_import_store_service_and_host(monkeypatch, 
     assert "Trace:" in stdout
     assert "search_document success" in stdout
     assert "read_section success" in stdout
+    assert (work_dir / CATALOG_FILENAME).is_file()
     assert "raw Docling" not in combined
     assert "schema_name" not in combined
     assert ".docling.json" not in combined
@@ -298,3 +301,13 @@ def test_cli_main_uses_process_streams(monkeypatch, tmp_path: Path, capsys) -> N
     assert exit_code == SUCCESS_EXIT_CODE
     assert "Answer:" in captured.out
     assert captured.err == ""
+
+
+def test_cli_console_script_entrypoint_targets_main() -> None:
+    """打包后的 console script 必须暴露 documented fund-checklist 入口。"""
+
+    scripts = entry_points(group="console_scripts")
+    matches = [entry_point for entry_point in scripts if entry_point.name == "fund-checklist"]
+
+    assert matches
+    assert matches[0].value == "fund_agent.cli.main:main"
