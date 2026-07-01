@@ -71,3 +71,20 @@ uv run pytest tests/fund/cli/test_cli.py
 ```
 
 Slice 7 只验证 documented console script entrypoint 和 Python module fallback；不新增 CLI 子命令，不做 release packaging、installer、shell completion、downloader、batch 或 true LLM。
+
+Post-MVP Slice 8A fake/injected LLM tool-loop 预期测试范围：
+
+- fake LLM 正常调用 `search_document` / `read_section` 后回答，并携带 section citation。
+- fake LLM 调用 `list_tables` / `read_table` 后回答表格问题，并携带 table citation。
+- fake LLM 直接给出无 evidence final answer 时 fail-closed。
+- fake LLM 请求未知工具或越权工具时 fail-closed。
+- fake LLM 输出不泄漏 raw Docling JSON、本地路径、Docling cache path 或 `local_import_id`。
+- deterministic `fund-checklist read` CLI 旧路径不回退。
+
+Slice 8A 预期最小验证命令：
+
+```bash
+uv run pytest tests/fund/agent/test_llm_tool_loop.py tests/fund/agent/test_minimal_tool_loop.py tests/fund/cli/test_cli.py
+```
+
+Slice 8A 不测试真实 OpenAI / Claude / 外部模型 API、provider auth、streaming、rate limit、cost tracking、prompt framework、`fund-checklist ask`、字段抽取、自动报告、投资判断或 release readiness。

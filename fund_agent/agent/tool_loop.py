@@ -30,7 +30,7 @@ class ToolTraceEntry:
     """单次工具调用轨迹。
 
     参数:
-        tool_name: 调用的 public reading tool 名称。
+        tool_name: 调用的 public reading tool 名称，或被拒绝的 LLM 请求工具名。
         arguments: 传给工具的显式参数；不得包含本地路径或 raw payload。
         result_kind: 工具调用结果类别，取值为 success 或 failure。
         failure_code: 工具失败时的稳定失败分类；成功时为 None。
@@ -42,7 +42,7 @@ class ToolTraceEntry:
         本模型不抛出业务异常。
     """
 
-    tool_name: ToolName
+    tool_name: ToolName | str
     arguments: dict[str, ToolArgumentValue]
     result_kind: ToolResultKind
     failure_code: FailureCode | None = None

@@ -169,6 +169,7 @@ PdfSourceProvider
 - Agent 层负责 ToolRegistry / ToolTrace / context budget / tool loop。
 - MVP Slice 4 已实现 `MinimalFundDocumentAgent` 的最小 loop：`search_document -> read_section`。
 - Post-MVP Slice 5 扩展为 table-aware retrieval / citation loop：先读取命中章节，再通过 `list_tables` / `read_table` 读取同 section、同页或相邻页候选表格，按 query 命中和 proximity 排序；成功时 `answer` 只由 section/table tool result 生成，`citations` 同时包含 section/table citation。
+- Post-MVP Slice 8A 仅设计 fake/injected LLM tool-loop contract：LLM adapter 只能通过受控 reading tools 取得事实，不得直接读取 repository/private loader、raw Docling JSON 或本地路径。
 - `AgentRunResult` 至少包含 `answer`、`citations`、`tool_trace`、`failure`。
 - `ToolTraceEntry` 至少包含 `tool_name`、`arguments`、`result_kind`、`failure_code`。
 - `search_document` 无命中时不猜测章节，返回 `AgentRunResult.failure`。
@@ -523,6 +524,16 @@ Post-MVP Slice 5 的 table-aware loop 仍属于阅读工具层泛化，不是完
 - raw Docling JSON、本地 PDF path、Docling cache path、`local_import_id` 仍不得进入 Agent / Host / UI 输出。
 - table-aware retrieval 可泛化到章节 + 表格里的公开披露信息问答，例如基金经理、持仓、资产配置、费用等；不得扩展成字段抽取 correctness benchmark、自动报告或投资判断。
 - 当没有相邻或相关表格时，Agent 保持 section-only answer，不硬拼不相关表格。
+
+Post-MVP Slice 8A 的 LLM 形态只做 fake/injected contract，不接真实 provider：
+
+- 最小协议为 `LlmClientProtocol`、`FakeLlmClient`、`ToolCall -> ToolResult -> FinalAnswer`。
+- 允许工具仅限 `search_document`、`read_section`、`list_tables`、`read_table`、`get_excerpt`。
+- LLM adapter 不得接触 repository/private loader、raw PDF、raw Docling JSON、本地路径、Docling cache path、URL secret、parser private payload 或 `local_import_id`。
+- 最终 answer 必须只来自 tool result；`citations` 必须非空；每个关键事实至少有 section 或 table citation。
+- 无 citation 回答、未知工具、越权工具或无证据最终回答必须 fail-closed。
+- Slice 8A 不新增用户 CLI 参数，不新增 `fund-checklist ask`；CLI 暴露 LLM 模式需另开裁决。
+- Slice 8A 不做 OpenAI / Claude / 外部模型 API、provider auth、streaming、rate limit、cost tracking、prompt framework、字段抽取、自动报告或投资判断。
 
 ### 8.3 Locator 最低标准
 
