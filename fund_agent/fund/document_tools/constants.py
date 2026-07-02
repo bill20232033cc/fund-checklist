@@ -34,6 +34,7 @@ class FailureCode(StrValueEnum):
     INTEGRITY_ERROR = "integrity_error"
     DOCLING_CONVERT_FAILED = "docling_convert_failed"
     PARSER_HEALTH_FAILED = "parser_health_failed"
+    LLM_MALFORMED_RESPONSE = "llm_malformed_response"
 
 
 class LocatorKind(StrValueEnum):

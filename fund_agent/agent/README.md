@@ -25,4 +25,15 @@ Post-MVP Slice 8A 已实现 fake/injected LLM tool-loop contract：
 - 未知工具、越权工具、缺参数、无 evidence final answer、无 citation final answer、无工具证据支撑的关键事实均 fail-closed 为 `AgentRunResult.failure`。
 - LLM runner 最终输出会净化 citation 中的 parser 内部引用字段，不暴露 raw Docling JSON、本地路径、cache path 或 `local_import_id`。
 
-未实现：真实 LLM、prompt 编排、自动报告、投资判断、字段抽取、长期会话、`fund-checklist ask`。
+Post-MVP Slice 8B 当前实现：
+
+- `DeepSeekLlmClient` 是 DeepSeek-only OpenAI-compatible provider adapter，实现既有 `LlmClientProtocol`。
+- adapter 使用 `DeepSeekTransportProtocol` 注入 transport；默认 transport 基于标准库 `urllib`，测试使用 fake transport，不新增 SDK 依赖。
+- request 使用 `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL` 组装 `/chat/completions`；`DEEPSEEK_BASE_URL` 默认 `https://api.deepseek.com`。
+- provider response 只能解析为受控 `ToolCall` 或 `FinalAnswer`，并继续交给 8A `LlmToolLoopRunner` 执行 enforcement。
+- provider prompt/request 不得包含 raw PDF、raw Docling JSON、本地路径、cache path、repository/private loader、URL secret、parser private payload 或 `local_import_id`。
+- 默认测试不得联网、读取真实 key 或依赖真实 model 值。
+- provider key 缺失、auth、network、timeout、rate limit 映射为 `unavailable`；malformed JSON/schema parse failed 映射为 `llm_malformed_response`。
+- Slice 8B 不新增 `fund-checklist ask`，不做 streaming、Mimo / MiMo、多 provider matrix、prompt framework、richer QA/eval、自动报告、字段抽取或投资判断。
+
+未实现：Mimo / MiMo、多 provider、prompt 编排、自动报告、投资判断、字段抽取、长期会话、`fund-checklist ask`。

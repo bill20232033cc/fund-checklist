@@ -51,6 +51,28 @@ _STEP_LIMIT_MESSAGE = "LLM 工具调用超过限制"
 _UNAVAILABLE_MESSAGE = "LLM 工具循环暂不可用"
 
 
+class LlmClientFailure(Exception):
+    """LLM client 可分类失败。
+
+    参数:
+        code: 稳定失败分类。
+        message: 安全错误信息；不得包含 provider raw body、API key 或私有路径。
+
+    返回:
+        runner 可识别并转为 AgentRunResult.failure 的异常。
+
+    异常:
+        构造时不抛出业务异常。
+    """
+
+    def __init__(self, code: FailureCode, message: str) -> None:
+        """保存稳定失败分类和安全信息。"""
+
+        super().__init__(message)
+        self.code = code
+        self.safe_message = message
+
+
 @dataclass(frozen=True)
 class ToolCall:
     """LLM 请求调用 reading tool 的显式模型。
@@ -243,6 +265,8 @@ class LlmToolLoopRunner:
                     query=query,
                     tool_results=tuple(tool_results),
                 )
+            except LlmClientFailure as exc:
+                return _failed_result(tuple(trace), exc.code, exc.safe_message)
             except Exception:
                 return _failed_result(tuple(trace), FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE)
 

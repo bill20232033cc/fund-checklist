@@ -46,6 +46,9 @@ PDF
 - 禁止把 Docling 改回 candidate-only、benchmark-before-admission 或 `pdfplumber` fallback 路线。
 - 禁止做与 `pdfplumber` 的替代路线比较；禁止做字段抽取 correctness benchmark。
 - 若未来要走 `Docling JSON -> 字段抽取 -> 自动报告/判断`，必须另开设计与准入 gate，不得塞进阅读工具 MVP。
+- 真实 LLM 接入必须位于已实现的 fake/injected LLM tool-loop contract 之后；不得让 LLM provider、prompt 或 adapter 直接读取 raw PDF、raw Docling JSON、本地路径、cache path、repository/private loader、`local_import_id` 或 secret。
+- Post-MVP Slice 8B 只接 DeepSeek OpenAI-compatible API；Mimo / MiMo 与多 provider 后置，不得在 8B 混入。
+- 真实 LLM slice 默认不新增 CLI 用户入口；`fund-checklist ask`、streaming、多 provider、prompt framework、richer QA/eval 必须另开裁决。
 
 ## 身份与失败分类
 
@@ -63,7 +66,9 @@ PDF
   - `integrity_error`
   - `docling_convert_failed`
   - `parser_health_failed`
+  - `llm_malformed_response`（仅用于真实 LLM adapter response 结构不可解析）
 - fallback 必须由失败分类显式驱动；禁止用 fallback 掩盖 `schema_drift`、`identity_mismatch`、`integrity_error`。
+- LLM provider 的 key 缺失、auth、network、timeout、rate limit 默认映射为 `unavailable`；provider response 非法或不可解析映射为 `llm_malformed_response`。
 
 ## MVP 验收
 

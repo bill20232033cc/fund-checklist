@@ -169,7 +169,8 @@ PdfSourceProvider
 - Agent 层负责 ToolRegistry / ToolTrace / context budget / tool loop。
 - MVP Slice 4 已实现 `MinimalFundDocumentAgent` 的最小 loop：`search_document -> read_section`。
 - Post-MVP Slice 5 扩展为 table-aware retrieval / citation loop：先读取命中章节，再通过 `list_tables` / `read_table` 读取同 section、同页或相邻页候选表格，按 query 命中和 proximity 排序；成功时 `answer` 只由 section/table tool result 生成，`citations` 同时包含 section/table citation。
-- Post-MVP Slice 8A 仅设计 fake/injected LLM tool-loop contract：LLM adapter 只能通过受控 reading tools 取得事实，不得直接读取 repository/private loader、raw Docling JSON 或本地路径。
+- Post-MVP Slice 8A 已实现 fake/injected LLM tool-loop contract：LLM adapter 只能通过受控 reading tools 取得事实，不得直接读取 repository/private loader、raw Docling JSON 或本地路径。
+- Post-MVP Slice 8B 已实现为 DeepSeek real LLM adapter behind existing contract：真实 provider 只能实现 `LlmClientProtocol`，所有输出仍经 8A runner/enforcement；Mimo / MiMo 与多 provider 后置。
 - `AgentRunResult` 至少包含 `answer`、`citations`、`tool_trace`、`failure`。
 - `ToolTraceEntry` 至少包含 `tool_name`、`arguments`、`result_kind`、`failure_code`。
 - `search_document` 无命中时不猜测章节，返回 `AgentRunResult.failure`。
@@ -525,7 +526,7 @@ Post-MVP Slice 5 的 table-aware loop 仍属于阅读工具层泛化，不是完
 - table-aware retrieval 可泛化到章节 + 表格里的公开披露信息问答，例如基金经理、持仓、资产配置、费用等；不得扩展成字段抽取 correctness benchmark、自动报告或投资判断。
 - 当没有相邻或相关表格时，Agent 保持 section-only answer，不硬拼不相关表格。
 
-Post-MVP Slice 8A 的 LLM 形态只做 fake/injected contract，不接真实 provider：
+Post-MVP Slice 8A 已实现 fake/injected contract，不接真实 provider：
 
 - 最小协议为 `LlmClientProtocol`、`FakeLlmClient`、`ToolCall -> ToolResult -> FinalAnswer`。
 - 允许工具仅限 `search_document`、`read_section`、`list_tables`、`read_table`、`get_excerpt`。
@@ -534,6 +535,19 @@ Post-MVP Slice 8A 的 LLM 形态只做 fake/injected contract，不接真实 pro
 - 无 citation 回答、未知工具、越权工具或无证据最终回答必须 fail-closed。
 - Slice 8A 不新增用户 CLI 参数，不新增 `fund-checklist ask`；CLI 暴露 LLM 模式需另开裁决。
 - Slice 8A 不做 OpenAI / Claude / 外部模型 API、provider auth、streaming、rate limit、cost tracking、prompt framework、字段抽取、自动报告或投资判断。
+
+Post-MVP Slice 8B 的 DeepSeek adapter 已按 8A contract 后置实现：
+
+- 目标是实现 DeepSeek OpenAI-compatible provider adapter，例如 `DeepSeekLlmClient`，并让它实现既有 `LlmClientProtocol`。
+- provider response 只能被解析为受控 `ToolCall` 或 `FinalAnswer`；解析后必须进入 8A `LlmToolLoopRunner`。
+- provider prompt/request 只能包含系统约束、用户问题和受控 tool schema，不得包含 raw PDF、raw Docling JSON、本地路径、cache path、repository/private loader、URL secret、parser private payload 或 `local_import_id`。
+- `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL` 只能从环境变量读取；`DEEPSEEK_BASE_URL` 默认 `https://api.deepseek.com`。
+- API key 不得写入配置文件、测试 fixture、trace、日志或 public output。
+- 不新增 SDK 依赖；使用 adapter + injected transport。若实现必须使用官方 SDK，需另行裁决 `pyproject.toml` / `uv.lock`。
+- 默认 pytest 不访问网络，不读取真实 API key；live provider smoke 必须显式 opt-in。
+- provider error 必须稳定 fail-closed：key 缺失、auth、network、timeout、rate limit 映射为 `unavailable`；malformed response 映射为 `llm_malformed_response` 或等价稳定 failure code。
+- 真实 provider 的未知工具、越权工具、无 citation final answer 或无 evidence final answer 仍复用 8A enforcement。
+- Slice 8B 不新增 `fund-checklist ask`、streaming、Mimo / MiMo、多 provider matrix、prompt framework、richer QA/eval、字段抽取、自动报告或投资判断。
 
 ### 8.3 Locator 最低标准
 
@@ -663,12 +677,12 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## 9. 已关闭裁决项
 
-当前没有阻塞 MVP plan 的用户裁决项。
+MVP plan 已关闭。当前已完成到 Post-MVP Slice 8B；Slice 8B 的 accepted 方向是 DeepSeek real LLM adapter behind existing contract。
 
 ## 10. 下一步最小可验证问题
 
-下一步应写 1 份 MVP plan artifact，而不是直接实现：
+下一步只应验证一个问题：
 
 ```text
-写出 Reading tool MVP plan，覆盖 exact write set、schema、failure classification、test matrix、docs sync 和最小验证命令。
+后续若继续推进，应先裁决 live DeepSeek smoke、CLI ask、Mimo / MiMo、多 provider 或 richer QA/eval 中的唯一下一 slice；不得把这些混入 Slice 8B accepted closeout。
 ```

@@ -1,9 +1,9 @@
 # fund-checklist implementation-control
 
-更新时间：2026-07-01
-当前阶段：`POST_MVP_SLICE_8A_DESIGN_SYNC`
+更新时间：2026-07-02
+当前阶段：`POST_MVP_SLICE_8B_ACCEPTED`
 当前角色：control / CIC-lite controller  
-当前目标：docs-only 同步 Slice 8A fake/injected LLM tool-loop contract。只裁决下一实现 slice 的边界、非目标和测试口径；不实现真实 LLM、不新增 CLI 参数、不进入 release readiness、downloader、字段抽取、自动报告或投资判断。
+当前目标：Slice 8B closeout。记录 DeepSeek adapter 已实现、已通过本地验证并经 MiMo review `ACCEPTED`；不新增 CLI 参数、不进入 richer QA/eval、release readiness、字段抽取、自动报告或投资判断。
 
 ## 当前事实
 
@@ -17,7 +17,18 @@
 - Slice 6 review 已结束；P0 audit 确认 identity mismatch、private output redaction、incomplete/unhealthy fail-closed 和 stable failure mapping 达到 Slice 6 最小接受标准。
 - Post-MVP Slice 7 当前实现 CLI packaging / command entry polish：`uv run fund-checklist read --help` 与 `uv run python -m fund_agent.cli.main read --help` 均可用。
 - `uv sync` 已验证不再出现 project scripts entrypoint 被跳过的警告。
-- Slice 5-7 已提交并推送到 `origin/main`，当前最新提交为 `b618e20 feat: add table-aware reading, persistent catalog, and CLI entrypoint`。
+- Slice 5-7 已提交并推送到 `origin/main`，提交为 `b618e20 feat: add table-aware reading, persistent catalog, and CLI entrypoint`。
+- Post-MVP Slice 8A 已实现 fake/injected LLM tool-loop contract，最新提交为 `f53dac2 Add fake LLM tool loop contract`。
+- Slice 8A 验证结果：`uv run pytest tests/fund/agent/test_llm_tool_loop.py tests/fund/agent/test_minimal_tool_loop.py tests/fund/cli/test_cli.py` -> `20 passed`。
+- Slice 8A 扩展回归结果：`uv run pytest tests/fund/document_tools/test_persistent_repository.py tests/fund/document_tools/test_service.py tests/fund/agent/test_minimal_tool_loop.py tests/fund/agent/test_llm_tool_loop.py tests/fund/cli/test_cli.py` -> `33 passed`。
+- Slice 8A `git diff --cached --check` 通过；`.fund_checklist_cli_smoke/` 仍是未跟踪本地 smoke work-dir，未 stage、未提交。
+- Post-MVP Slice 8B 已实现 DeepSeek-only OpenAI-compatible adapter：`DeepSeekLlmClient` 实现既有 `LlmClientProtocol`，使用 injected transport，默认测试 no-network/no-real-key。
+- Slice 8B provider 输出仍进入 8A `LlmToolLoopRunner`，citation/evidence enforcement 未绕过。
+- Slice 8B 已新增集中 failure code `llm_malformed_response`；key missing/auth/network/timeout/rate-limit 映射为 `unavailable`，malformed response 映射为 `llm_malformed_response`。
+- Slice 8B 未改 CLI、repository/private loader、`pyproject.toml` 或 `uv.lock`。
+- MiMo review 已按 Slice 8B 口径输出 `ACCEPTED`。
+- Slice 8B 本地验证结果：`uv run pytest tests/fund/agent/test_real_llm_adapter.py tests/fund/agent/test_llm_tool_loop.py tests/fund/agent/test_minimal_tool_loop.py tests/fund/cli/test_cli.py` -> `36 passed`。
+- Slice 8B `git diff --check` 通过。
 - MVP closeout 命令已通过：
 
 ```bash
@@ -61,6 +72,12 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - Slice 8A 只开放 reading tool 子集：`search_document`、`read_section`、`list_tables`、`read_table`、`get_excerpt`；不得向 LLM adapter 暴露 repository/private loader、raw Docling JSON、PDF path、cache path 或 `local_import_id`。
 - Slice 8A 最终回答必须只来自 tool result；`citations` 必须非空；每个关键事实至少有 section 或 table citation。
 - Slice 8A 不新增用户 CLI 参数或 `fund-checklist ask`；CLI 暴露 LLM 模式需另行裁决。
+- Post-MVP Slice 8B 已实现为 DeepSeek real LLM adapter behind existing contract；真实 provider 只能实现 `LlmClientProtocol`，不得绕过 8A runner/enforcement。
+- Slice 8B 只接 DeepSeek OpenAI-compatible API；Mimo / MiMo 与多 provider 后置。
+- Slice 8B 不新增 SDK 依赖，使用 adapter + injected transport；若实现必须使用官方 SDK，需先停止并申请允许修改 `pyproject.toml` / `uv.lock`。
+- Slice 8B 环境变量裁决为 `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL`；`DEEPSEEK_BASE_URL` 默认 `https://api.deepseek.com`，测试不得依赖真实 model 值。
+- Slice 8B 单元测试默认不联网；live provider smoke 必须显式 opt-in，并且不得作为默认 pytest gate。
+- Slice 8B 不新增 `fund-checklist ask`、streaming、多 provider matrix、prompt framework、richer QA/eval、自动报告或投资判断。
 - MVP closeout accepted 只表示本地阅读工具 MVP 已通过固定测试；不表示 release ready、CI ready、真实 LLM ready、CLI/UI ready、batch queue ready 或字段抽取 ready。
 
 ## CIC-lite Rules
@@ -78,7 +95,7 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## Next Action
 
-完成本次 docs-only Slice 8A design sync 后，下一步才可派发 Slice 8A implementation。Implementation Agent 只允许实现 fake/injected LLM tool-loop contract 与对应测试；不得接真实 LLM provider、不得新增 CLI 子命令、不得改 repository private loader contract、不得把字段抽取、自动报告或投资判断混入本 slice。
+Slice 8B 当前已完成 local closeout。下一步只能在用户授权后 stage/commit 当前 accepted diff，或另行裁决后进入后续 slice。不得把 live DeepSeek smoke、`fund-checklist ask`、Mimo / MiMo、多 provider、richer QA/eval、自动报告或投资判断混入本 closeout。
 
 ## Implementation Slices
 
@@ -91,6 +108,7 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 6. Persistent repository：filesystem JSON catalog + repository-backed loader，支持 completed report 跨进程恢复为 reading tools 可用文档。
 7. CLI packaging / command entry polish：打包配置安装 `fund-checklist` console script，README 主命令 `uv run fund-checklist read ...` 可用，并保留 `python -m fund_agent.cli.main` fallback。
 8A. Fake/injected LLM tool-loop contract：用 fake client 验证 LLM 工具调用闭环、citation enforcement 和 fail-closed 行为；不接真实 provider，不新增用户 CLI 面。
+8B. DeepSeek real LLM adapter behind existing contract：已实现 DeepSeek OpenAI-compatible adapter 进入 `LlmClientProtocol`，默认测试不联网，所有输出仍经 8A runner/enforcement。
 
 ## MVP Acceptance Matrix
 
@@ -199,6 +217,53 @@ Slice 8A 不做：
 - downloader、batch、release readiness。
 - 字段抽取、自动报告、投资判断。
 
+## Slice 8B Accepted Boundary
+
+目标：
+
+- 在不改变 8A runner/enforcement 的前提下接入一个真实 LLM provider adapter。
+- 验证真实 provider 输出只能被解析为受控 `ToolCall` 或 `FinalAnswer`。
+- 将 provider 错误、malformed response、未知工具、越权工具、无 evidence final answer 全部稳定映射为 fail-closed。
+
+最小实现形态：
+
+- `DeepSeekLlmClient` 或等价的 DeepSeek-only provider client。
+- provider client 实现既有 `LlmClientProtocol`。
+- provider request 使用 DeepSeek OpenAI-compatible chat completions 形态，只包含系统约束、用户问题和受控 tool schema；不得包含 raw Docling JSON、本地路径、cache path、repository/private loader 或 `local_import_id`。
+- provider response 必须经结构化解析后进入 8A `LlmToolLoopRunner`。
+- API key 仅从 `DEEPSEEK_API_KEY` 读取；缺失时返回稳定 failure，不触发默认联网。
+- `DEEPSEEK_BASE_URL` 默认 `https://api.deepseek.com`。
+- `DEEPSEEK_MODEL` 可选；测试只验证传参与解析，不依赖真实模型名称。
+- 不新增 SDK 依赖；HTTP/transport 必须可注入，默认测试使用 fake transport。
+
+失败映射：
+
+- API key 缺失 -> `unavailable`
+- provider network/timeout -> `unavailable`
+- provider rate limit -> `unavailable`
+- provider auth rejected -> `unavailable`
+- provider response 非法 JSON 或无法解析 -> `llm_malformed_response`
+- provider 请求未知工具或越权工具 -> 复用 8A fail-closed 逻辑
+- provider final answer 缺 citation 或缺 evidence -> 复用 8A fail-closed 逻辑
+
+测试口径：
+
+- 默认 pytest 只使用 fake transport / injected provider response，不访问网络。
+- live smoke 只能作为显式 opt-in 命令，不进入默认 CI 或本地最小 gate。
+- deterministic `MinimalFundDocumentAgent`、fake 8A loop 和 `fund-checklist read` 路径不得回退。
+
+Slice 8B 不做：
+
+- 新增 `fund-checklist ask` 或其它 CLI 用户入口。
+- streaming。
+- Mimo / MiMo 或多 provider matrix。
+- 新增 SDK 依赖，除非 Controller 先裁决允许改 `pyproject.toml` / `uv.lock`。
+- prompt framework 或复杂 planner。
+- richer QA/eval matrix。
+- 自动报告、字段抽取、投资判断。
+- release readiness、batch、downloader。
+- repository schema 或 private loader 改造。
+
 ## Stop Conditions
 
 - 需要新增或改变 document_id / report_type / share_class 规则。
@@ -209,6 +274,8 @@ Slice 8A 不做：
 - 计划只用 fake fixture 证明 production conversion path。
 - 文档声称当前未实现能力已完成。
 - Slice 8A 实现计划直接接真实 LLM provider、增加 CLI ask、或让 LLM adapter 读取 repository/private loader。
+- Slice 8B 实现计划绕过 8A runner/enforcement、默认联网、记录 API key、增加 CLI ask、增加 Mimo / MiMo 或多 provider、或让 provider prompt 接收 raw Docling/private loader。
+- Slice 8B 实现计划新增 SDK 依赖但未先获得 Controller 裁决。
 - 计划把 `基金年报/`、`.venv/`、Docling/model cache 或 secret 文件纳入 git。
 - Slice 2 conversion smoke 需要无版本约束地升级 Docling 或绕过 `uv.lock`。
 
@@ -249,13 +316,13 @@ uv run python -m fund_agent.cli.main read --help
 uv run pytest tests/fund/cli/test_cli.py
 ```
 
-Post-MVP Slice 8A 预期最小验证命令：
+Post-MVP Slice 8A 验证命令：
 
 ```bash
 uv run pytest tests/fund/agent/test_llm_tool_loop.py tests/fund/agent/test_minimal_tool_loop.py tests/fund/cli/test_cli.py
 ```
 
-Slice 8A 预期测试缺口：
+Slice 8A 已覆盖测试范围：
 
 - fake LLM 正常调用 `search_document` / `read_section` 后回答并携带 citation。
 - fake LLM 调用 `read_table` 后回答表格问题并携带 table citation。
@@ -263,6 +330,25 @@ Slice 8A 预期测试缺口：
 - fake LLM 请求未知工具或越权工具时 fail-closed。
 - 输出不泄漏 raw Docling JSON、本地路径、cache path 或 `local_import_id`。
 - deterministic `fund-checklist read` 旧路径不回退。
+
+Post-MVP Slice 8B 验证命令：
+
+```bash
+uv run pytest tests/fund/agent/test_real_llm_adapter.py tests/fund/agent/test_llm_tool_loop.py tests/fund/agent/test_minimal_tool_loop.py tests/fund/cli/test_cli.py
+git diff --check
+```
+
+Slice 8B 已覆盖测试范围：
+
+- provider adapter 使用 injected fake transport，将合法 tool-call response 解析为 `ToolCall` 并进入 8A runner。
+- provider adapter 使用 injected fake transport，将合法 final-answer response 解析为 `FinalAnswer`，并保留 8A citation/evidence enforcement。
+- DeepSeek adapter 使用 `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL` 组装 OpenAI-compatible request，默认 base URL 为 `https://api.deepseek.com`。
+- API key 缺失、network/timeout、auth/rate-limit 类错误稳定映射为 `unavailable`。
+- malformed provider response 稳定映射为 `llm_malformed_response` 或等价稳定 failure code。
+- provider 请求未知工具、越权工具、无 citation answer 或无 evidence answer 时 fail-closed。
+- 默认测试不访问网络，不读取真实 API key，不泄漏 secret。
+- 默认测试不依赖真实 DeepSeek model 值。
+- deterministic read CLI、minimal deterministic Agent 和 fake 8A loop 旧测试不回退。
 
 最近已知结果：
 
@@ -277,4 +363,10 @@ uv sync: passed, no skipped-entrypoint warning
 uv run fund-checklist read --help: passed
 uv run python -m fund_agent.cli.main read --help: passed
 Full local regression before commit: 35 passed, 1 warning
+Slice 8A targeted: 20 passed
+Slice 8A broader regression: 33 passed
+Slice 8A commit: f53dac2 Add fake LLM tool loop contract
+Slice 8B targeted: 36 passed
+Slice 8B review: MiMo ACCEPTED
+Slice 8B git diff --check: passed
 ```

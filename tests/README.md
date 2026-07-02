@@ -72,7 +72,7 @@ uv run pytest tests/fund/cli/test_cli.py
 
 Slice 7 只验证 documented console script entrypoint 和 Python module fallback；不新增 CLI 子命令，不做 release packaging、installer、shell completion、downloader、batch 或 true LLM。
 
-Post-MVP Slice 8A fake/injected LLM tool-loop 预期测试范围：
+Post-MVP Slice 8A fake/injected LLM tool-loop 测试范围：
 
 - fake LLM 正常调用 `search_document` / `read_section` 后回答，并携带 section citation。
 - fake LLM 调用 `list_tables` / `read_table` 后回答表格问题，并携带 table citation。
@@ -81,10 +81,43 @@ Post-MVP Slice 8A fake/injected LLM tool-loop 预期测试范围：
 - fake LLM 输出不泄漏 raw Docling JSON、本地路径、Docling cache path 或 `local_import_id`。
 - deterministic `fund-checklist read` CLI 旧路径不回退。
 
-Slice 8A 预期最小验证命令：
+Slice 8A 最小验证命令：
 
 ```bash
 uv run pytest tests/fund/agent/test_llm_tool_loop.py tests/fund/agent/test_minimal_tool_loop.py tests/fund/cli/test_cli.py
 ```
 
+当前已知结果：`20 passed`。
+
+Slice 8A broader regression：
+
+```bash
+uv run pytest tests/fund/document_tools/test_persistent_repository.py tests/fund/document_tools/test_service.py tests/fund/agent/test_minimal_tool_loop.py tests/fund/agent/test_llm_tool_loop.py tests/fund/cli/test_cli.py
+```
+
+当前已知结果：`33 passed`。
+
 Slice 8A 不测试真实 OpenAI / Claude / 外部模型 API、provider auth、streaming、rate limit、cost tracking、prompt framework、`fund-checklist ask`、字段抽取、自动报告、投资判断或 release readiness。
+
+Post-MVP Slice 8B DeepSeek real LLM adapter 测试范围：
+
+- DeepSeek adapter 使用 injected fake transport，将合法 tool-call response 解析为 `ToolCall` 并进入 8A runner。
+- DeepSeek adapter 使用 injected fake transport，将合法 final-answer response 解析为 `FinalAnswer`，并保留 8A citation/evidence enforcement。
+- DeepSeek adapter 使用 `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL` 组装 OpenAI-compatible request，默认 base URL 为 `https://api.deepseek.com`。
+- API key 缺失、network/timeout、auth/rate-limit 类错误稳定映射为 `unavailable`。
+- malformed provider response 稳定映射为 `llm_malformed_response` 或等价稳定 failure code。
+- provider 请求未知工具、越权工具、无 citation answer 或无 evidence answer 时 fail-closed。
+- 默认测试不访问网络，不读取真实 API key，不泄漏 secret。
+- 默认测试不依赖真实 DeepSeek model 值。
+- deterministic `fund-checklist read` CLI、minimal deterministic Agent 和 fake 8A loop 旧路径不回退。
+
+Slice 8B 最小验证命令：
+
+```bash
+uv run pytest tests/fund/agent/test_real_llm_adapter.py tests/fund/agent/test_llm_tool_loop.py tests/fund/agent/test_minimal_tool_loop.py tests/fund/cli/test_cli.py
+git diff --check
+```
+
+当前已知结果：`36 passed`；`git diff --check` passed。
+
+Slice 8B 不测试 live DeepSeek 默认路径、Mimo / MiMo、streaming、多 provider matrix、prompt framework、`fund-checklist ask`、richer QA/eval、字段抽取、自动报告、投资判断或 release readiness。live provider smoke 必须显式 opt-in，不能进入默认 pytest gate。
