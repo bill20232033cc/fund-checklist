@@ -36,4 +36,15 @@ Post-MVP Slice 8B 当前实现：
 - provider key 缺失、auth、network、timeout、rate limit 映射为 `unavailable`；malformed JSON/schema parse failed 映射为 `llm_malformed_response`。
 - Slice 8B 不新增 `fund-checklist ask`，不做 streaming、Mimo / MiMo、多 provider matrix、prompt framework、richer QA/eval、自动报告、字段抽取或投资判断。
 
+Post-MVP Slice 8C 设计目标：
+
+- 新增 opt-in live DeepSeek smoke，验证真实 provider 能返回一次合法 `ToolCall` 或 `FinalAnswer`。
+- 默认 pytest no-network；只有 `FUND_CHECKLIST_RUN_LIVE_DEEPSEEK=1` 时启用 live smoke。
+- `DEEPSEEK_API_KEY` 缺失时 skip，不失败。
+- `DEEPSEEK_BASE_URL` 默认 `https://api.deepseek.com`，`DEEPSEEK_MODEL` 默认 `deepseek-v4-flash`。
+- live smoke 使用 fake/in-memory tool service 或现有测试 fixture，不跑真实 PDF、CLI、Docling conversion 或 repository-backed loader。
+- live smoke 最多 1 个 run、timeout 300 秒、最多 1 次 retry。
+- pytest output、trace、assert message 不得打印 API key；不得记录 raw provider response 或新增 artifact。
+- Slice 8C 不修改 production adapter；若 live test 暴露解析 bug，必须先停止并报告。
+
 未实现：Mimo / MiMo、多 provider、prompt 编排、自动报告、投资判断、字段抽取、长期会话、`fund-checklist ask`。

@@ -171,6 +171,7 @@ PdfSourceProvider
 - Post-MVP Slice 5 扩展为 table-aware retrieval / citation loop：先读取命中章节，再通过 `list_tables` / `read_table` 读取同 section、同页或相邻页候选表格，按 query 命中和 proximity 排序；成功时 `answer` 只由 section/table tool result 生成，`citations` 同时包含 section/table citation。
 - Post-MVP Slice 8A 已实现 fake/injected LLM tool-loop contract：LLM adapter 只能通过受控 reading tools 取得事实，不得直接读取 repository/private loader、raw Docling JSON 或本地路径。
 - Post-MVP Slice 8B 已实现为 DeepSeek real LLM adapter behind existing contract：真实 provider 只能实现 `LlmClientProtocol`，所有输出仍经 8A runner/enforcement；Mimo / MiMo 与多 provider 后置。
+- Post-MVP Slice 8C 设计为 opt-in live DeepSeek smoke：默认 pytest no-network，只在 `FUND_CHECKLIST_RUN_LIVE_DEEPSEEK=1` 且存在 `DEEPSEEK_API_KEY` 时验证一次真实 provider 输出。
 - `AgentRunResult` 至少包含 `answer`、`citations`、`tool_trace`、`failure`。
 - `ToolTraceEntry` 至少包含 `tool_name`、`arguments`、`result_kind`、`failure_code`。
 - `search_document` 无命中时不猜测章节，返回 `AgentRunResult.failure`。
@@ -549,6 +550,19 @@ Post-MVP Slice 8B 的 DeepSeek adapter 已按 8A contract 后置实现：
 - 真实 provider 的未知工具、越权工具、无 citation final answer 或无 evidence final answer 仍复用 8A enforcement。
 - Slice 8B 不新增 `fund-checklist ask`、streaming、Mimo / MiMo、多 provider matrix、prompt framework、richer QA/eval、字段抽取、自动报告或投资判断。
 
+Post-MVP Slice 8C 的 live smoke 只验证真实 DeepSeek provider 的最小可用性：
+
+- 默认 pytest 不联网；live smoke 必须由 `FUND_CHECKLIST_RUN_LIVE_DEEPSEEK=1` 显式启用。
+- `DEEPSEEK_API_KEY` 缺失时 skip，不失败。
+- `DEEPSEEK_BASE_URL` 默认 `https://api.deepseek.com`，可覆盖。
+- `DEEPSEEK_MODEL` 默认 `deepseek-v4-flash`，可覆盖。
+- live smoke 使用 fake/in-memory tool service 或现有测试 fixture，不跑真实 PDF、不跑 CLI、不触发 Docling conversion、不使用 repository-backed loader。
+- live smoke 最多 1 个 live run，timeout 300 秒，最多 1 次 retry，不做批量问题。
+- opt-in 后 provider 返回不可解析、8A enforcement fail、network/429/auth error 均为 test fail。
+- pytest output、trace、assert message 不得打印 API key；不得记录 provider raw response 到文件，不新增 artifact。
+- Slice 8C 不修改 production adapter；若 live test 暴露解析 bug，必须先停止并报告。
+- Slice 8C 不做 `fund-checklist ask`、真实 PDF/Docling/repository e2e、Mimo / MiMo、多 provider、streaming、retry/backoff hardening、richer QA/eval、prompt injection hardening、自动报告或投资判断。
+
 ### 8.3 Locator 最低标准
 
 MVP 采用宽松 locator 硬标准：
@@ -677,12 +691,12 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## 9. 已关闭裁决项
 
-MVP plan 已关闭。当前已完成到 Post-MVP Slice 8B；Slice 8B 的 accepted 方向是 DeepSeek real LLM adapter behind existing contract。
+MVP plan 已关闭。当前已完成到 Post-MVP Slice 8B；Slice 8C 的已裁决方向是 opt-in live DeepSeek smoke。
 
 ## 10. 下一步最小可验证问题
 
 下一步只应验证一个问题：
 
 ```text
-后续若继续推进，应先裁决 live DeepSeek smoke、CLI ask、Mimo / MiMo、多 provider 或 richer QA/eval 中的唯一下一 slice；不得把这些混入 Slice 8B accepted closeout。
+下一步只应验证一个问题：真实 DeepSeek provider 在显式 opt-in live smoke 中能否返回一次合法 `ToolCall` 或 `FinalAnswer`，并最终经 8A runner/enforcement。CLI ask、Mimo / MiMo、多 provider、richer QA/eval 仍不得混入 Slice 8C。
 ```

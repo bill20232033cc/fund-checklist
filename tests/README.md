@@ -121,3 +121,31 @@ git diff --check
 当前已知结果：`36 passed`；`git diff --check` passed。
 
 Slice 8B 不测试 live DeepSeek 默认路径、Mimo / MiMo、streaming、多 provider matrix、prompt framework、`fund-checklist ask`、richer QA/eval、字段抽取、自动报告、投资判断或 release readiness。live provider smoke 必须显式 opt-in，不能进入默认 pytest gate。
+
+Post-MVP Slice 8C opt-in live DeepSeek smoke 预期测试范围：
+
+- 默认 pytest no-network；未设置 `FUND_CHECKLIST_RUN_LIVE_DEEPSEEK=1` 时 live test 自动 skip。
+- 设置 opt-in 但缺 `DEEPSEEK_API_KEY` 时 skip，不失败。
+- `DEEPSEEK_BASE_URL` 默认 `https://api.deepseek.com`，可覆盖。
+- `DEEPSEEK_MODEL` 默认 `deepseek-v4-flash`，可覆盖。
+- 使用 fake/in-memory tool service 或现有测试 fixture，不跑真实 PDF、CLI、Docling conversion 或 repository-backed loader。
+- live DeepSeek 返回一次合法 `ToolCall` 或合法 `FinalAnswer`，并最终进入 8A runner/enforcement。
+- live smoke 最多 1 个 run、timeout 300 秒、最多 1 次 retry。
+- opt-in 后 provider 返回不可解析、8A enforcement fail、network/429/auth error 均为 test fail。
+- pytest output、trace、assert message 不泄漏 API key。
+- 不记录 provider raw response，不新增 artifact。
+
+Slice 8C 预期默认验证命令：
+
+```bash
+uv run pytest tests/fund/agent/test_deepseek_live_smoke.py tests/fund/agent/test_real_llm_adapter.py tests/fund/agent/test_llm_tool_loop.py tests/fund/agent/test_minimal_tool_loop.py tests/fund/cli/test_cli.py
+git diff --check
+```
+
+Slice 8C 预期 live smoke 命令：
+
+```bash
+FUND_CHECKLIST_RUN_LIVE_DEEPSEEK=1 DEEPSEEK_API_KEY=... uv run pytest tests/fund/agent/test_deepseek_live_smoke.py
+```
+
+Slice 8C 不测试 `fund-checklist ask`、真实 PDF/Docling/repository e2e、Mimo / MiMo、streaming、多 provider matrix、retry/backoff hardening、prompt injection hardening、richer QA/eval、字段抽取、自动报告、投资判断或 release readiness。

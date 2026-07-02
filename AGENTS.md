@@ -48,6 +48,7 @@ PDF
 - 若未来要走 `Docling JSON -> 字段抽取 -> 自动报告/判断`，必须另开设计与准入 gate，不得塞进阅读工具 MVP。
 - 真实 LLM 接入必须位于已实现的 fake/injected LLM tool-loop contract 之后；不得让 LLM provider、prompt 或 adapter 直接读取 raw PDF、raw Docling JSON、本地路径、cache path、repository/private loader、`local_import_id` 或 secret。
 - Post-MVP Slice 8B 只接 DeepSeek OpenAI-compatible API；Mimo / MiMo 与多 provider 后置，不得在 8B 混入。
+- live provider smoke 必须显式 opt-in；默认 pytest 不得联网、不得读取真实 API key、不得记录 raw provider response 或新增 artifact。
 - 真实 LLM slice 默认不新增 CLI 用户入口；`fund-checklist ask`、streaming、多 provider、prompt framework、richer QA/eval 必须另开裁决。
 
 ## 身份与失败分类
