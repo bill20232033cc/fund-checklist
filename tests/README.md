@@ -1,9 +1,10 @@
 # Tests
 
-当前 Slice 1/2/3/4 与 CLI Read Command Gate 测试覆盖本地 PDF 导入、Docling conversion、DoclingDocumentStore、FundDocumentToolService、最小 Host/Agent tool loop 和 `fund-checklist read`：
+当前 Slice 1/2/3/4 与 CLI Read Command Gate 测试覆盖本地 PDF 导入、Docling conversion、DoclingDocumentStore、FundDocumentToolService、最小 Host/Agent tool loop、Service boundary 和 `fund-checklist read`：
 
 ```bash
 uv run pytest tests/fund/document_tools/test_service.py tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_docling_conversion.py tests/fund/document_tools/test_local_pdf_source.py
+uv run pytest tests/fund/service
 uv run pytest tests/fund/agent/test_minimal_tool_loop.py
 uv run pytest tests/fund/cli/test_cli.py
 ```
@@ -21,6 +22,7 @@ uv run pytest tests/fund/cli/test_cli.py
 - FundDocumentToolService 使用内存 `document_id -> DoclingDocumentStore` registry 暴露七个 reading tools。
 - `list_reports` 返回 safe source summary，不暴露 `local_import_id`、本地路径或 Docling cache path。
 - `read_section`、`search_document`、`read_table` 返回 citation 和 locator，且不暴露 raw Docling JSON。
+- `search_document` 只命中 table caption 或 bounded table rows 时返回 table-backed result，并带 `table_ref`、locator、citation。
 - public tools 捕获 `DocumentToolError` 并返回 `ToolFailure`；unknown locator 返回 `not_found`。
 - `get_excerpt` 只接受 prior tools 返回的受控 `Locator`，按 section/table/excerpt locator kind 路由。
 - `MinimalFundDocumentAgent` 先执行 `search_document -> read_section`，再通过 `list_tables/read_table` 补充相关表格。
@@ -29,8 +31,10 @@ uv run pytest tests/fund/cli/test_cli.py
 - `ToolTraceEntry` 记录工具名、显式参数、success/failure 和可选失败码。
 - `search_document` 无命中时返回 `AgentRunResult.failure`，不猜测章节。
 - `MinimalHost` 只调用 Agent loop，不访问 Docling store、raw Docling JSON 或本地路径。
+- `FundReadingService` 覆盖 `import_local_report`、`read_local_report`、`list_reports`，负责编排 import、repository-backed load、必要时 Docling conversion fallback 和 Host 调用。
+- Service 调 Host 时只传 `document_id` 和 `query`；catalog 有 completed report 时复用，catalog record 指向的 Docling JSON 缺失时 fail-closed，不自动 repair/rebuild/reconvert。
 - `fund-checklist read` 使用 argparse 参数解析，只实现 read 子命令；console script entrypoint 指向 `fund_agent.cli.main:main`。
-- CLI happy path 串起 import、converter/store、service、host/agent；CLI 单测用 fake converter 或预置 Docling JSON，避免重复真实 Docling conversion。
+- CLI happy path 通过 `FundReadingService` 串起 reading use case；CLI 单测用 fake converter 或 fake Service，避免重复真实 Docling conversion。
 - CLI classified failure 输出稳定 failure code 且退出码为 2；unexpected exception 退出码为 1。
 - CLI 输出不得包含 raw Docling JSON、本地 cache path 或 `local_import_id`。
 
@@ -152,3 +156,38 @@ FUND_CHECKLIST_RUN_LIVE_DEEPSEEK=1 DEEPSEEK_API_KEY=... uv run pytest tests/fund
 ```
 
 Slice 8C 不测试 `fund-checklist ask`、真实 PDF/Docling/repository e2e、Mimo / MiMo、streaming、多 provider matrix、retry/backoff hardening、prompt injection hardening、richer QA/eval、字段抽取、自动报告、投资判断或 release readiness。
+
+Post-MVP Slice 9A Service boundary 测试范围：
+
+- `FundReadingService.read_local_report` 导入本地 PDF，必要时转换 Docling JSON，登记 completed report，并只用 `document_id` 和 `query` 调 Host。
+- `FundReadingService.import_local_report` 返回不含 path、Docling JSON path、cache path 或 `local_import_id` 的 safe summary。
+- completed catalog 已存在时复用 repository-backed store，不重复调用 converter。
+- completed catalog record 指向的 Docling JSON 缺失时返回 `unavailable`，不自动 repair / rebuild / reconvert。
+- `FundReadingService.list_reports` 返回安全 report summary，支持基本过滤；无 catalog 时返回空列表。
+- Agent `ToolFailure` 通过 Service result 保留原 failure code，CLI 继续映射为 exit code 2。
+- CLI 只保留 argparse 和 stdout/stderr 格式化，不直接装配 PDF provider、repository、converter、tool service 或 Host。
+
+Slice 9A 验证命令：
+
+```bash
+uv run pytest tests/fund/service tests/fund/cli/test_cli.py tests/fund/agent/test_minimal_tool_loop.py
+git diff --check
+```
+
+真实 CLI smoke：
+
+```bash
+uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '股票投资明细' --work-dir .fund_checklist_cli_smoke
+```
+
+Slice 9A 不测试 query normalization / synonym routing、`fund-checklist ask`、DeepSeek 真实 PDF CLI、8A/8B/8C contract 变更、UI、多轮会话、批量任务、指标计算、字段抽取、自动报告、投资判断或 release readiness。
+
+Post-MVP Slice 9B Evidence retrieval substrate 验证命令：
+
+```bash
+uv run pytest tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_service.py
+uv run pytest tests/fund/agent/test_minimal_tool_loop.py tests/fund/cli/test_cli.py
+git diff --check
+```
+
+Slice 9B 不测试 query normalization / synonym routing、deterministic Agent table-only consumption、CLI table-only query success、embedding、外部搜索、字段抽取、自动报告、投资判断或 release readiness。

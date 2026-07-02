@@ -8,6 +8,7 @@ import json
 from importlib.metadata import entry_points
 from pathlib import Path
 
+from fund_agent.agent import AgentRunResult
 from fund_agent.cli.main import (
     CLASSIFIED_FAILURE_EXIT_CODE,
     SUCCESS_EXIT_CODE,
@@ -15,10 +16,13 @@ from fund_agent.cli.main import (
     build_parser,
     run_cli,
 )
-from fund_agent.fund.document_tools.constants import DOCLING_JSON_SUFFIX
+from fund_agent.fund.document_tools.constants import DOCLING_JSON_SUFFIX, FailureCode
+from fund_agent.fund.document_tools.errors import DocumentToolError
+from fund_agent.fund.document_tools.models import ToolFailure
 from fund_agent.fund.document_tools.persistent_repository import CATALOG_FILENAME
 
 cli_module = importlib.import_module("fund_agent.cli.main")
+service_module = importlib.import_module("fund_agent.service.reading_service")
 
 
 def _write_pdf(path: Path) -> None:
@@ -110,10 +114,10 @@ def test_cli_parses_read_command_arguments(tmp_path: Path) -> None:
 
 
 def test_cli_happy_path_orchestrates_import_store_service_and_host(monkeypatch, tmp_path: Path) -> None:
-    """CLI happy path 必须串起导入、转换、store、service 和 Host/Agent。"""
+    """CLI happy path 必须通过 Service 串起读取链路并格式化输出。"""
 
     _FakeConverter.calls.clear()
-    monkeypatch.setattr(cli_module, "DoclingConverter", _FakeConverter)
+    monkeypatch.setattr(service_module, "DoclingConverter", _FakeConverter)
     pdf_path = tmp_path / "report.pdf"
     work_dir = tmp_path / "work"
     _write_pdf(pdf_path)
@@ -153,7 +157,7 @@ def test_cli_happy_path_orchestrates_import_store_service_and_host(monkeypatch, 
 
 
 def test_cli_reuses_existing_docling_json_without_converter(monkeypatch, tmp_path: Path) -> None:
-    """同 document_id 下已有 Docling JSON 时，CLI 不重复调用 converter。"""
+    """Service catalog 已有 completed report 时，CLI 不触发重复 converter。"""
 
     class _ForbiddenConverter:
         """若被调用则说明未复用既有 JSON。"""
@@ -164,7 +168,7 @@ def test_cli_reuses_existing_docling_json_without_converter(monkeypatch, tmp_pat
             raise AssertionError("converter should not run")
 
     _FakeConverter.calls.clear()
-    monkeypatch.setattr(cli_module, "DoclingConverter", _FakeConverter)
+    monkeypatch.setattr(service_module, "DoclingConverter", _FakeConverter)
     pdf_path = tmp_path / "report.pdf"
     work_dir = tmp_path / "work"
     _write_pdf(pdf_path)
@@ -188,7 +192,7 @@ def test_cli_reuses_existing_docling_json_without_converter(monkeypatch, tmp_pat
     assert first_stderr == ""
     assert _FakeConverter.calls
 
-    monkeypatch.setattr(cli_module, "DoclingConverter", _ForbiddenConverter)
+    monkeypatch.setattr(service_module, "DoclingConverter", _ForbiddenConverter)
 
     exit_code, stdout, stderr = _run(
         [
@@ -246,7 +250,7 @@ def test_cli_unexpected_exception_returns_exit_1(monkeypatch, tmp_path: Path) ->
 
         raise RuntimeError("private path /tmp/secret")
 
-    monkeypatch.setattr(cli_module, "LocalPdfSourceProvider", _raise_unexpected)
+    monkeypatch.setattr(cli_module, "FundReadingService", _raise_unexpected)
     pdf_path = tmp_path / "report.pdf"
     _write_pdf(pdf_path)
 
@@ -277,7 +281,7 @@ def test_cli_main_uses_process_streams(monkeypatch, tmp_path: Path, capsys) -> N
     """main() 可作为 script entry 调用并返回退出码。"""
 
     _FakeConverter.calls.clear()
-    monkeypatch.setattr(cli_module, "DoclingConverter", _FakeConverter)
+    monkeypatch.setattr(service_module, "DoclingConverter", _FakeConverter)
     pdf_path = tmp_path / "report.pdf"
     _write_pdf(pdf_path)
 
@@ -311,3 +315,86 @@ def test_cli_console_script_entrypoint_targets_main() -> None:
 
     assert matches
     assert matches[0].value == "fund_agent.cli.main:main"
+
+
+def test_cli_maps_service_agent_failure_to_exit_2(monkeypatch, tmp_path: Path) -> None:
+    """Service 返回 Agent ToolFailure 时，CLI 仍输出 classified failure 并返回 2。"""
+
+    class _FailingReadingService:
+        """返回可控 Agent failure 的 fake Service。"""
+
+        def read_local_report(self, request) -> object:
+            """返回失败 AgentRunResult，不读取 PDF 或 work-dir。"""
+
+            return type(
+                "Result",
+                (),
+                {
+                    "agent_result": AgentRunResult(
+                        answer="",
+                        citations=(),
+                        tool_trace=(),
+                        failure=ToolFailure(code=FailureCode.NOT_FOUND, message="未找到可读取的匹配章节"),
+                    )
+                },
+            )()
+
+    monkeypatch.setattr(cli_module, "FundReadingService", _FailingReadingService)
+    pdf_path = tmp_path / "report.pdf"
+    _write_pdf(pdf_path)
+
+    exit_code, stdout, stderr = _run(
+        [
+            "read",
+            "--pdf",
+            str(pdf_path),
+            "--fund-code",
+            "004393",
+            "--fund-name",
+            "安信企业价值优选混合型证券投资基金",
+            "--year",
+            "2024",
+            "--work-dir",
+            str(tmp_path / "work"),
+        ]
+    )
+
+    assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
+    assert stdout == ""
+    assert "failure_code=not_found" in stderr
+
+
+def test_cli_maps_service_document_error_to_exit_2(monkeypatch, tmp_path: Path) -> None:
+    """Service 抛出的已分类 DocumentToolError 必须保持 exit 2。"""
+
+    class _UnavailableReadingService:
+        """抛出可控 repository failure 的 fake Service。"""
+
+        def read_local_report(self, request) -> object:
+            """抛出稳定分类失败。"""
+
+            raise DocumentToolError(FailureCode.UNAVAILABLE, "Docling JSON 暂不可用")
+
+    monkeypatch.setattr(cli_module, "FundReadingService", _UnavailableReadingService)
+    pdf_path = tmp_path / "report.pdf"
+    _write_pdf(pdf_path)
+
+    exit_code, stdout, stderr = _run(
+        [
+            "read",
+            "--pdf",
+            str(pdf_path),
+            "--fund-code",
+            "004393",
+            "--fund-name",
+            "安信企业价值优选混合型证券投资基金",
+            "--year",
+            "2024",
+            "--work-dir",
+            str(tmp_path / "work"),
+        ]
+    )
+
+    assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
+    assert stdout == ""
+    assert "failure_code=unavailable" in stderr

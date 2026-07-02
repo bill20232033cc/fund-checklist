@@ -1,9 +1,9 @@
 # fund-checklist implementation-control
 
-更新时间：2026-07-02
-当前阶段：`POST_MVP_SLICE_8C_ACCEPTED`
+更新时间：2026-07-03
+当前阶段：`POST_MVP_SLICE_9A_ACCEPTED_9B_PLANNED`
 当前角色：control / CIC-lite controller
-当前目标：Slice 8C closeout。记录 opt-in live DeepSeek smoke 已实现、默认 gate 已通过并经 MiMo review `ACCEPTED`；不修改 production adapter、不新增 CLI 参数、不进入 richer QA/eval、release readiness、字段抽取、自动报告或投资判断。
+当前目标：Slice 9A Service boundary 已经 MiMo review `ACCEPTED`，可收口；下一步只设计并执行 Slice 9B evidence retrieval substrate。不得扩成 gateflow / phaseflow / release-readiness，不新增 plan artifact，不进入 template contract execution、calculation framework、`fund-checklist ask`、UI、自动报告或投资判断。
 
 ## 当前事实
 
@@ -94,6 +94,28 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - Slice 8C `git diff --check` 通过。
 - MiMo review 已按 Slice 8C 口径输出 `ACCEPTED`；MiMo 未重跑命令，review 基于 ProCodex 已报告结果与当前 diff。
 - MVP closeout accepted 只表示本地阅读工具 MVP 已通过固定测试；不表示 release ready、CI ready、真实 LLM ready、CLI/UI ready、batch queue ready 或字段抽取 ready。
+- Slice 9A 已实现 Service 层 use case boundary；现有 CLI 不再直接装配 PDF provider、repository、converter、tool service 或 Host。
+- Slice 9A 最小验证结果：`uv run pytest tests/fund/service tests/fund/cli/test_cli.py tests/fund/agent/test_minimal_tool_loop.py` -> `21 passed`。
+- Slice 9A 真实 CLI smoke 结果：exit code `0`，输出包含 `股票投资明细`、section/table citations 和 `search_document -> read_section -> list_tables -> read_table` trace。
+- Slice 9A `git diff --check` 通过；MiMo review verdict 为 `ACCEPTED`。
+- Post-MVP Slice 9A 裁决为 `FundReadingService` use case boundary。
+- Slice 9A 只新增/修改 Service boundary 和 CLI wiring：Service 负责参数校验、local PDF import、repository-backed load、必要时 Docling conversion fallback、Host 调用和稳定失败传播；CLI 只保留 argparse 与 stdout/stderr 格式化。
+- Slice 9A 首批 use case：`import_local_report`、`read_local_report`、`list_reports`。
+- Slice 9A Service 输入 DTO 可接收本地 PDF path；Service 不得把 path、work dir、repository/private loader、Docling JSON path、cache path、raw Docling JSON 或 `local_import_id` 传给 Host/Agent 或 public output。
+- Slice 9A Host 调用契约：只传 `document_id` 和 `query`。
+- Slice 9A repository 口径沿用 Slice 6：catalog 有 completed report 时复用；catalog missing 时允许 import + convert；catalog record 指向的 Docling JSON 缺失或不可读时 fail-closed，不自动 repair / rebuild / reconvert。
+- Slice 9A 不做 query normalization / synonym routing；`前十大持仓 -> 股票投资明细` 另开 gate。
+- Slice 9A 不新增 `fund-checklist ask`、不把 DeepSeek 接入真实 PDF CLI、不改 8A/8B/8C contract、不做 UI、多轮会话、反馈式阅读、批量任务、指标计算、字段抽取、自动报告或投资判断。
+- Post-MVP Slice 9B 裁决为 evidence retrieval substrate。
+- Slice 9B 目标是让 ToolService / Store 检索基底覆盖 section text、table caption 和 bounded table rows，返回可追溯的 table-backed evidence candidates / search results；它不是自然语言语义路由，不解决 synonym intent，不执行 template chapter contract，也不做计算。
+- Slice 9B 可以增强既有 `search_document` 的召回范围，但不得新增 raw Docling JSON 暴露，不得改变 public tool 的安全输出、locator/citation/redaction 约束。
+- Slice 9B 不扩展 failure code；命中颗粒度只落在成功侧 metadata，不把表格检索失败细分成新错误码。
+- `search_document` 无 evidence candidate 时仍返回空 tuple；Agent 将空 search result 转成 `not_found` 的既有行为不变。
+- Slice 9B 验收应证明：当 query 只出现在表格 caption 或 bounded table rows 中、而不在 section 正文中时，`search_document` 仍可返回带 `table_ref`、locator、citation、bounded excerpt 和 `match_kind` / 等价 `matched_field` 的 table-backed result。
+- table-backed result 的 `match_kind` / `matched_field` 取值必须是受控枚举，至少区分 `section_text`、`table_caption`、`table_row` 或等价组合；不得引入 confidence / semantic score。
+- table row 命中 excerpt 必须 bounded，只返回命中行或有限上下文，不返回整表；排序必须 deterministic / reproducible。
+- 失败分类沿用既有稳定 code：`schema_drift`、`not_found`、`unavailable`；不新增 `table_caption_not_found`、`table_row_not_found`、`ambiguous_table_match` 等细分错误码。
+- Slice 9B 不修改 deterministic Agent retrieval policy，不要求 Agent 自动 `read_table`，不要求 CLI table-only query 成功；这些能力另开 Slice 9C。
 
 ## CIC-lite Rules
 
@@ -110,7 +132,41 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## Next Action
 
-Slice 8C 当前已完成 local closeout。下一步只能在用户授权后 push 本地 ahead commits，或另行裁决后进入后续 slice。不得把 CLI ask、真实 PDF/Docling/repository e2e、Mimo / MiMo、多 provider、streaming、richer QA/eval、自动报告或投资判断混入本 closeout。
+执行 Slice 9B implementation + tests。Allowed write set：
+
+- `fund_agent/fund/document_tools/docling_store.py`
+- `fund_agent/fund/document_tools/service.py`
+- `fund_agent/fund/document_tools/models.py`，仅当既有 `SearchResult` / `Locator` 无法表达 table-backed search result 时允许
+- `tests/fund/document_tools/test_docling_store.py`
+- `tests/fund/document_tools/test_service.py`
+- `fund_agent/fund/README.md`
+- `tests/README.md`
+- 必要时同步 `docs/design.md` / `docs/implementation-control.md`
+
+禁止事项：
+
+- 禁止新增 query normalization / synonym routing。
+- 禁止把 `前十大持仓` 映射为 `股票投资明细`；该能力另开 semantic routing gate。
+- 禁止修改 deterministic Agent retrieval policy；table-backed result 的 Agent 消费另开 Slice 9C。
+- 禁止要求 CLI table-only query 成功；CLI smoke 只作为旧路径不回退检查。
+- 禁止新增 `fund-checklist ask` 或 CLI 参数。
+- 禁止接真实 LLM、embedding、外部搜索服务。
+- 禁止执行 template-informed intent routing、chapter contract execution、calculation framework、report audit、字段抽取、自动报告或投资判断。
+- 禁止暴露 raw Docling JSON、本地 PDF path、cache path、repository/private loader 或 `local_import_id`。
+
+最小验证命令：
+
+```bash
+uv run pytest tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_service.py
+```
+
+回归验证命令：
+
+```bash
+uv run pytest tests/fund/agent/test_minimal_tool_loop.py tests/fund/cli/test_cli.py
+```
+
+验收点：query 只命中表格内容或表格标题时，`search_document` 返回 table-backed result，并带 `table_ref`、locator、citation、bounded excerpt 和 `match_kind` / `matched_field`；无 evidence candidate 时仍返回空 tuple，failure code 不扩展；旧 deterministic Agent 和 CLI 测试不回退。
 
 ## Implementation Slices
 
@@ -125,6 +181,8 @@ Slice 8C 当前已完成 local closeout。下一步只能在用户授权后 push
 8A. Fake/injected LLM tool-loop contract：用 fake client 验证 LLM 工具调用闭环、citation enforcement 和 fail-closed 行为；不接真实 provider，不新增用户 CLI 面。
 8B. DeepSeek real LLM adapter behind existing contract：已实现 DeepSeek OpenAI-compatible adapter 进入 `LlmClientProtocol`，默认测试不联网，所有输出仍经 8A runner/enforcement。
 8C. Opt-in live DeepSeek smoke：已实现只在显式环境变量启用时验证真实 DeepSeek 返回一次合法 `ToolCall` 或 `FinalAnswer`，最终仍经 8A runner；默认 gate no-network。
+9A. Service boundary：新增 `FundReadingService` use case boundary，把 CLI 编排迁入 Service；CLI 行为、exit code、redaction、repository reuse 和 deterministic Agent loop 不回退，不做 query routing 或 LLM/UI 能力扩展。
+9B. Evidence retrieval substrate：增强 ToolService / Store 检索基底，使 section text、table caption、bounded table rows 都能成为可引用 search result；不修改 Agent retrieval policy，不要求 CLI table-only query 成功，不做 synonym intent、template contract、calculation、LLM ask 或报告生成。
 
 ## MVP Acceptance Matrix
 

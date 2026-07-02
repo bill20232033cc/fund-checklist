@@ -7,24 +7,15 @@ import sys
 from pathlib import Path
 from typing import Sequence, TextIO
 
-from fund_agent.agent import MinimalFundDocumentAgent
-from fund_agent.fund.document_tools.constants import DOCLING_JSON_SUFFIX, FailureCode, ReportType
-from fund_agent.fund.document_tools.docling_converter import DoclingConverter, make_docling_json_ref
-from fund_agent.fund.document_tools.docling_store import DoclingDocumentStore
 from fund_agent.fund.document_tools.errors import DocumentToolError
-from fund_agent.fund.document_tools.local_pdf_source import LocalPdfSourceProvider
-from fund_agent.fund.document_tools.models import PdfImportRequest, ToolFailure
-from fund_agent.fund.document_tools.persistent_repository import CATALOG_FILENAME, FilesystemReportRepository
-from fund_agent.fund.document_tools.service import FundDocumentToolService
-from fund_agent.host import MinimalHost
+from fund_agent.fund.document_tools.models import ToolFailure
+from fund_agent.service import FundReadingService, ReadLocalReportRequest
 
 SUCCESS_EXIT_CODE = 0
 UNEXPECTED_FAILURE_EXIT_CODE = 1
 CLASSIFIED_FAILURE_EXIT_CODE = 2
 DEFAULT_QUERY = "基金经理"
 DEFAULT_WORK_DIR = ".fund_checklist"
-PDF_BLOB_DIRNAME = "pdf_blobs"
-DOCLING_JSON_DIRNAME = "docling_json"
 UNEXPECTED_FAILURE_MESSAGE = "unexpected_error: CLI 执行失败"
 
 
@@ -108,7 +99,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _run_read_command(args: argparse.Namespace, *, stdout: TextIO, stderr: TextIO) -> int:
-    """执行 local PDF 到最小 Agent loop 的阅读链路。
+    """调用 Service 执行 local PDF 阅读链路。
 
     参数:
         args: argparse 解析出的 read 参数。
@@ -119,62 +110,28 @@ def _run_read_command(args: argparse.Namespace, *, stdout: TextIO, stderr: TextI
         成功返回 0；Agent 返回 ToolFailure 时返回 2。
 
     异常:
-        DocumentToolError: PDF、Docling conversion 或 parser health 失败时抛出已分类失败。
+        DocumentToolError: PDF、Docling conversion、repository 或 parser health 失败时抛出已分类失败。
     """
 
-    work_dir = Path(args.work_dir)
-    provider = LocalPdfSourceProvider(work_dir / PDF_BLOB_DIRNAME)
-    import_result = provider.import_pdf(
-        PdfImportRequest(
-            path=Path(args.pdf),
+    service = FundReadingService()
+    result = service.read_local_report(
+        ReadLocalReportRequest(
+            pdf_path=Path(args.pdf),
             fund_code=args.fund_code,
             fund_name=args.fund_name,
             year=args.year,
-            report_type=ReportType.ANNUAL_REPORT,
+            query=args.query,
+            work_dir=Path(args.work_dir),
             share_class=args.share_class,
         )
     )
-
-    docling_root = work_dir / DOCLING_JSON_DIRNAME
-    repository = FilesystemReportRepository(
-        catalog_path=work_dir / CATALOG_FILENAME,
-        blob_root=work_dir / PDF_BLOB_DIRNAME,
-        docling_json_root=docling_root,
-    )
-    try:
-        store = repository.load_store(import_result.identity.document_id)
-    except DocumentToolError as exc:
-        if exc.code is not FailureCode.NOT_FOUND:
-            raise
-        json_path = _docling_json_path(docling_root, import_result.identity.document_id)
-        if not json_path.exists():
-            converter = DoclingConverter(docling_root)
-            converter.convert_pdf(
-                identity=import_result.identity,
-                pdf_bytes=provider.blob_store.read_pdf(import_result.stored_blob_ref),
-            )
-        store = DoclingDocumentStore(identity=import_result.identity, json_path=json_path)
-        repository.record_completed_report(
-            identity=import_result.identity,
-            stored_blob_ref=import_result.stored_blob_ref,
-            docling_json_ref=make_docling_json_ref(import_result.identity.document_id),
-            parser_health=store.parser_health,
-        )
-    service = FundDocumentToolService({import_result.identity.document_id: store})
-    host = MinimalHost(MinimalFundDocumentAgent(service))
-    result = host.run(document_id=import_result.identity.document_id, query=args.query)
-    if result.failure is not None:
-        _write_classified_failure(result.failure, stderr)
+    agent_result = result.agent_result
+    if agent_result.failure is not None:
+        _write_classified_failure(agent_result.failure, stderr)
         return CLASSIFIED_FAILURE_EXIT_CODE
 
-    _write_success_output(result, stdout)
+    _write_success_output(agent_result, stdout)
     return SUCCESS_EXIT_CODE
-
-
-def _docling_json_path(docling_root: Path, document_id: str) -> Path:
-    """返回 CLI 本地工作目录中的受控 Docling JSON 路径。"""
-
-    return docling_root / document_id / f"{document_id}{DOCLING_JSON_SUFFIX}"
 
 
 def _write_success_output(result: object, stdout: TextIO) -> None:
