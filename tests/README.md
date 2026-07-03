@@ -22,7 +22,8 @@ uv run pytest tests/fund/cli/test_cli.py
 - FundDocumentToolService 使用内存 `document_id -> DoclingDocumentStore` registry 暴露七个 reading tools。
 - `list_reports` 返回 safe source summary，不暴露 `local_import_id`、本地路径或 Docling cache path。
 - `read_section`、`search_document`、`read_table` 返回 citation 和 locator，且不暴露 raw Docling JSON。
-- `search_document` 只命中 table caption 或 bounded table rows 时返回 table-backed result，并带 `table_ref`、locator、citation。
+- `search_document` 只命中 table caption 或 bounded table rows 时返回 table-backed result，并带 `table_ref`、locator、citation 和受控 `match_kind`。
+- table row 命中摘录只返回命中行的有界文本，不返回整表。
 - public tools 捕获 `DocumentToolError` 并返回 `ToolFailure`；unknown locator 返回 `not_found`。
 - `get_excerpt` 只接受 prior tools 返回的受控 `Locator`，按 section/table/excerpt locator kind 路由。
 - `MinimalFundDocumentAgent` 先执行 `search_document -> read_section`，再通过 `list_tables/read_table` 补充相关表格。

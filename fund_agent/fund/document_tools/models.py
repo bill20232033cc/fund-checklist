@@ -9,6 +9,7 @@ from fund_agent.fund.document_tools.constants import (
     LocatorKind,
     ReportType,
     SourceKind,
+    StrValueEnum,
 )
 
 
@@ -315,6 +316,14 @@ class TableContent:
     citation: Citation
 
 
+class SearchMatchKind(StrValueEnum):
+    """搜索命中字段的稳定公共枚举。"""
+
+    SECTION_TEXT = "section_text"
+    TABLE_CAPTION = "table_caption"
+    TABLE_ROW = "table_row"
+
+
 @dataclass(frozen=True)
 class SearchResult:
     """文档搜索结果。
@@ -324,8 +333,10 @@ class SearchResult:
         section_ref: 命中的章节引用。
         title: 命中章节标题。
         excerpt: 有界摘录。
-        locator: excerpt locator。
+        locator: section excerpt 或 table locator。
         citation: citation metadata。
+        match_kind: 命中字段的稳定枚举。
+        table_ref: 命中的表格引用；章节命中时为 None。
 
     返回:
         上层可安全使用的搜索投影。
@@ -340,6 +351,8 @@ class SearchResult:
     excerpt: str
     locator: Locator
     citation: Citation
+    match_kind: SearchMatchKind = SearchMatchKind.SECTION_TEXT
+    table_ref: str | None = None
 
 
 @dataclass(frozen=True)

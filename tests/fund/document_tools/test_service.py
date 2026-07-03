@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from fund_agent.fund.document_tools.constants import FailureCode, LocatorKind, ReportType, SourceKind
 from fund_agent.fund.document_tools.docling_store import DoclingDocumentStore
-from fund_agent.fund.document_tools.models import Locator, ReportIdentity, ToolFailure
+from fund_agent.fund.document_tools.models import Locator, ReportIdentity, SearchMatchKind, ToolFailure
 from fund_agent.fund.document_tools.service import FundDocumentToolService
 
 
@@ -33,6 +33,50 @@ def _identity() -> ReportIdentity:
 def _write_docling_json(path: Path) -> None:
     """写入最小 Docling-shaped JSON，用于 service 行为测试。"""
 
+    table_cells = [
+        {
+            "start_row_offset_idx": 0,
+            "end_row_offset_idx": 1,
+            "start_col_offset_idx": 0,
+            "end_col_offset_idx": 1,
+            "text": "项目",
+        },
+        {
+            "start_row_offset_idx": 0,
+            "end_row_offset_idx": 1,
+            "start_col_offset_idx": 1,
+            "end_col_offset_idx": 2,
+            "text": "内容",
+        },
+        {
+            "start_row_offset_idx": 1,
+            "end_row_offset_idx": 2,
+            "start_col_offset_idx": 0,
+            "end_col_offset_idx": 1,
+            "text": "基金名称",
+        },
+        {
+            "start_row_offset_idx": 1,
+            "end_row_offset_idx": 2,
+            "start_col_offset_idx": 1,
+            "end_col_offset_idx": 2,
+            "text": "安信企业价值优选混合型证券投资基金",
+        },
+        {
+            "start_row_offset_idx": 2,
+            "end_row_offset_idx": 3,
+            "start_col_offset_idx": 0,
+            "end_col_offset_idx": 1,
+            "text": "表格行专属词",
+        },
+        {
+            "start_row_offset_idx": 2,
+            "end_row_offset_idx": 3,
+            "start_col_offset_idx": 1,
+            "end_col_offset_idx": 2,
+            "text": "行内证据",
+        },
+    ]
     payload = {
         "schema_name": "DoclingDocument",
         "texts": [
@@ -68,38 +112,9 @@ def _write_docling_json(path: Path) -> None:
                 "self_ref": "#/tables/0",
                 "label": "table",
                 "prov": [{"page_no": 2, "bbox": {"l": 10, "t": 20, "r": 30, "b": 40}}],
-                "captions": [],
+                "captions": [{"text": "表格标题专属词"}],
                 "data": {
-                    "table_cells": [
-                        {
-                            "start_row_offset_idx": 0,
-                            "end_row_offset_idx": 1,
-                            "start_col_offset_idx": 0,
-                            "end_col_offset_idx": 1,
-                            "text": "项目",
-                        },
-                        {
-                            "start_row_offset_idx": 0,
-                            "end_row_offset_idx": 1,
-                            "start_col_offset_idx": 1,
-                            "end_col_offset_idx": 2,
-                            "text": "内容",
-                        },
-                        {
-                            "start_row_offset_idx": 1,
-                            "end_row_offset_idx": 2,
-                            "start_col_offset_idx": 0,
-                            "end_col_offset_idx": 1,
-                            "text": "基金名称",
-                        },
-                        {
-                            "start_row_offset_idx": 1,
-                            "end_row_offset_idx": 2,
-                            "start_col_offset_idx": 1,
-                            "end_col_offset_idx": 2,
-                            "text": "安信企业价值优选混合型证券投资基金",
-                        },
-                    ]
+                    "table_cells": table_cells
                 },
             }
         ],
@@ -164,12 +179,61 @@ def test_search_document_returns_citation_and_locator(tmp_path) -> None:
     assert hit.section_ref == "section-0000"
     assert hit.locator.locator_kind is LocatorKind.EXCERPT
     assert hit.locator.section_ref == "section-0000"
+    assert hit.match_kind is SearchMatchKind.SECTION_TEXT
+    assert hit.table_ref is None
     assert hit.citation.document_id == _identity().document_id
     assert hit.citation.locator == hit.locator
     assert "基金经理" in hit.excerpt
     assert not isinstance(excerpt, ToolFailure)
     assert excerpt.locator == hit.locator
     assert excerpt.citation.locator == hit.locator
+
+
+def test_search_document_returns_table_backed_caption_result(tmp_path) -> None:
+    """search_document 只命中 table caption 时返回 table_ref、locator 和 citation。"""
+
+    service = _service(tmp_path)
+    results = service.search_document(_identity().document_id, "表格标题专属词")
+
+    assert not isinstance(results, ToolFailure)
+    assert len(results) == 1
+    hit = results[0]
+    excerpt = service.get_excerpt(_identity().document_id, hit.locator)
+    assert hit.section_ref == "section-0002"
+    assert hit.table_ref == "table-0000"
+    assert hit.locator.locator_kind is LocatorKind.TABLE
+    assert hit.locator.table_ref == "table-0000"
+    assert hit.citation.locator == hit.locator
+    assert hit.match_kind is SearchMatchKind.TABLE_CAPTION
+    assert "表格标题专属词" in hit.excerpt
+    assert not isinstance(excerpt, ToolFailure)
+    assert "表格标题专属词" in excerpt.text
+
+
+def test_search_document_returns_table_backed_row_result(tmp_path) -> None:
+    """search_document 只命中 bounded table rows 时返回 table-backed result。"""
+
+    service = _service(tmp_path)
+    results = service.search_document(_identity().document_id, "表格行专属词")
+
+    assert not isinstance(results, ToolFailure)
+    assert len(results) == 1
+    hit = results[0]
+    assert hit.table_ref == "table-0000"
+    assert hit.locator.locator_kind is LocatorKind.TABLE
+    assert hit.citation.locator.table_ref == "table-0000"
+    assert hit.match_kind is SearchMatchKind.TABLE_ROW
+    assert "表格行专属词" in hit.excerpt
+    assert "项目" not in hit.excerpt
+    assert "基金名称" not in hit.excerpt
+
+
+def test_search_document_returns_empty_tuple_without_evidence_candidate(tmp_path) -> None:
+    """无 evidence candidate 时 search_document 返回空 tuple，不扩展 failure code。"""
+
+    results = _service(tmp_path).search_document(_identity().document_id, "不存在的检索词")
+
+    assert results == ()
 
 
 def test_read_table_returns_table_ref_and_section_ref(tmp_path) -> None:

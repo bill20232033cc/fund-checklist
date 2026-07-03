@@ -358,7 +358,11 @@ def _replace_citation_locator(citation: Citation, locator: Locator) -> Citation:
 def _table_to_text(table: TableContent) -> str:
     """把二维表格行转换为有界摘录前的纯文本投影。"""
 
-    return "\n".join("\t".join(cell for cell in row) for row in table.rows)
+    parts: list[str] = []
+    if table.caption:
+        parts.append(table.caption)
+    parts.extend("\t".join(cell for cell in row) for row in table.rows)
+    return "\n".join(parts)
 
 
 def _bounded(text: str, max_chars: int) -> tuple[str, bool]:

@@ -22,12 +22,16 @@ from fund_agent.fund.document_tools.models import (
     Locator,
     ParserHealth,
     ReportIdentity,
+    SearchMatchKind,
     SearchResult,
     SectionContent,
     SectionSummary,
     TableContent,
     TableSummary,
 )
+
+_TABLE_SEARCH_SOURCE_ORDER_OFFSET = 10_000
+_TABLE_SEARCH_ROW_ORDER_OFFSET = 100
 
 
 @dataclass(frozen=True)
@@ -53,6 +57,20 @@ class _ParsedTable:
     rows: tuple[tuple[str, ...], ...]
     locator: Locator
     source_index: int
+
+
+@dataclass(frozen=True)
+class _SearchCandidate:
+    """内部搜索候选，统一 section 和 table 投影。"""
+
+    score: int
+    source_order: int
+    section_ref: str
+    table_ref: str | None
+    title: str
+    excerpt: str
+    locator: Locator
+    match_kind: SearchMatchKind
 
 
 class DoclingDocumentStore:
@@ -213,7 +231,7 @@ class DoclingDocumentStore:
         within_section_ref: str | None = None,
         max_results: int | None = None,
     ) -> tuple[SearchResult, ...]:
-        """在章节投影中做简单可解释文本检索。
+        """在章节和有界表格投影中做简单可解释文本检索。
 
         参数:
             query: 查询字符串。
@@ -232,40 +250,33 @@ class DoclingDocumentStore:
             return ()
         if within_section_ref is not None:
             self._find_section(within_section_ref)
-        candidates = [
-            section
-            for section in self._sections
-            if within_section_ref is None or section.section_ref == within_section_ref
-        ]
-        scored: list[tuple[int, _ParsedSection]] = []
-        for section in candidates:
-            score = section.text.count(normalized_query)
-            if score > 0:
-                scored.append((score, section))
-        scored.sort(key=lambda item: (-item[0], item[1].source_index))
+        candidates = _section_search_candidates(
+            self._identity.document_id,
+            self._sections,
+            normalized_query,
+            within_section_ref=within_section_ref,
+        )
+        candidates.extend(
+            _table_search_candidates(
+                self._tables_model,
+                normalized_query,
+                within_section_ref=within_section_ref,
+            )
+        )
+        candidates.sort(key=lambda item: (-item.score, item.source_order))
 
         results: list[SearchResult] = []
-        for rank, (_, section) in enumerate(scored[: max_results or DEFAULT_SEARCH_MAX_RESULTS], start=1):
-            excerpt = _excerpt(section.text, normalized_query, DEFAULT_SEARCH_EXCERPT_CHARS)
-            locator = Locator(
-                document_id=self._identity.document_id,
-                locator_kind=LocatorKind.EXCERPT,
-                section_ref=section.section_ref,
-                table_ref=None,
-                page_no=section.locator.page_no,
-                page_range=section.locator.page_range,
-                internal_ref=section.locator.internal_ref,
-                internal_ref_available=section.locator.internal_ref_available,
-                bbox=section.locator.bbox,
-            )
+        for rank, candidate in enumerate(candidates[: max_results or DEFAULT_SEARCH_MAX_RESULTS], start=1):
             results.append(
                 SearchResult(
                     rank=rank,
-                    section_ref=section.section_ref,
-                    title=section.title,
-                    excerpt=excerpt,
-                    locator=locator,
-                    citation=self._citation(locator),
+                    section_ref=candidate.section_ref,
+                    title=candidate.title,
+                    excerpt=candidate.excerpt,
+                    locator=candidate.locator,
+                    citation=self._citation(candidate.locator),
+                    match_kind=candidate.match_kind,
+                    table_ref=candidate.table_ref,
                 )
             )
         return tuple(results)
@@ -464,6 +475,124 @@ def _build_parser_health(
     return health
 
 
+def _section_search_candidates(
+    document_id: str,
+    sections: tuple[_ParsedSection, ...],
+    query: str,
+    *,
+    within_section_ref: str | None,
+) -> list[_SearchCandidate]:
+    """构造章节正文搜索候选。"""
+
+    candidates: list[_SearchCandidate] = []
+    for section in sections:
+        if within_section_ref is not None and section.section_ref != within_section_ref:
+            continue
+        score = section.text.count(query)
+        if score <= 0:
+            continue
+        locator = Locator(
+            document_id=document_id,
+            locator_kind=LocatorKind.EXCERPT,
+            section_ref=section.section_ref,
+            table_ref=None,
+            page_no=section.locator.page_no,
+            page_range=section.locator.page_range,
+            internal_ref=section.locator.internal_ref,
+            internal_ref_available=section.locator.internal_ref_available,
+            bbox=section.locator.bbox,
+        )
+        candidates.append(
+            _SearchCandidate(
+                score=score,
+                source_order=section.source_index,
+                section_ref=section.section_ref,
+                table_ref=None,
+                title=section.title,
+                excerpt=_excerpt(section.text, query, DEFAULT_SEARCH_EXCERPT_CHARS),
+                locator=locator,
+                match_kind=SearchMatchKind.SECTION_TEXT,
+            )
+        )
+    return candidates
+
+
+def _table_search_candidates(
+    tables: tuple[_ParsedTable, ...],
+    query: str,
+    *,
+    within_section_ref: str | None,
+) -> list[_SearchCandidate]:
+    """构造表格标题和有界行搜索候选。"""
+
+    candidates: list[_SearchCandidate] = []
+    for table in tables:
+        if within_section_ref is not None and table.section_ref != within_section_ref:
+            continue
+        candidates.extend(_table_caption_search_candidates(table, query))
+        candidates.extend(_table_row_search_candidates(table, query))
+    return candidates
+
+
+def _table_caption_search_candidates(table: _ParsedTable, query: str) -> list[_SearchCandidate]:
+    """构造表格标题搜索候选。"""
+
+    if not table.caption:
+        return []
+    score = table.caption.count(query)
+    if score <= 0:
+        return []
+    return [
+        _SearchCandidate(
+            score=score,
+            source_order=_table_source_order(table, row_index=None),
+            section_ref=table.section_ref or "",
+            table_ref=table.table_ref,
+            title=table.caption,
+            excerpt=_excerpt(table.caption, query, DEFAULT_SEARCH_EXCERPT_CHARS),
+            locator=table.locator,
+            match_kind=SearchMatchKind.TABLE_CAPTION,
+        )
+    ]
+
+
+def _table_row_search_candidates(table: _ParsedTable, query: str) -> list[_SearchCandidate]:
+    """构造有界表格行搜索候选，摘录只返回命中行。"""
+
+    candidates: list[_SearchCandidate] = []
+    for row_index, row in enumerate(table.rows[:DEFAULT_TABLE_MAX_ROWS]):
+        row_text = _table_row_text(row)
+        score = row_text.count(query)
+        if score <= 0:
+            continue
+        candidates.append(
+            _SearchCandidate(
+                score=score,
+                source_order=_table_source_order(table, row_index=row_index),
+                section_ref=table.section_ref or "",
+                table_ref=table.table_ref,
+                title=table.caption or f"表格 {table.table_ref}",
+                excerpt=_excerpt(row_text, query, DEFAULT_SEARCH_EXCERPT_CHARS),
+                locator=table.locator,
+                match_kind=SearchMatchKind.TABLE_ROW,
+            )
+        )
+    return candidates
+
+
+def _table_source_order(table: _ParsedTable, *, row_index: int | None) -> int:
+    """返回 table candidate 的稳定排序键。"""
+
+    base = _TABLE_SEARCH_SOURCE_ORDER_OFFSET + (table.source_index * _TABLE_SEARCH_ROW_ORDER_OFFSET)
+    return base if row_index is None else base + row_index + 1
+
+
+def _table_row_text(row: tuple[str, ...]) -> str:
+    """把一行表格单元格转换为安全检索文本。"""
+
+    return "\t".join(cell for cell in row if cell)
+
+
 def _locator_from_item(
     document_id: str,
     locator_kind: LocatorKind,
@@ -575,7 +704,7 @@ def _zero_based_int(value: object) -> int:
 
 
 def _table_caption(item: dict[str, object], ref_text: dict[str, str]) -> str | None:
-    """解析 captions[] 引用文本，缺失时返回 None。"""
+    """解析 captions[] 引用或直接文本，缺失时返回 None。"""
 
     captions = item.get("captions")
     if not isinstance(captions, list):
@@ -586,6 +715,12 @@ def _table_caption(item: dict[str, object], ref_text: dict[str, str]) -> str | N
             text = ref_text.get(caption["$ref"])
             if text:
                 values.append(text)
+        elif isinstance(caption, dict) and isinstance(caption.get("text"), str):
+            text = caption["text"].strip()
+            if text:
+                values.append(text)
+        elif isinstance(caption, str) and caption.strip():
+            values.append(caption.strip())
     return " ".join(values) or None
 
 

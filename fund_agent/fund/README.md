@@ -11,6 +11,8 @@
 - Content-Type、空内容、PDF magic bytes、原子写入失败均分类为稳定 failure code。
 - `DoclingConverter` 使用 `docling.document_converter.DocumentConverter.convert()` 把受控 PDF bytes 转成 Docling JSON，并把输出写到调用方指定的 tmp/cache 根目录。
 - `DoclingDocumentStore` 只从 Docling JSON 暴露受控 section、table、search、locator、citation 模型，不暴露 raw JSON、本地 PDF path 或 cache path。
+- `search_document` 的检索投影覆盖 section text、table caption 和 `DEFAULT_TABLE_MAX_ROWS` 内的 bounded table rows；table-backed result 返回 `table_ref`、table locator、citation 和受控 `match_kind`。
+- `match_kind` 取值固定为 `section_text`、`table_caption`、`table_row`；row 命中摘录只返回命中行的有界文本，不返回整表。
 - parser contract 当前使用 Docling JSON 顶层 `texts[]` 和 `tables[]`：章节来自 `texts[].label == "section_header"`，正文来自 `texts[].text`，locator 来自 `self_ref` 与 `prov[].page_no/bbox`，表格来自 `tables[].data.table_cells[]`。
 - parser health 要求存在可读文本、章节或全文替代索引，以及可检索文本；表格可为空。
 - `FundDocumentToolService` 使用内存 registry `document_id -> DoclingDocumentStore`，提供七个 public reading tools：`list_reports`、`list_sections`、`read_section`、`search_document`、`list_tables`、`read_table`、`get_excerpt`。
