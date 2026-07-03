@@ -32,6 +32,36 @@ DOCLING_JSON_DIRNAME = "docling_json"
 ConverterFactory = Callable[[Path], DoclingConverter]
 HostFactory = Callable[[FundDocumentToolService], MinimalHost]
 
+_MAX_QUERY_CANDIDATES = 3
+
+
+@dataclass(frozen=True)
+class _ControlledQueryProfile:
+    """Service 内部受控 query profile 配置。"""
+
+    name: str
+    aliases: tuple[str, ...]
+    fallback_candidates: tuple[str, ...]
+
+
+CONTROLLED_QUERY_PROFILES = (
+    _ControlledQueryProfile(
+        name="holdings_top10",
+        aliases=("前十大持仓", "重仓股", "持仓明细"),
+        fallback_candidates=("股票投资明细", "前十名股票投资明细"),
+    ),
+    _ControlledQueryProfile(
+        name="asset_allocation",
+        aliases=("资产配置", "资产组合"),
+        fallback_candidates=("期末基金资产组合情况", "基金资产组合情况"),
+    ),
+    _ControlledQueryProfile(
+        name="expenses",
+        aliases=("费用", "管理费", "托管费"),
+        fallback_candidates=("基金费用", "报告期内基金费用"),
+    ),
+)
+
 
 @dataclass(frozen=True)
 class ImportLocalReportRequest:
@@ -233,7 +263,11 @@ class FundReadingService:
         host = self._host_factory(tool_service)
         return ReadLocalReportResult(
             document_id=document_id,
-            agent_result=host.run(document_id=document_id, query=request.query),
+            agent_result=self._run_with_query_candidates(
+                host=host,
+                document_id=document_id,
+                query=request.query,
+            ),
         )
 
     def list_reports(self, request: ListReportsRequest) -> ListReportsResult:
@@ -325,6 +359,28 @@ class FundReadingService:
         )
         return store
 
+    def _run_with_query_candidates(
+        self,
+        *,
+        host: MinimalHost,
+        document_id: str,
+        query: str,
+    ) -> AgentRunResult:
+        """按 Service 受控 query profile 顺序调用既有 Host/Agent 路径。"""
+
+        last_not_found: AgentRunResult | None = None
+        for candidate_query in _candidate_queries_for_query(query):
+            result = host.run(document_id=document_id, query=candidate_query)
+            if result.failure is None:
+                return result
+            if result.failure.code is not FailureCode.NOT_FOUND:
+                return result
+            last_not_found = result
+
+        if last_not_found is None:
+            raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "controlled query routing 未生成候选 query")
+        return last_not_found
+
 
 def _default_host_factory(tool_service: FundDocumentToolService) -> MinimalHost:
     """按默认 deterministic Agent 装配最小 Host。"""
@@ -374,6 +430,44 @@ def _single_report_summary(document_id: str, store: DoclingDocumentStore) -> Rep
     if isinstance(reports, ToolFailure) or not reports:
         raise DocumentToolError(FailureCode.UNAVAILABLE, "report summary 暂不可用")
     return reports[0]
+
+
+def _candidate_queries_for_query(query: str) -> tuple[str, ...]:
+    """按 hardcoded profile 为用户 query 生成最多 3 个候选 query。"""
+
+    for profile in _validated_query_profiles():
+        if query in profile.aliases:
+            return _bounded_unique_candidates((query, *profile.fallback_candidates))
+    return (query,)
+
+
+def _validated_query_profiles() -> tuple[_ControlledQueryProfile, ...]:
+    """校验受控 routing 配置，异常时映射为 schema_drift。"""
+
+    seen_aliases: set[str] = set()
+    for profile in CONTROLLED_QUERY_PROFILES:
+        if not profile.name or not profile.aliases or not profile.fallback_candidates:
+            raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "controlled query routing 配置不完整")
+        if 1 + len(profile.fallback_candidates) > _MAX_QUERY_CANDIDATES:
+            raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "controlled query routing 候选过多")
+        for alias in profile.aliases:
+            if not alias or alias in seen_aliases:
+                raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "controlled query routing alias 配置异常")
+            seen_aliases.add(alias)
+        if len(set(profile.fallback_candidates)) != len(profile.fallback_candidates):
+            raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "controlled query routing candidate 配置异常")
+        if any(not candidate for candidate in profile.fallback_candidates):
+            raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "controlled query routing candidate 为空")
+    return tuple(CONTROLLED_QUERY_PROFILES)
+
+
+def _bounded_unique_candidates(candidates: tuple[str, ...]) -> tuple[str, ...]:
+    """保序去重并保证候选 query 总数不超过上限。"""
+
+    unique_candidates = tuple(dict.fromkeys(candidates))
+    if not unique_candidates or len(unique_candidates) > _MAX_QUERY_CANDIDATES:
+        raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "controlled query routing 候选不符合契约")
+    return unique_candidates
 
 
 def _catalog_document_ids(catalog_path: Path) -> tuple[str, ...]:

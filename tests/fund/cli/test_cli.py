@@ -47,7 +47,7 @@ def _docling_payload() -> dict[str, object]:
             {
                 "self_ref": "#/texts/1",
                 "label": "text",
-                "text": "基金经理在本报告期内保持稳定。本章节用于检索基金经理信息。",
+                "text": "基金经理在本报告期内保持稳定。股票投资明细展示前十名股票投资明细。",
                 "prov": [{"page_no": 1}],
             },
         ],
@@ -154,6 +154,47 @@ def test_cli_happy_path_orchestrates_import_store_service_and_host(monkeypatch, 
     assert ".docling.json" not in combined
     assert str(work_dir) not in combined
     assert "local_import_id" not in combined
+
+
+def test_cli_controlled_alias_query_uses_service_routing_without_format_change(monkeypatch, tmp_path: Path) -> None:
+    """CLI 不新增输出格式，由 Service 将受控 alias 路由到实际 candidate。"""
+
+    _FakeConverter.calls.clear()
+    monkeypatch.setattr(service_module, "DoclingConverter", _FakeConverter)
+    pdf_path = tmp_path / "report.pdf"
+    work_dir = tmp_path / "work"
+    _write_pdf(pdf_path)
+
+    exit_code, stdout, stderr = _run(
+        [
+            "read",
+            "--pdf",
+            str(pdf_path),
+            "--fund-code",
+            "004393",
+            "--fund-name",
+            "安信企业价值优选混合型证券投资基金",
+            "--year",
+            "2024",
+            "--query",
+            "前十大持仓",
+            "--work-dir",
+            str(work_dir),
+        ]
+    )
+
+    combined = stdout + stderr
+    assert exit_code == SUCCESS_EXIT_CODE
+    assert stderr == ""
+    assert "Answer:" in stdout
+    assert "股票投资明细" in stdout
+    assert "Citations:" in stdout
+    assert "Trace:" in stdout
+    assert "search_document success" in stdout
+    assert "read_section success" in stdout
+    assert "raw Docling" not in combined
+    assert ".docling.json" not in combined
+    assert str(work_dir) not in combined
 
 
 def test_cli_reuses_existing_docling_json_without_converter(monkeypatch, tmp_path: Path) -> None:

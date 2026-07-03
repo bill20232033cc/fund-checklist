@@ -602,6 +602,21 @@ Post-MVP Slice 9C 裁决为 table-backed first-hit consumption，不做表格选
 - 9C 不扫描 top-N、不做二次排序、不做歧义消解、不做 query intent 分类、不做 synonym routing、不接 LLM 判断表格相关性。
 - 9C 不新增 `fund-checklist ask`、CLI 参数、embedding、外部搜索、template contract execution、calculation framework、字段抽取、自动报告或投资判断。
 
+Post-MVP Slice 9D 裁决为 Service 层 controlled query profile routing，不做开放语义理解：
+
+- routing 位置在 Service 层；Store / ToolService / Agent 不承担业务别名理解。
+- 不修改 `search_document` public contract；`search_document` 仍只接收单个 query。
+- Service routing 把用户 query 映射为最多 3 个受控 candidate queries，按顺序调用既有 Host/Agent 路径，返回第一个成功的 Agent result。
+- candidate 顺序必须包含原始 query；最终 citation 必须来自实际命中的 candidate 对应的 section/table tool result，不引用 alias 本身。
+- trace 可记录实际使用的 query candidate；不新增 CLI 输出格式。
+- failure 语义保持稳定：所有 candidate 都无命中时仍为 `not_found`；routing 配置异常为 `schema_drift`；ToolService 内部异常仍为 `unavailable`；不新增 `synonym_not_found` 等错误码。
+- 首批 controlled profiles 仅三类：
+  - `holdings_top10`: alias 为 `前十大持仓` / `重仓股` / `持仓明细`；candidate queries 为原始 query、`股票投资明细`、`前十名股票投资明细`。
+  - `asset_allocation`: alias 为 `资产配置` / `资产组合`；candidate queries 为原始 query、`期末基金资产组合情况`、`基金资产组合情况`。
+  - `expenses`: alias 为 `费用` / `管理费` / `托管费`；candidate queries 为原始 query、`基金费用`、`报告期内基金费用`。
+- 9D 不做自动分词、同义词扩散、开放语义理解、query intent 分类、embedding、LLM intent、top-N rerank、template contract execution、calculation framework、字段抽取、自动报告或投资判断。
+- 9D 真实 CLI smoke 只证明 controlled alias routing：`--query 前十大持仓` 能走到 `股票投资明细`；不证明泛化问答。
+
 ### 8.3 Locator 最低标准
 
 MVP 采用宽松 locator 硬标准：
@@ -730,12 +745,12 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## 9. 已关闭裁决项
 
-MVP plan 已关闭。当前已完成到 Post-MVP Slice 9B；Slice 9C 已裁决为 table-backed first-hit consumption。
+MVP plan 已关闭。当前已完成到 Post-MVP Slice 9C；Slice 9D 已裁决为 Service 层 controlled query profile routing。
 
 ## 10. 下一步最小可验证问题
 
 下一步只应验证一个问题：
 
 ```text
-当 `search_document` first hit 是 high-certainty table-backed result 且包含 `table_ref` 时，`MinimalFundDocumentAgent` 是否能直接 `read_table(first_hit.table_ref)`，并以 bounded table rows 为主体生成带 table citation 的回答；low-certainty table-backed hit 或 section hit 仍沿用既有 section-first 路径。top-N scan、rerank、歧义消解、synonym routing、CLI ask、UI、真实 PDF LLM e2e、多 provider、template contract execution、calculation framework、字段抽取、自动报告或投资判断不得混入 Slice 9C。
+当用户 query 命中三类 hardcoded controlled profile 时，Service 是否能生成最多 3 个 candidate queries，并按顺序调用既有 Host/Agent 路径，使 `前十大持仓` fallback 到 `股票投资明细` 且返回实际命中 candidate 的 citation / trace。`search_document` contract、Agent policy、Store search、CLI 输出格式、failure code、开放语义理解、embedding、LLM intent、template contract execution、calculation framework、字段抽取、自动报告或投资判断不得混入 Slice 9D。
 ```

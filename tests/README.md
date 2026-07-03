@@ -36,6 +36,7 @@ uv run pytest tests/fund/cli/test_cli.py
 - `MinimalHost` 只调用 Agent loop，不访问 Docling store、raw Docling JSON 或本地路径。
 - `FundReadingService` 覆盖 `import_local_report`、`read_local_report`、`list_reports`，负责编排 import、repository-backed load、必要时 Docling conversion fallback 和 Host 调用。
 - Service 调 Host 时只传 `document_id` 和 `query`；catalog 有 completed report 时复用，catalog record 指向的 Docling JSON 缺失时 fail-closed，不自动 repair/rebuild/reconvert。
+- Service 对三类 hardcoded controlled query profile 生成最多 3 个 candidate queries，并只在 `not_found` 时按顺序尝试下一个 Host/Agent run。
 - `fund-checklist read` 使用 argparse 参数解析，只实现 read 子命令；console script entrypoint 指向 `fund_agent.cli.main:main`。
 - CLI happy path 通过 `FundReadingService` 串起 reading use case；CLI 单测用 fake converter 或 fake Service，避免重复真实 Docling conversion。
 - CLI classified failure 输出稳定 failure code 且退出码为 2；unexpected exception 退出码为 1。
@@ -211,3 +212,20 @@ git diff --check
 ```
 
 Slice 9C 不测试 top-N scan、rerank、歧义消解、query intent 分类、query normalization / synonym routing、`fund-checklist ask`、真实 LLM、embedding、外部搜索、template contract execution、calculation framework、字段抽取、自动报告、投资判断或 release readiness。
+
+Post-MVP Slice 9D controlled query profile routing 测试范围：
+
+- Service 层为 `holdings_top10`、`asset_allocation`、`expenses` 三类 exact alias 生成最多 3 个 candidate queries，且包含原始 query。
+- Service 按候选顺序调用既有 Host/Agent 路径，返回第一个成功 Agent result。
+- 所有候选都 `not_found` 时仍返回 `not_found`，routing 配置异常映射为 `schema_drift`。
+- CLI 输出格式不变，`--query 前十大持仓` 通过 Service routing 命中 `股票投资明细`。
+
+Slice 9D 验证命令：
+
+```bash
+uv run pytest tests/fund/service/test_reading_service.py tests/fund/cli/test_cli.py
+uv run pytest tests/fund/agent/test_minimal_tool_loop.py tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_service.py
+git diff --check
+```
+
+Slice 9D 不测试开放式 query normalization、自动分词、同义词扩散、query intent 分类、embedding、LLM intent、top-N scan、rerank、歧义消解、`fund-checklist ask`、template contract execution、calculation framework、字段抽取、自动报告、投资判断或 release readiness。

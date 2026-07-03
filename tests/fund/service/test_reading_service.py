@@ -7,9 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from fund_agent.agent import AgentRunResult
+import fund_agent.service.reading_service as reading_service_module
+from fund_agent.agent import AgentRunResult, ToolTraceEntry
 from fund_agent.fund.document_tools.constants import DOCLING_JSON_SUFFIX, FailureCode, ToolName
 from fund_agent.fund.document_tools.errors import DocumentToolError
+from fund_agent.fund.document_tools.models import ToolFailure
 from fund_agent.fund.document_tools.persistent_repository import CATALOG_FILENAME
 from fund_agent.service import (
     FundReadingService,
@@ -101,6 +103,36 @@ class _CapturingHost:
         )
 
 
+class _RoutingHost:
+    """按 query 返回可控结果，用于验证 Service 受控候选顺序。"""
+
+    calls: list[dict[str, str]] = []
+    success_query: str | None = None
+
+    def __init__(self, tool_service) -> None:
+        """保存 tool service 但不访问其内部 store。"""
+
+        self._tool_service = tool_service
+
+    def run(self, *, document_id: str, query: str) -> AgentRunResult:
+        """记录 Host 调用，并只在指定 candidate 上返回成功。"""
+
+        _RoutingHost.calls.append({"document_id": document_id, "query": query})
+        if query == _RoutingHost.success_query:
+            return AgentRunResult(
+                answer=f"命中 {query}",
+                citations=(),
+                tool_trace=(_trace_search(document_id, query, "success"),),
+                failure=None,
+            )
+        return AgentRunResult(
+            answer="",
+            citations=(),
+            tool_trace=(_trace_search(document_id, query, "failure", FailureCode.NOT_FOUND),),
+            failure=ToolFailure(code=FailureCode.NOT_FOUND, message="未找到可读取的匹配章节"),
+        )
+
+
 def _request(pdf_path: Path, work_dir: Path) -> ReadLocalReportRequest:
     """构造标准 read_local_report 请求。"""
 
@@ -111,6 +143,22 @@ def _request(pdf_path: Path, work_dir: Path) -> ReadLocalReportRequest:
         year=2024,
         query="基金经理",
         work_dir=work_dir,
+    )
+
+
+def _trace_search(
+    document_id: str,
+    query: str,
+    result_kind: str,
+    failure_code: FailureCode | None = None,
+) -> ToolTraceEntry:
+    """构造最小 search_document trace。"""
+
+    return ToolTraceEntry(
+        tool_name=ToolName.SEARCH_DOCUMENT,
+        arguments={"document_id": document_id, "query": query},
+        result_kind=result_kind,
+        failure_code=failure_code,
     )
 
 
@@ -269,3 +317,104 @@ def test_read_local_report_preserves_agent_failure_code(tmp_path: Path) -> None:
     assert result.agent_result.failure is not None
     assert result.agent_result.failure.code is FailureCode.NOT_FOUND
     assert result.agent_result.tool_trace[0].tool_name is ToolName.SEARCH_DOCUMENT
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("前十大持仓", ("前十大持仓", "股票投资明细", "前十名股票投资明细")),
+        ("重仓股", ("重仓股", "股票投资明细", "前十名股票投资明细")),
+        ("持仓明细", ("持仓明细", "股票投资明细", "前十名股票投资明细")),
+        ("资产配置", ("资产配置", "期末基金资产组合情况", "基金资产组合情况")),
+        ("资产组合", ("资产组合", "期末基金资产组合情况", "基金资产组合情况")),
+        ("费用", ("费用", "基金费用", "报告期内基金费用")),
+        ("管理费", ("管理费", "基金费用", "报告期内基金费用")),
+        ("托管费", ("托管费", "基金费用", "报告期内基金费用")),
+        ("股票投资明细", ("股票投资明细",)),
+    ],
+)
+def test_controlled_query_profiles_generate_bounded_candidates(query: str, expected: tuple[str, ...]) -> None:
+    """Service 层 profile 只为三类 exact alias 生成最多 3 个候选。"""
+
+    candidates = reading_service_module._candidate_queries_for_query(query)
+
+    assert candidates == expected
+    assert query in candidates
+    assert len(candidates) <= 3
+
+
+def test_read_local_report_routes_controlled_alias_to_first_successful_candidate(tmp_path: Path) -> None:
+    """受控 alias 命中时，Service 必须按候选顺序返回第一个成功 Agent result。"""
+
+    _FakeConverter.calls.clear()
+    _RoutingHost.calls.clear()
+    _RoutingHost.success_query = "股票投资明细"
+    pdf_path = tmp_path / "report.pdf"
+    work_dir = tmp_path / "work"
+    _write_pdf(pdf_path)
+    service = FundReadingService(converter_factory=_FakeConverter, host_factory=_RoutingHost)
+
+    result = service.read_local_report(
+        ReadLocalReportRequest(
+            pdf_path=pdf_path,
+            fund_code="004393",
+            fund_name="安信企业价值优选混合型证券投资基金",
+            year=2024,
+            query="前十大持仓",
+            work_dir=work_dir,
+        )
+    )
+
+    assert result.agent_result.failure is None
+    assert result.agent_result.answer == "命中 股票投资明细"
+    assert [call["query"] for call in _RoutingHost.calls] == ["前十大持仓", "股票投资明细"]
+    assert result.agent_result.tool_trace[0].arguments["query"] == "股票投资明细"
+
+
+def test_read_local_report_returns_not_found_after_all_candidates_miss(tmp_path: Path) -> None:
+    """所有 controlled candidates 都无命中时，最终失败仍是 not_found。"""
+
+    _FakeConverter.calls.clear()
+    _RoutingHost.calls.clear()
+    _RoutingHost.success_query = None
+    pdf_path = tmp_path / "report.pdf"
+    work_dir = tmp_path / "work"
+    _write_pdf(pdf_path)
+    service = FundReadingService(converter_factory=_FakeConverter, host_factory=_RoutingHost)
+
+    result = service.read_local_report(
+        ReadLocalReportRequest(
+            pdf_path=pdf_path,
+            fund_code="004393",
+            fund_name="安信企业价值优选混合型证券投资基金",
+            year=2024,
+            query="资产配置",
+            work_dir=work_dir,
+        )
+    )
+
+    assert result.agent_result.failure is not None
+    assert result.agent_result.failure.code is FailureCode.NOT_FOUND
+    assert [call["query"] for call in _RoutingHost.calls] == [
+        "资产配置",
+        "期末基金资产组合情况",
+        "基金资产组合情况",
+    ]
+
+
+def test_controlled_query_profile_config_error_maps_to_schema_drift(monkeypatch) -> None:
+    """routing 配置异常必须 fail-closed 为 schema_drift。"""
+
+    bad_profiles = (
+        reading_service_module._ControlledQueryProfile(
+            name="bad",
+            aliases=("前十大持仓",),
+            fallback_candidates=("a", "b", "c"),
+        ),
+    )
+    monkeypatch.setattr(reading_service_module, "CONTROLLED_QUERY_PROFILES", bad_profiles)
+
+    with pytest.raises(DocumentToolError) as exc_info:
+        reading_service_module._candidate_queries_for_query("前十大持仓")
+
+    assert exc_info.value.code is FailureCode.SCHEMA_DRIFT
