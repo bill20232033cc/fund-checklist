@@ -591,6 +591,17 @@ Post-MVP Slice 9B 裁决为 evidence retrieval substrate，不做语义路由：
 - 9B 不做 query normalization / synonym routing，不把 `前十大持仓` 映射为 `股票投资明细`。
 - 9B 不接 LLM、embedding 或外部搜索服务；不执行 template-informed intent routing、chapter contract execution、calculation framework、report audit、字段抽取、自动报告或投资判断。
 
+Post-MVP Slice 9C 裁决为 table-backed first-hit consumption，不做表格选择策略泛化：
+
+- 9C 只在 `search_document` first hit 是 high-certainty table-backed result 时直接消费 `table_ref`。
+- high-certainty 只用确定性 exact containment 判断：`match_kind == table_row` 且 query 原文出现在 excerpt 中；或 `match_kind == table_caption` 且 query 原文出现在 caption/excerpt 中。
+- high-certainty table-backed first hit 的工具顺序为 `search_document -> read_section -> read_table`；不调用 `list_tables` 进行表格发现。
+- first hit 不是 table-backed result、table-backed hit 不满足 high-certainty、或 table-backed hit 缺少 `table_ref` 时，沿用既有 section-first table-aware 路径或稳定失败语义。
+- answer 必须 table-first：section title / table caption 只作来源上下文，bounded table rows 是主体内容；不得做 section 摘要或解释性综合。
+- citations 至少包含 table citation；可以保留 section citation。
+- 9C 不扫描 top-N、不做二次排序、不做歧义消解、不做 query intent 分类、不做 synonym routing、不接 LLM 判断表格相关性。
+- 9C 不新增 `fund-checklist ask`、CLI 参数、embedding、外部搜索、template contract execution、calculation framework、字段抽取、自动报告或投资判断。
+
 ### 8.3 Locator 最低标准
 
 MVP 采用宽松 locator 硬标准：
@@ -719,12 +730,12 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## 9. 已关闭裁决项
 
-MVP plan 已关闭。当前已完成到 Post-MVP Slice 9A；Slice 9B 已裁决为 evidence retrieval substrate。
+MVP plan 已关闭。当前已完成到 Post-MVP Slice 9B；Slice 9C 已裁决为 table-backed first-hit consumption。
 
 ## 10. 下一步最小可验证问题
 
 下一步只应验证一个问题：
 
 ```text
-当 query 只命中表格 caption 或 bounded table rows、而不命中 section 正文时，`search_document` 是否能返回带 `table_ref`、locator、citation、bounded excerpt 和 `match_kind` / `matched_field` 的安全 table-backed result；无 evidence candidate 时仍返回空 tuple，failure code 不扩展。Agent retrieval policy、CLI table-only smoke、synonym routing、CLI ask、UI、真实 PDF LLM e2e、多 provider、template contract execution、calculation framework、字段抽取、自动报告或投资判断不得混入 Slice 9B。
+当 `search_document` first hit 是 high-certainty table-backed result 且包含 `table_ref` 时，`MinimalFundDocumentAgent` 是否能直接 `read_table(first_hit.table_ref)`，并以 bounded table rows 为主体生成带 table citation 的回答；low-certainty table-backed hit 或 section hit 仍沿用既有 section-first 路径。top-N scan、rerank、歧义消解、synonym routing、CLI ask、UI、真实 PDF LLM e2e、多 provider、template contract execution、calculation framework、字段抽取、自动报告或投资判断不得混入 Slice 9C。
 ```

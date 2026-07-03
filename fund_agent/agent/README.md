@@ -1,10 +1,14 @@
 # Agent 层
 
-当前实现 deterministic table-aware Agent loop。
+当前实现 deterministic table-backed first-hit / table-aware Agent loop。
 
 - `MinimalFundDocumentAgent` 只依赖 `FundDocumentToolService`。
-- 基础调用顺序为 `search_document -> read_section -> list_tables -> read_table`；没有相关表格时保持 section-only answer。
+- 基础调用顺序为 `search_document -> read_section`。
+- 当 `search_document` first hit 是 high-certainty table-backed result 且带 `table_ref` 时，调用顺序为 `search_document -> read_section -> read_table`，不经 `list_tables` 做表格发现。
+- high-certainty 只按 exact containment 判断：`table_row` 命中要求 query 原文出现在 excerpt；`table_caption` 命中要求 query 原文出现在 title/excerpt。
+- 其它 first hit 继续沿用 section-first table-aware 路径：`search_document -> read_section -> list_tables -> read_table`；没有相关表格时保持 section-only answer。
 - 表格候选按 query 命中、同 section、同页或相邻页 proximity 排序。
+- high-certainty table-backed answer 以 `read_table` 返回的 bounded table rows 为主体；section title / table caption 只作为来源上下文，不做 section 摘要或解释性综合。
 - `AgentRunResult.answer` 成功时只由 section/table tool result 生成。
 - `AgentRunResult.citations` 使用 `read_section` 和可用 `read_table` 返回的 citation。
 - `ToolTraceEntry` 记录 `tool_name`、显式 `arguments`、`result_kind` 和可选 `failure_code`。

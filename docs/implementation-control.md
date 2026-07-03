@@ -1,9 +1,9 @@
 # fund-checklist implementation-control
 
 更新时间：2026-07-03
-当前阶段：`POST_MVP_SLICE_9A_ACCEPTED_9B_PLANNED`
+当前阶段：`POST_MVP_SLICE_9B_ACCEPTED_9C_PLANNED`
 当前角色：control / CIC-lite controller
-当前目标：Slice 9A Service boundary 已经 MiMo review `ACCEPTED`，可收口；下一步只设计并执行 Slice 9B evidence retrieval substrate。不得扩成 gateflow / phaseflow / release-readiness，不新增 plan artifact，不进入 template contract execution、calculation framework、`fund-checklist ask`、UI、自动报告或投资判断。
+当前目标：Slice 9B evidence retrieval substrate 已提交并可收口；下一步只设计并执行 Slice 9C table-backed first-hit consumption。不得扩成 gateflow / phaseflow / release-readiness，不新增 plan artifact，不进入 top-N rerank、semantic routing、template contract execution、calculation framework、`fund-checklist ask`、UI、自动报告或投资判断。
 
 ## 当前事实
 
@@ -116,6 +116,16 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - table row 命中 excerpt 必须 bounded，只返回命中行或有限上下文，不返回整表；排序必须 deterministic / reproducible。
 - 失败分类沿用既有稳定 code：`schema_drift`、`not_found`、`unavailable`；不新增 `table_caption_not_found`、`table_row_not_found`、`ambiguous_table_match` 等细分错误码。
 - Slice 9B 不修改 deterministic Agent retrieval policy，不要求 Agent 自动 `read_table`，不要求 CLI table-only query 成功；这些能力另开 Slice 9C。
+- Slice 9B 已完成并经 MiMo 明确 `ACCEPTED`；提交为 `54a5d30 Implement table-backed document search`。
+- Slice 9B 验证结果：`uv run pytest tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_service.py` -> `17 passed`；`uv run pytest tests/fund/agent/test_minimal_tool_loop.py tests/fund/cli/test_cli.py` -> `14 passed`；`git diff --check` 通过。
+- Post-MVP Slice 9C 裁决为 table-backed first-hit consumption。
+- Slice 9C 只在 `search_document` first hit 是 high-certainty table-backed result 时直接消费 `table_ref`；否则沿用既有 section-first table-aware 路径。
+- high-certainty 只用确定性 exact containment 判断：`match_kind == table_row` 且 query 原文出现在 excerpt 中；或 `match_kind == table_caption` 且 query 原文出现在 caption/excerpt 中。
+- high-certainty table-backed first hit 的工具顺序为 `search_document -> read_section -> read_table`；不调用 `list_tables` 进行表格发现。
+- high-certainty table-backed first hit 的 answer 必须 table-first：section title / table caption 只作来源上下文，bounded table rows 是主体内容；不得做 section 摘要或解释性综合。
+- citations 至少包含 table citation；可以保留 section citation。
+- first hit 不是 table-backed result、table-backed hit 不满足 high-certainty、或 table-backed hit 缺少 `table_ref` 时，不得强行直读表；应保持既有稳定失败或回落语义。
+- Slice 9C 不扫描 top-N、不做二次排序、不做歧义消解、不做 query intent 分类、不做 synonym routing、不接 LLM 判断表格相关性。
 
 ## CIC-lite Rules
 
@@ -132,23 +142,23 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## Next Action
 
-执行 Slice 9B implementation + tests。Allowed write set：
+执行 Slice 9C implementation + tests。Allowed write set：
 
-- `fund_agent/fund/document_tools/docling_store.py`
-- `fund_agent/fund/document_tools/service.py`
-- `fund_agent/fund/document_tools/models.py`，仅当既有 `SearchResult` / `Locator` 无法表达 table-backed search result 时允许
-- `tests/fund/document_tools/test_docling_store.py`
-- `tests/fund/document_tools/test_service.py`
-- `fund_agent/fund/README.md`
+- `fund_agent/agent/tool_loop.py`
+- `tests/fund/agent/test_minimal_tool_loop.py`
+- `fund_agent/agent/README.md`
 - `tests/README.md`
 - 必要时同步 `docs/design.md` / `docs/implementation-control.md`
 
 禁止事项：
 
+- 禁止扫描 top-N search results。
+- 禁止新增 rerank、歧义消解或 query intent 分类。
 - 禁止新增 query normalization / synonym routing。
 - 禁止把 `前十大持仓` 映射为 `股票投资明细`；该能力另开 semantic routing gate。
-- 禁止修改 deterministic Agent retrieval policy；table-backed result 的 Agent 消费另开 Slice 9C。
-- 禁止要求 CLI table-only query 成功；CLI smoke 只作为旧路径不回退检查。
+- 禁止用 LLM 判断哪个表更相关。
+- 禁止做 section 摘要或解释性综合；answer 只能受控拼接 section title / table caption / bounded table rows。
+- 禁止要求所有 table-only query 成功；CLI smoke 只能覆盖 exact table row/caption high-certainty 命中。
 - 禁止新增 `fund-checklist ask` 或 CLI 参数。
 - 禁止接真实 LLM、embedding、外部搜索服务。
 - 禁止执行 template-informed intent routing、chapter contract execution、calculation framework、report audit、字段抽取、自动报告或投资判断。
@@ -157,16 +167,16 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 最小验证命令：
 
 ```bash
-uv run pytest tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_service.py
+uv run pytest tests/fund/agent/test_minimal_tool_loop.py
 ```
 
 回归验证命令：
 
 ```bash
-uv run pytest tests/fund/agent/test_minimal_tool_loop.py tests/fund/cli/test_cli.py
+uv run pytest tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_service.py tests/fund/cli/test_cli.py
 ```
 
-验收点：query 只命中表格内容或表格标题时，`search_document` 返回 table-backed result，并带 `table_ref`、locator、citation、bounded excerpt 和 `match_kind` / `matched_field`；无 evidence candidate 时仍返回空 tuple，failure code 不扩展；旧 deterministic Agent 和 CLI 测试不回退。
+验收点：当 `search_document` first hit 是 high-certainty table-backed result 且包含 `table_ref` 时，`MinimalFundDocumentAgent` 直接 `read_table(first_hit.table_ref)`，不经 `list_tables` 做表格发现；answer 以 bounded table rows 为主体、带 table citation、不做 section 摘要。low-certainty table-backed hit 或 section hit 仍沿用既有 section-first 路径；旧 Store/ToolService/CLI 测试不回退。
 
 ## Implementation Slices
 
@@ -183,6 +193,7 @@ uv run pytest tests/fund/agent/test_minimal_tool_loop.py tests/fund/cli/test_cli
 8C. Opt-in live DeepSeek smoke：已实现只在显式环境变量启用时验证真实 DeepSeek 返回一次合法 `ToolCall` 或 `FinalAnswer`，最终仍经 8A runner；默认 gate no-network。
 9A. Service boundary：新增 `FundReadingService` use case boundary，把 CLI 编排迁入 Service；CLI 行为、exit code、redaction、repository reuse 和 deterministic Agent loop 不回退，不做 query routing 或 LLM/UI 能力扩展。
 9B. Evidence retrieval substrate：增强 ToolService / Store 检索基底，使 section text、table caption、bounded table rows 都能成为可引用 search result；不修改 Agent retrieval policy，不要求 CLI table-only query 成功，不做 synonym intent、template contract、calculation、LLM ask 或报告生成。
+9C. Table-backed first-hit consumption：Agent 只在 first hit 为 high-certainty table-backed result 时直接 `read_table`；不扫描 top-N、不做 rerank、synonym routing、LLM 判断或 section 摘要。
 
 ## MVP Acceptance Matrix
 

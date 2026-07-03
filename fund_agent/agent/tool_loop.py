@@ -9,6 +9,7 @@ from fund_agent.fund.document_tools.constants import FailureCode, ToolName
 from fund_agent.fund.document_tools.models import (
     Citation,
     SearchResult,
+    SearchMatchKind,
     SectionContent,
     TableContent,
     TableSummary,
@@ -72,7 +73,7 @@ class AgentRunResult:
 
 
 class MinimalFundDocumentAgent:
-    """执行 section-first、table-aware 的确定性阅读 Agent。
+    """执行确定性 table-backed first-hit 与 section-first 阅读 Agent。
 
     参数:
         tool_service: FundDocumentToolService，是 Agent 访问基金文档的唯一边界。
@@ -131,6 +132,22 @@ class MinimalFundDocumentAgent:
             return _failed_result(tuple(trace), section_result)
 
         trace.append(_success_trace(ToolName.READ_SECTION, read_arguments))
+        direct_table_result = self._read_high_certainty_table_hit(
+            document_id=document_id,
+            query=query,
+            hit=first_hit,
+            trace=trace,
+        )
+        if isinstance(direct_table_result, ToolFailure):
+            return _failed_result(tuple(trace), direct_table_result)
+        if direct_table_result is not None:
+            return AgentRunResult(
+                answer=_answer_from_table_first(section_result, direct_table_result),
+                citations=(direct_table_result.citation, section_result.citation),
+                tool_trace=tuple(trace),
+                failure=None,
+            )
+
         table_results = self._read_relevant_tables(
             document_id=document_id,
             query=query,
@@ -144,6 +161,31 @@ class MinimalFundDocumentAgent:
             tool_trace=tuple(trace),
             failure=None,
         )
+
+    def _read_high_certainty_table_hit(
+        self,
+        *,
+        document_id: str,
+        query: str,
+        hit: SearchResult,
+        trace: list[ToolTraceEntry],
+    ) -> TableContent | ToolFailure | None:
+        """first hit 为高确定性表格命中时直接读取该表。"""
+
+        if not _is_high_certainty_table_hit(hit, query):
+            return None
+
+        table_ref = hit.table_ref
+        if table_ref is None:
+            return None
+
+        read_arguments = _read_table_arguments(document_id, table_ref, _MAX_TABLE_ROWS)
+        table_result = self._tool_service.read_table(document_id, table_ref, max_rows=_MAX_TABLE_ROWS)
+        if isinstance(table_result, ToolFailure):
+            trace.append(_failure_trace(ToolName.READ_TABLE, read_arguments, table_result))
+            return table_result
+        trace.append(_success_trace(ToolName.READ_TABLE, read_arguments))
+        return table_result
 
     def _read_relevant_tables(
         self,
@@ -188,6 +230,28 @@ def _section_ref_from_hit(hit: SearchResult) -> str | None:
     return hit.locator.section_ref or hit.section_ref
 
 
+def _is_high_certainty_table_hit(hit: SearchResult, query: str) -> bool:
+    """判断 first hit 是否可按 9C 规则直接消费表格。"""
+
+    if not query or hit.table_ref is None:
+        return False
+    if hit.match_kind is SearchMatchKind.TABLE_ROW:
+        return query in hit.excerpt
+    if hit.match_kind is SearchMatchKind.TABLE_CAPTION:
+        return query in hit.title or query in hit.excerpt
+    return False
+
+
+def _answer_from_table_first(section: SectionContent, table: TableContent) -> str:
+    """以表格有界行作为主体组装 table-first 回答。"""
+
+    context = [f"来源章节: {section.title}"]
+    if table.caption:
+        context.append(f"表格标题: {table.caption}")
+    table_rows = "\n".join(_format_table_row(row) for row in table.rows)
+    return "\n".join(["表格内容:", table_rows, *context]).strip()
+
+
 def _answer_from_section_and_tables(section: SectionContent, tables: tuple[TableContent, ...]) -> str:
     """只使用 section/table tool 输出组装最终回答。"""
 
@@ -203,8 +267,14 @@ def _format_table(table: TableContent) -> str:
     lines: list[str] = []
     if table.caption:
         lines.append(table.caption)
-    lines.extend(" | ".join(cell for cell in row if cell) for row in table.rows)
+    lines.extend(_format_table_row(row) for row in table.rows)
     return "\n".join(line for line in lines if line)
+
+
+def _format_table_row(row: tuple[str, ...]) -> str:
+    """格式化单行有界表格文本。"""
+
+    return " | ".join(cell for cell in row if cell)
 
 
 def _rank_table_summaries(

@@ -27,6 +27,8 @@ uv run pytest tests/fund/cli/test_cli.py
 - public tools 捕获 `DocumentToolError` 并返回 `ToolFailure`；unknown locator 返回 `not_found`。
 - `get_excerpt` 只接受 prior tools 返回的受控 `Locator`，按 section/table/excerpt locator kind 路由。
 - `MinimalFundDocumentAgent` 先执行 `search_document -> read_section`，再通过 `list_tables/read_table` 补充相关表格。
+- `search_document` first hit 是 high-certainty table-backed result 且带 `table_ref` 时，`MinimalFundDocumentAgent` 直接 `read_table`，不经 `list_tables` 做表格发现。
+- high-certainty table-backed answer 以 bounded table rows 为主体，section title / table caption 只作来源上下文。
 - `AgentRunResult.answer` 成功时只由 section/table tool result 生成。
 - table-aware loop 覆盖人物表格信息、持仓表格信息和无相邻表格的 section-only answer。
 - `ToolTraceEntry` 记录工具名、显式参数、success/failure 和可选失败码。
@@ -192,3 +194,20 @@ git diff --check
 ```
 
 Slice 9B 不测试 query normalization / synonym routing、deterministic Agent table-only consumption、CLI table-only query success、embedding、外部搜索、字段抽取、自动报告、投资判断或 release readiness。
+
+Post-MVP Slice 9C table-backed first-hit consumption 测试范围：
+
+- high-certainty table row first hit 触发 `search_document -> read_section -> read_table`，不调用 `list_tables`。
+- high-certainty table caption first hit 触发 `search_document -> read_section -> read_table`，bounded table rows 是 answer 主体。
+- low-certainty table-backed hit 继续走既有 section-first table-aware 路径。
+- table-backed hit 缺 `table_ref` 时不得强行直读表，继续保持回落语义。
+
+Slice 9C 验证命令：
+
+```bash
+uv run pytest tests/fund/agent/test_minimal_tool_loop.py
+uv run pytest tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_service.py tests/fund/cli/test_cli.py
+git diff --check
+```
+
+Slice 9C 不测试 top-N scan、rerank、歧义消解、query intent 分类、query normalization / synonym routing、`fund-checklist ask`、真实 LLM、embedding、外部搜索、template contract execution、calculation framework、字段抽取、自动报告、投资判断或 release readiness。

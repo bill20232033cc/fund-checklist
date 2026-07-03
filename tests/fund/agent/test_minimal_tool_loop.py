@@ -7,9 +7,19 @@ from dataclasses import asdict
 from pathlib import Path
 
 from fund_agent.agent import MinimalFundDocumentAgent
-from fund_agent.fund.document_tools.constants import FailureCode, ReportType, SourceKind, ToolName
+from fund_agent.fund.document_tools.constants import FailureCode, LocatorKind, ReportType, SourceKind, ToolName
 from fund_agent.fund.document_tools.docling_store import DoclingDocumentStore
-from fund_agent.fund.document_tools.models import ReportIdentity, ToolFailure
+from fund_agent.fund.document_tools.models import (
+    Citation,
+    Locator,
+    ReportIdentity,
+    SearchMatchKind,
+    SearchResult,
+    SectionContent,
+    TableContent,
+    TableSummary,
+    ToolFailure,
+)
 from fund_agent.fund.document_tools.service import FundDocumentToolService
 from fund_agent.host import MinimalHost
 
@@ -132,7 +142,7 @@ def _write_docling_json(path: Path) -> None:
                 "self_ref": "#/tables/1",
                 "label": "table",
                 "prov": [{"page_no": 2, "bbox": {"l": 11, "t": 21, "r": 31, "b": 41}}],
-                "captions": [],
+                "captions": [{"text": "股票投资明细"}],
                 "data": {
                     "table_cells": [
                         {
@@ -181,6 +191,131 @@ def _service(tmp_path: Path) -> FundDocumentToolService:
     return FundDocumentToolService({_identity().document_id: store})
 
 
+def _section_locator(section_ref: str = "section-scripted") -> Locator:
+    """构造 fake service 使用的章节 locator。"""
+
+    return Locator(
+        document_id=_identity().document_id,
+        locator_kind=LocatorKind.SECTION,
+        section_ref=section_ref,
+        table_ref=None,
+        page_no=1,
+        page_range=(1, 1),
+        internal_ref=None,
+        internal_ref_available=False,
+    )
+
+
+def _table_locator(table_ref: str = "table-scripted") -> Locator:
+    """构造 fake service 使用的表格 locator。"""
+
+    return Locator(
+        document_id=_identity().document_id,
+        locator_kind=LocatorKind.TABLE,
+        section_ref="section-scripted",
+        table_ref=table_ref,
+        page_no=1,
+        page_range=None,
+        internal_ref=None,
+        internal_ref_available=False,
+    )
+
+
+def _citation(locator: Locator) -> Citation:
+    """构造 fake service 使用的 citation。"""
+
+    identity = _identity()
+    return Citation(
+        document_id=identity.document_id,
+        fund_code=identity.fund_code,
+        fund_name=identity.fund_name,
+        year=identity.year,
+        report_type=identity.report_type.value,
+        locator=locator,
+    )
+
+
+class _ScriptedTableHitService:
+    """返回指定 first hit 的 fake tool service，用于 Agent 分支测试。
+
+    参数:
+        hit: search_document 返回的 first hit。
+
+    返回:
+        只实现 MinimalFundDocumentAgent 所需方法的 fake service。
+
+    异常:
+        public 方法不抛异常；不匹配输入返回 ToolFailure。
+    """
+
+    def __init__(self, hit: SearchResult) -> None:
+        """保存 scripted first hit。"""
+
+        self._hit = hit
+
+    def search_document(self, document_id: str, query: str) -> tuple[SearchResult, ...] | ToolFailure:
+        """返回 scripted search hit。"""
+
+        if document_id != _identity().document_id or not query:
+            return ToolFailure(code=FailureCode.NOT_FOUND, message="文档不存在")
+        return (self._hit,)
+
+    def read_section(self, document_id: str, section_ref: str) -> SectionContent | ToolFailure:
+        """返回固定 section content。"""
+
+        if document_id != _identity().document_id or section_ref != "section-scripted":
+            return ToolFailure(code=FailureCode.NOT_FOUND, message="章节不存在")
+        locator = _section_locator(section_ref)
+        return SectionContent(
+            section_ref=section_ref,
+            title="脚本章节",
+            text="章节正文只用于回落路径。",
+            truncated=False,
+            locator=locator,
+            citation=_citation(locator),
+        )
+
+    def list_tables(self, document_id: str) -> tuple[TableSummary, ...] | ToolFailure:
+        """返回供 low-certainty 回落路径发现的表格。"""
+
+        if document_id != _identity().document_id:
+            return ToolFailure(code=FailureCode.NOT_FOUND, message="文档不存在")
+        locator = _table_locator()
+        return (
+            TableSummary(
+                table_ref="table-scripted",
+                caption="脚本表格",
+                section_ref="section-scripted",
+                locator=locator,
+                row_count=2,
+                column_count=2,
+            ),
+        )
+
+    def read_table(
+        self,
+        document_id: str,
+        table_ref: str,
+        *,
+        max_rows: int | None = None,
+    ) -> TableContent | ToolFailure:
+        """返回固定 bounded table rows。"""
+
+        del max_rows
+        if document_id != _identity().document_id or table_ref != "table-scripted":
+            return ToolFailure(code=FailureCode.NOT_FOUND, message="表格不存在")
+        locator = _table_locator(table_ref)
+        return TableContent(
+            table_ref=table_ref,
+            caption="脚本表格",
+            section_ref="section-scripted",
+            rows=(("姓名", "职务"), ("张明", "基金经理")),
+            truncated=False,
+            locator=locator,
+            citation=_citation(locator),
+        )
+
+
 def test_agent_tool_loop_searches_then_reads_section(tmp_path: Path) -> None:
     """Agent loop 必须先搜索再读章节，并返回 read_section 引用。"""
 
@@ -218,6 +353,101 @@ def test_agent_table_aware_loop_answers_manager_table_information(tmp_path: Path
     assert "2022年8月8日" in result.answer
     assert result.citations[1].locator.table_ref == "table-0000"
     assert result.citations[1].locator.page_no == 1
+
+
+def test_agent_table_backed_row_first_hit_reads_table_without_list_tables(tmp_path: Path) -> None:
+    """高确定性 table row first hit 必须直接读表，不经 list_tables 发现。"""
+
+    host = MinimalHost(MinimalFundDocumentAgent(_service(tmp_path)))
+    result = host.run(document_id=_identity().document_id, query="张明")
+
+    assert result.failure is None
+    assert result.answer.startswith("表格内容:")
+    assert "张明 | 本基金的基金经理 | 2022年8月8日" in result.answer
+    assert "基金经理在本报告期内保持稳定" not in result.answer
+    assert "来源章节: 4.1.2 基金经理简介" in result.answer
+    assert result.citations[0].locator.table_ref == "table-0000"
+    assert tuple(entry.tool_name for entry in result.tool_trace) == (
+        ToolName.SEARCH_DOCUMENT,
+        ToolName.READ_SECTION,
+        ToolName.READ_TABLE,
+    )
+
+
+def test_agent_table_backed_caption_first_hit_reads_table_without_list_tables(tmp_path: Path) -> None:
+    """高确定性 table caption first hit 必须直接读表并保留 caption 作为来源上下文。"""
+
+    host = MinimalHost(MinimalFundDocumentAgent(_service(tmp_path)))
+    result = host.run(document_id=_identity().document_id, query="股票投资明细")
+
+    assert result.failure is None
+    assert result.answer.startswith("表格内容:")
+    assert "贵州茅台 | 1000" in result.answer
+    assert "前十大持仓信息见下表" not in result.answer
+    assert "表格标题: 股票投资明细" in result.answer
+    assert result.citations[0].locator.table_ref == "table-0001"
+    assert tuple(entry.tool_name for entry in result.tool_trace) == (
+        ToolName.SEARCH_DOCUMENT,
+        ToolName.READ_SECTION,
+        ToolName.READ_TABLE,
+    )
+
+
+def test_agent_low_certainty_table_backed_hit_uses_existing_table_aware_path() -> None:
+    """table-backed hit 不满足 high-certainty 时沿用 section-first table-aware 路径。"""
+
+    locator = _table_locator()
+    hit = SearchResult(
+        rank=1,
+        section_ref="section-scripted",
+        title="脚本表格",
+        excerpt="不包含原始问题",
+        locator=locator,
+        citation=_citation(locator),
+        match_kind=SearchMatchKind.TABLE_ROW,
+        table_ref="table-scripted",
+    )
+    host = MinimalHost(MinimalFundDocumentAgent(_ScriptedTableHitService(hit)))  # type: ignore[arg-type]
+
+    result = host.run(document_id=_identity().document_id, query="张明")
+
+    assert result.failure is None
+    assert "章节正文只用于回落路径" in result.answer
+    assert "相关表格:" in result.answer
+    assert tuple(entry.tool_name for entry in result.tool_trace) == (
+        ToolName.SEARCH_DOCUMENT,
+        ToolName.READ_SECTION,
+        ToolName.LIST_TABLES,
+        ToolName.READ_TABLE,
+    )
+
+
+def test_agent_table_backed_hit_without_table_ref_does_not_direct_read_table() -> None:
+    """table-backed hit 缺 table_ref 时不得强行直读表。"""
+
+    locator = _section_locator()
+    hit = SearchResult(
+        rank=1,
+        section_ref="section-scripted",
+        title="脚本表格",
+        excerpt="张明",
+        locator=locator,
+        citation=_citation(locator),
+        match_kind=SearchMatchKind.TABLE_ROW,
+        table_ref=None,
+    )
+    host = MinimalHost(MinimalFundDocumentAgent(_ScriptedTableHitService(hit)))  # type: ignore[arg-type]
+
+    result = host.run(document_id=_identity().document_id, query="张明")
+
+    assert result.failure is None
+    assert tuple(entry.tool_name for entry in result.tool_trace) == (
+        ToolName.SEARCH_DOCUMENT,
+        ToolName.READ_SECTION,
+        ToolName.LIST_TABLES,
+        ToolName.READ_TABLE,
+    )
+    assert result.tool_trace[3].arguments["table_ref"] == "table-scripted"
 
 
 def test_agent_table_aware_loop_answers_holding_table_information(tmp_path: Path) -> None:
