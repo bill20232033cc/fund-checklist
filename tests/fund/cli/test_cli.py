@@ -192,6 +192,10 @@ def test_cli_controlled_alias_query_uses_service_routing_without_format_change(m
     assert "Trace:" in stdout
     assert "search_document success" in stdout
     assert "read_section success" in stdout
+    assert "routing_trace" not in combined
+    assert "profile_name" not in combined
+    assert "selected_query" not in combined
+    assert "selected_index" not in combined
     assert "raw Docling" not in combined
     assert ".docling.json" not in combined
     assert str(work_dir) not in combined

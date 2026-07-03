@@ -6,6 +6,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from fund_agent.agent import AgentRunResult, MinimalFundDocumentAgent
 from fund_agent.fund.document_tools.constants import (
@@ -33,6 +34,9 @@ ConverterFactory = Callable[[Path], DoclingConverter]
 HostFactory = Callable[[FundDocumentToolService], MinimalHost]
 
 _MAX_QUERY_CANDIDATES = 3
+QueryRouteResultKind = Literal["success", "failure"]
+_ROUTE_RESULT_SUCCESS: QueryRouteResultKind = "success"
+_ROUTE_RESULT_FAILURE: QueryRouteResultKind = "failure"
 
 
 @dataclass(frozen=True)
@@ -42,6 +46,29 @@ class _ControlledQueryProfile:
     name: str
     aliases: tuple[str, ...]
     fallback_candidates: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class QueryRouteAttempt:
+    """Service query routing 单次尝试的审计事实。
+
+    参数:
+        query: 本次传给 Host/Agent 的原始 candidate query。
+        profile_name: 命中的受控 profile 名称；非受控 query 为 None。
+        result_kind: 本次尝试结果，只允许 success 或 failure。
+        failure_code: 失败时的稳定 failure code；成功时必须为 None。
+
+    返回:
+        不可变审计 DTO，仅属于 Service-level metadata。
+
+    异常:
+        本模型不执行 I/O，不抛出业务异常。
+    """
+
+    query: str
+    profile_name: str | None
+    result_kind: QueryRouteResultKind
+    failure_code: FailureCode | None = None
 
 
 CONTROLLED_QUERY_PROFILES = (
@@ -135,6 +162,7 @@ class ReadLocalReportResult:
     参数:
         document_id: public reading tools 使用的内容身份。
         agent_result: Host/Agent 返回的安全阅读结果。
+        routing_trace: Service-level query routing attempts 审计记录，不进入 Agent tool_trace。
 
     返回:
         可供 CLI 格式化的 DTO。
@@ -145,6 +173,7 @@ class ReadLocalReportResult:
 
     document_id: str
     agent_result: AgentRunResult
+    routing_trace: tuple[QueryRouteAttempt, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -195,6 +224,22 @@ class _PreparedReport:
 
     import_result: PdfImportResult
     store: DoclingDocumentStore
+
+
+@dataclass(frozen=True)
+class _QueryRoutePlan:
+    """Service 内部 query routing 执行计划。"""
+
+    profile_name: str | None
+    candidate_queries: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _QueryRouteRun:
+    """Service 内部 query routing 执行结果。"""
+
+    agent_result: AgentRunResult
+    routing_trace: tuple[QueryRouteAttempt, ...]
 
 
 class FundReadingService:
@@ -261,13 +306,15 @@ class FundReadingService:
         document_id = prepared.import_result.identity.document_id
         tool_service = FundDocumentToolService({document_id: prepared.store})
         host = self._host_factory(tool_service)
+        routed = self._run_with_query_candidates(
+            host=host,
+            document_id=document_id,
+            query=request.query,
+        )
         return ReadLocalReportResult(
             document_id=document_id,
-            agent_result=self._run_with_query_candidates(
-                host=host,
-                document_id=document_id,
-                query=request.query,
-            ),
+            agent_result=routed.agent_result,
+            routing_trace=routed.routing_trace,
         )
 
     def list_reports(self, request: ListReportsRequest) -> ListReportsResult:
@@ -365,21 +412,40 @@ class FundReadingService:
         host: MinimalHost,
         document_id: str,
         query: str,
-    ) -> AgentRunResult:
+    ) -> _QueryRouteRun:
         """按 Service 受控 query profile 顺序调用既有 Host/Agent 路径。"""
 
         last_not_found: AgentRunResult | None = None
-        for candidate_query in _candidate_queries_for_query(query):
+        attempts: list[QueryRouteAttempt] = []
+        route_plan = _route_plan_for_query(query)
+        for candidate_query in route_plan.candidate_queries:
             result = host.run(document_id=document_id, query=candidate_query)
             if result.failure is None:
-                return result
+                attempts.append(
+                    QueryRouteAttempt(
+                        query=candidate_query,
+                        profile_name=route_plan.profile_name,
+                        result_kind=_ROUTE_RESULT_SUCCESS,
+                        failure_code=None,
+                    )
+                )
+                return _QueryRouteRun(agent_result=result, routing_trace=tuple(attempts))
+
+            attempts.append(
+                QueryRouteAttempt(
+                    query=candidate_query,
+                    profile_name=route_plan.profile_name,
+                    result_kind=_ROUTE_RESULT_FAILURE,
+                    failure_code=result.failure.code,
+                )
+            )
             if result.failure.code is not FailureCode.NOT_FOUND:
-                return result
+                return _QueryRouteRun(agent_result=result, routing_trace=tuple(attempts))
             last_not_found = result
 
         if last_not_found is None:
             raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "controlled query routing 未生成候选 query")
-        return last_not_found
+        return _QueryRouteRun(agent_result=last_not_found, routing_trace=tuple(attempts))
 
 
 def _default_host_factory(tool_service: FundDocumentToolService) -> MinimalHost:
@@ -435,10 +501,19 @@ def _single_report_summary(document_id: str, store: DoclingDocumentStore) -> Rep
 def _candidate_queries_for_query(query: str) -> tuple[str, ...]:
     """按 hardcoded profile 为用户 query 生成最多 3 个候选 query。"""
 
+    return _route_plan_for_query(query).candidate_queries
+
+
+def _route_plan_for_query(query: str) -> _QueryRoutePlan:
+    """返回 query 对应的 Service routing plan，不做开放语义理解。"""
+
     for profile in _validated_query_profiles():
         if query in profile.aliases:
-            return _bounded_unique_candidates((query, *profile.fallback_candidates))
-    return (query,)
+            return _QueryRoutePlan(
+                profile_name=profile.name,
+                candidate_queries=_bounded_unique_candidates((query, *profile.fallback_candidates)),
+            )
+    return _QueryRoutePlan(profile_name=None, candidate_queries=(query,))
 
 
 def _validated_query_profiles() -> tuple[_ControlledQueryProfile, ...]:

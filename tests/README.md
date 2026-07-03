@@ -229,3 +229,21 @@ git diff --check
 ```
 
 Slice 9D 不测试开放式 query normalization、自动分词、同义词扩散、query intent 分类、embedding、LLM intent、top-N scan、rerank、歧义消解、`fund-checklist ask`、template contract execution、calculation framework、字段抽取、自动报告、投资判断或 release readiness。
+
+Post-MVP Slice 9E Service routing attempts audit 测试范围：
+
+- `ReadLocalReportResult.routing_trace` 记录 Service routing attempts，字段只包含 `query`、`profile_name`、`result_kind`、`failure_code`。
+- 原始 query 直接成功时只记录原始 query success；fallback candidate 成功时记录原始 failure + fallback success。
+- 所有 controlled candidates 都 `not_found` 时记录全部 attempts，最终 failure code 仍是 `not_found`。
+- 非受控 query 只记录原始 query；成功 attempt 的 `failure_code` 必须为 `None`。
+- CLI 默认输出格式不暴露 `routing_trace`；Agent `tool_trace` 不包含 Service routing metadata。
+
+Slice 9E 验证命令：
+
+```bash
+uv run pytest tests/fund/service/test_reading_service.py tests/fund/cli/test_cli.py
+uv run pytest tests/fund/agent/test_minimal_tool_loop.py tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_service.py
+git diff --check
+```
+
+Slice 9E 不测试新 profile、新召回能力、rerank、语义理解、分词、embedding、LLM intent、top-N scan、`fund-checklist ask`、template contract execution、calculation framework、字段抽取、自动报告、投资判断或 release readiness。

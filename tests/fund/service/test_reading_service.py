@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import fields
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from fund_agent.service import (
     FundReadingService,
     ImportLocalReportRequest,
     ListReportsRequest,
+    QueryRouteAttempt,
     ReadLocalReportRequest,
 )
 
@@ -179,6 +181,14 @@ def test_read_local_report_converts_records_and_calls_host_with_public_inputs(tm
 
     assert result.agent_result.answer == "受控回答"
     assert result.document_id.startswith("004393-2024-annual_report-")
+    assert result.routing_trace == (
+        QueryRouteAttempt(
+            query="基金经理",
+            profile_name=None,
+            result_kind="success",
+            failure_code=None,
+        ),
+    )
     assert _FakeConverter.calls == [result.document_id]
     assert _CapturingHost.calls == [{"document_id": result.document_id, "query": "基金经理"}]
     assert (work_dir / CATALOG_FILENAME).is_file()
@@ -317,6 +327,14 @@ def test_read_local_report_preserves_agent_failure_code(tmp_path: Path) -> None:
     assert result.agent_result.failure is not None
     assert result.agent_result.failure.code is FailureCode.NOT_FOUND
     assert result.agent_result.tool_trace[0].tool_name is ToolName.SEARCH_DOCUMENT
+    assert result.routing_trace == (
+        QueryRouteAttempt(
+            query="不存在的关键词",
+            profile_name=None,
+            result_kind="failure",
+            failure_code=FailureCode.NOT_FOUND,
+        ),
+    )
 
 
 @pytest.mark.parametrize(
@@ -368,7 +386,91 @@ def test_read_local_report_routes_controlled_alias_to_first_successful_candidate
     assert result.agent_result.failure is None
     assert result.agent_result.answer == "命中 股票投资明细"
     assert [call["query"] for call in _RoutingHost.calls] == ["前十大持仓", "股票投资明细"]
+    assert result.routing_trace == (
+        QueryRouteAttempt(
+            query="前十大持仓",
+            profile_name="holdings_top10",
+            result_kind="failure",
+            failure_code=FailureCode.NOT_FOUND,
+        ),
+        QueryRouteAttempt(
+            query="股票投资明细",
+            profile_name="holdings_top10",
+            result_kind="success",
+            failure_code=None,
+        ),
+    )
     assert result.agent_result.tool_trace[0].arguments["query"] == "股票投资明细"
+    assert "profile_name" not in result.agent_result.tool_trace[0].arguments
+    assert "routing_trace" not in result.agent_result.tool_trace[0].arguments
+
+
+def test_read_local_report_records_original_query_success_without_fallback(tmp_path: Path) -> None:
+    """原始 query 直接成功时，routing_trace 只记录原始 query success。"""
+
+    _FakeConverter.calls.clear()
+    _RoutingHost.calls.clear()
+    _RoutingHost.success_query = "前十大持仓"
+    pdf_path = tmp_path / "report.pdf"
+    work_dir = tmp_path / "work"
+    _write_pdf(pdf_path)
+    service = FundReadingService(converter_factory=_FakeConverter, host_factory=_RoutingHost)
+
+    result = service.read_local_report(
+        ReadLocalReportRequest(
+            pdf_path=pdf_path,
+            fund_code="004393",
+            fund_name="安信企业价值优选混合型证券投资基金",
+            year=2024,
+            query="前十大持仓",
+            work_dir=work_dir,
+        )
+    )
+
+    assert result.agent_result.failure is None
+    assert [call["query"] for call in _RoutingHost.calls] == ["前十大持仓"]
+    assert result.routing_trace == (
+        QueryRouteAttempt(
+            query="前十大持仓",
+            profile_name="holdings_top10",
+            result_kind="success",
+            failure_code=None,
+        ),
+    )
+
+
+def test_read_local_report_records_non_profile_query_only_once(tmp_path: Path) -> None:
+    """非受控 query 不走 fallback，routing_trace 只记录原始 query。"""
+
+    _FakeConverter.calls.clear()
+    _RoutingHost.calls.clear()
+    _RoutingHost.success_query = "股票投资明细"
+    pdf_path = tmp_path / "report.pdf"
+    work_dir = tmp_path / "work"
+    _write_pdf(pdf_path)
+    service = FundReadingService(converter_factory=_FakeConverter, host_factory=_RoutingHost)
+
+    result = service.read_local_report(
+        ReadLocalReportRequest(
+            pdf_path=pdf_path,
+            fund_code="004393",
+            fund_name="安信企业价值优选混合型证券投资基金",
+            year=2024,
+            query="股票投资明细",
+            work_dir=work_dir,
+        )
+    )
+
+    assert result.agent_result.failure is None
+    assert [call["query"] for call in _RoutingHost.calls] == ["股票投资明细"]
+    assert result.routing_trace == (
+        QueryRouteAttempt(
+            query="股票投资明细",
+            profile_name=None,
+            result_kind="success",
+            failure_code=None,
+        ),
+    )
 
 
 def test_read_local_report_returns_not_found_after_all_candidates_miss(tmp_path: Path) -> None:
@@ -400,6 +502,26 @@ def test_read_local_report_returns_not_found_after_all_candidates_miss(tmp_path:
         "期末基金资产组合情况",
         "基金资产组合情况",
     ]
+    assert result.routing_trace == (
+        QueryRouteAttempt(
+            query="资产配置",
+            profile_name="asset_allocation",
+            result_kind="failure",
+            failure_code=FailureCode.NOT_FOUND,
+        ),
+        QueryRouteAttempt(
+            query="期末基金资产组合情况",
+            profile_name="asset_allocation",
+            result_kind="failure",
+            failure_code=FailureCode.NOT_FOUND,
+        ),
+        QueryRouteAttempt(
+            query="基金资产组合情况",
+            profile_name="asset_allocation",
+            result_kind="failure",
+            failure_code=FailureCode.NOT_FOUND,
+        ),
+    )
 
 
 def test_controlled_query_profile_config_error_maps_to_schema_drift(monkeypatch) -> None:
@@ -418,3 +540,14 @@ def test_controlled_query_profile_config_error_maps_to_schema_drift(monkeypatch)
         reading_service_module._candidate_queries_for_query("前十大持仓")
 
     assert exc_info.value.code is FailureCode.SCHEMA_DRIFT
+
+
+def test_query_route_attempt_has_only_allowed_audit_fields() -> None:
+    """QueryRouteAttempt 不得新增派生解释字段。"""
+
+    assert {field.name for field in fields(QueryRouteAttempt)} == {
+        "query",
+        "profile_name",
+        "result_kind",
+        "failure_code",
+    }

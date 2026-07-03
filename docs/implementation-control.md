@@ -1,9 +1,9 @@
 # fund-checklist implementation-control
 
 更新时间：2026-07-03
-当前阶段：`POST_MVP_SLICE_9C_ACCEPTED_9D_PLANNED`
+当前阶段：`POST_MVP_SLICE_9D_ACCEPTED_9E_PLANNED`
 当前角色：control / CIC-lite controller
-当前目标：Slice 9C table-backed first-hit consumption 已提交并可收口；下一步只设计并执行 Slice 9D controlled query profile routing。不得扩成 gateflow / phaseflow / release-readiness，不新增 plan artifact，不进入开放语义理解、自动分词、embedding、LLM intent、template contract execution、calculation framework、`fund-checklist ask`、UI、自动报告或投资判断。
+当前目标：Slice 9D controlled query profile routing 已提交并可收口；下一步只设计并执行 Slice 9E Service routing attempts audit。不得扩成 gateflow / phaseflow / release-readiness，不新增 plan artifact，不进入开放语义理解、自动分词、embedding、LLM intent、template contract execution、calculation framework、`fund-checklist ask`、UI、自动报告或投资判断。
 
 ## 当前事实
 
@@ -140,6 +140,17 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - citation 必须来自实际命中的 candidate 对应的 section/table tool result，不引用 alias 本身。
 - trace 可记录实际使用的 query candidate；不新增 CLI 输出格式，测试可断言 Agent result / tool trace。
 - 9D 真实 CLI smoke 只证明 controlled alias routing：`--query 前十大持仓` 能走到 `股票投资明细`；不证明泛化问答。
+- Slice 9D 已完成并经 MiMo 明确 `ACCEPTED`；提交为 `91a4da9 Add controlled query profile routing`。
+- Slice 9D 验证结果：`uv run pytest tests/fund/service/test_reading_service.py tests/fund/cli/test_cli.py` -> `29 passed`；`uv run pytest tests/fund/agent/test_minimal_tool_loop.py tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_service.py` -> `26 passed`；`git diff --check` 通过。
+- Slice 9D 真实 CLI smoke 结果：exit code `0`，`--query 前十大持仓` 输出股票投资明细相关 answer、section/table citations 和 trace；该 smoke 只证明 controlled alias routing，不证明泛化问答。
+- Post-MVP Slice 9E 裁决为 Service routing attempts audit。
+- Slice 9E 只为 9D 的 Service routing 增加最小审计记录；它不是新召回能力，不新增 profile，不做 rerank、语义理解、计算或报告。
+- `ReadLocalReportResult` 可增加 `routing_trace` 字段，类型为 `tuple[QueryRouteAttempt, ...]` 或等价只读结构。
+- 每个 `QueryRouteAttempt` 只记录原始事实：`query`、`profile_name`、`result_kind`、`failure_code`。`result_kind` 仅允许 `success` / `failure`；成功 attempt 的 `failure_code` 必须为 `None`。
+- 不存 `selected_query`、`selected_index`、rationale、score、confidence、candidate_results 或 evidence links；`selected_query` / `selected_index` 只能从第一个 success attempt 推导。
+- `routing_trace` 是 Service-level audit metadata，不暴露给 Agent，不并入 Agent `tool_trace`。
+- CLI 默认输出格式不变；citations、answer、failure code、`search_document` contract、Agent policy、Store search 均不变。
+- failure 语义保持稳定：所有 candidate 都无命中时仍为 `not_found`；routing 配置异常仍为 `schema_drift`；ToolService 内部异常仍为 `unavailable`。
 
 ## CIC-lite Rules
 
@@ -156,10 +167,10 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## Next Action
 
-执行 Slice 9D implementation + tests。Allowed write set：
+执行 Slice 9E implementation + tests。Allowed write set：
 
 - `fund_agent/service/reading_service.py`
-- `fund_agent/service/__init__.py`，仅当新增 public routing DTO / constant 必须导出时允许
+- `fund_agent/service/__init__.py`，仅当新增 public `QueryRouteAttempt` / routing DTO 必须导出时允许
 - `tests/fund/service/test_reading_service.py`
 - `tests/fund/cli/test_cli.py`
 - `fund_agent/README.md`
@@ -168,12 +179,15 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 禁止事项：
 
+- 禁止新增或修改 9D controlled profiles。
 - 禁止改 `search_document` public contract。
 - 禁止把 routing 放入 Store / ToolService / Agent 层。
 - 禁止开放式 query normalization、自动分词、同义词扩散、query intent 分类、embedding 或 LLM intent。
 - 禁止扫描 top-N search results、rerank、歧义消解或 LLM 判断哪个表更相关。
-- 禁止扩充到三类 profile 之外的问法。
-- 禁止把 9D 解释为泛化问答能力；9D 只证明 hardcoded controlled profile routing。
+- 禁止新增 `selected_query`、`selected_index`、rationale、score、confidence、candidate_results 或 evidence links 等派生或解释字段。
+- 禁止把 `routing_trace` 并入 Agent `tool_trace` 或暴露给 Agent。
+- 禁止改变 CLI 默认输出格式。
+- 禁止把 9E 解释为新召回或泛化问答能力；9E 只证明 Service routing attempts 可审计。
 - 禁止新增 `fund-checklist ask` 或 CLI 参数。
 - 禁止接真实 LLM、embedding、外部搜索服务。
 - 禁止执行 template-informed intent routing、chapter contract execution、calculation framework、report audit、字段抽取、自动报告或投资判断。
@@ -191,13 +205,7 @@ uv run pytest tests/fund/service/test_reading_service.py tests/fund/cli/test_cli
 uv run pytest tests/fund/agent/test_minimal_tool_loop.py tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_service.py
 ```
 
-真实 CLI smoke：
-
-```bash
-uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '前十大持仓' --work-dir .fund_checklist_cli_smoke_9d
-```
-
-验收点：Service 对三类 hardcoded controlled profiles 生成最多 3 个 candidate queries，并按顺序调用既有 Host/Agent 路径；`前十大持仓` 可 fallback 到 `股票投资明细` 并返回实际命中 candidate 的 citation / trace。`search_document` contract、Agent policy、Store search、CLI 输出格式和 failure code 不变；旧 Agent/Store/ToolService/CLI 测试不回退。
+验收点：Service result 能记录 routing attempts：原始 query 直接成功、fallback candidate 成功、全部 candidate `not_found`、非受控 query 四类路径均可从 `routing_trace` 证实。CLI 默认输出格式、citation、answer、failure code、Agent `tool_trace`、`search_document` contract、Agent policy、Store search 不变；旧 Agent/Store/ToolService/CLI 测试不回退。
 
 ## Implementation Slices
 
@@ -216,6 +224,7 @@ uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值
 9B. Evidence retrieval substrate：增强 ToolService / Store 检索基底，使 section text、table caption、bounded table rows 都能成为可引用 search result；不修改 Agent retrieval policy，不要求 CLI table-only query 成功，不做 synonym intent、template contract、calculation、LLM ask 或报告生成。
 9C. Table-backed first-hit consumption：Agent 只在 first hit 为 high-certainty table-backed result 时直接 `read_table`；不扫描 top-N、不做 rerank、synonym routing、LLM 判断或 section 摘要。
 9D. Controlled query profile routing：Service 层对三类 hardcoded profile 生成最多 3 个 candidate queries 并顺序调用既有 Host/Agent；不改 `search_document` contract，不做开放语义理解、embedding、LLM intent 或计算。
+9E. Service routing attempts audit：为 9D routing 增加最小 attempts 记录；只记录 query/profile/result/failure_code，不存 selected_query、score、confidence 或解释字段，不改 CLI/Agent/ToolService contract。
 
 ## MVP Acceptance Matrix
 

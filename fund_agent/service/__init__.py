@@ -6,6 +6,7 @@ from fund_agent.service.reading_service import (
     ImportLocalReportResult,
     ListReportsRequest,
     ListReportsResult,
+    QueryRouteAttempt,
     ReadLocalReportRequest,
     ReadLocalReportResult,
 )
@@ -16,6 +17,7 @@ __all__ = [
     "ImportLocalReportResult",
     "ListReportsRequest",
     "ListReportsResult",
+    "QueryRouteAttempt",
     "ReadLocalReportRequest",
     "ReadLocalReportResult",
 ]
