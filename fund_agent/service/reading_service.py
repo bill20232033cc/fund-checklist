@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,6 +43,15 @@ _TARGET_NOT_FOUND_MESSAGE = "未找到符合受控披露目标的证据"
 _TABLE_TITLE_PREFIX = "表格标题:"
 _SECTION_TITLE_PREFIX = "来源章节:"
 _TABLE_BLOCK_HEADER = "相关表格:"
+_FEE_RATES_QUERY = "费用"
+_FEE_RATE_PERIOD_YEAR = "year"
+_FEE_RATE_NO_CHARGE_TEXT = "不收取"
+_FIELD_MANAGEMENT_FEE_RATE = "management_fee_rate"
+_FIELD_CUSTODIAN_FEE_RATE = "custodian_fee_rate"
+_FIELD_SALES_SERVICE_FEE_RATE = "sales_service_fee_rate"
+_SHARE_SCOPE_ALL = "all_share_classes"
+_SHARE_SCOPE_A = "A"
+_SHARE_SCOPE_C = "C"
 
 
 @dataclass(frozen=True)
@@ -88,6 +98,56 @@ class QueryRouteAttempt:
     failure_code: FailureCode | None = None
 
 
+@dataclass(frozen=True)
+class FeeRateExtraction:
+    """Service 层 fee_rates 受控字段抽取 DTO。
+
+    参数:
+        field_name: 受控字段名，仅覆盖 10C 裁决的三类费率字段。
+        decimal_percent_text: 披露文本值，百分数保持 "1.20%" 形式；A 类不收费保持
+            "不收取"，不改写为计算值。
+        period: 费率期间，10C 固定为 year。
+        share_class_scope: 份额类别适用范围；管理费/托管费为 all_share_classes，
+            销售服务费区分 A / C。
+        raw_text: 支撑该字段的安全原文片段，来自 10B 定位后的 Agent answer。
+        citation: 支撑该字段的年报 citation。
+
+    返回:
+        不可变字段抽取结果。
+
+    异常:
+        本模型不执行 I/O，不抛出业务异常。
+    """
+
+    field_name: str
+    decimal_percent_text: str
+    period: str
+    share_class_scope: str
+    raw_text: str
+    citation: Citation
+
+
+@dataclass(frozen=True)
+class ExtractFeeRatesResult:
+    """fee_rates 字段抽取 use case 的安全结果。
+
+    参数:
+        document_id: public reading tools 使用的内容身份。
+        fields: 成功抽取的受控字段 DTO；失败时为空。
+        failure: 稳定失败分类；成功时为 None。
+
+    返回:
+        可供 Service 调用方消费的结构化抽取结果。
+
+    异常:
+        本模型不抛出业务异常。
+    """
+
+    document_id: str
+    fields: tuple[FeeRateExtraction, ...]
+    failure: ToolFailure | None = None
+
+
 CONTROLLED_QUERY_PROFILES = (
     _ControlledQueryProfile(
         name="holdings_top10",
@@ -127,6 +187,55 @@ CONTROLLED_QUERY_PROFILES = (
 
 
 @dataclass(frozen=True)
+class _FeeRateExtractionSpec:
+    """Service 内部 fee_rates 字段抽取规则。"""
+
+    field_name: str
+    title: str
+    share_class_scope: str
+    pattern: re.Pattern[str]
+    controlled_value: str | None = None
+
+
+_FEE_RATE_EXTRACTION_SPECS = (
+    _FeeRateExtractionSpec(
+        field_name=_FIELD_MANAGEMENT_FEE_RATE,
+        title="基金管理费",
+        share_class_scope=_SHARE_SCOPE_ALL,
+        pattern=re.compile(
+            r"(?P<raw>[^。\n]*本基金的管理费按前一日基金资产净值的"
+            r"(?P<rate>\d+\.\d{2}%)的年\s*费\s*率计提)"
+        ),
+    ),
+    _FeeRateExtractionSpec(
+        field_name=_FIELD_CUSTODIAN_FEE_RATE,
+        title="基金托管费",
+        share_class_scope=_SHARE_SCOPE_ALL,
+        pattern=re.compile(
+            r"(?P<raw>[^。\n]*本基金的托管费按前一日基金资产净值的"
+            r"(?P<rate>\d+\.\d{2}%)的年\s*费\s*率计提)"
+        ),
+    ),
+    _FeeRateExtractionSpec(
+        field_name=_FIELD_SALES_SERVICE_FEE_RATE,
+        title="销售服务费",
+        share_class_scope=_SHARE_SCOPE_A,
+        pattern=re.compile(r"(?P<raw>本基金A类基\s*金份额不收取销售服务费)"),
+        controlled_value=_FEE_RATE_NO_CHARGE_TEXT,
+    ),
+    _FeeRateExtractionSpec(
+        field_name=_FIELD_SALES_SERVICE_FEE_RATE,
+        title="销售服务费",
+        share_class_scope=_SHARE_SCOPE_C,
+        pattern=re.compile(
+            r"(?P<raw>C类基\s*金份额的销售服务费按前一日C类基金资产净值的"
+            r"(?P<rate>\d+\.\d{2}%)年\s*费\s*率计提)"
+        ),
+    ),
+)
+
+
+@dataclass(frozen=True)
 class ImportLocalReportRequest:
     """登记本地基金年报 PDF 的 use case 请求。
 
@@ -153,6 +262,21 @@ class ImportLocalReportRequest:
     work_dir: Path
     report_type: ReportType = ReportType.ANNUAL_REPORT
     share_class: str | None = None
+
+
+@dataclass(frozen=True)
+class ExtractFeeRatesRequest(ImportLocalReportRequest):
+    """抽取 fee_rates 三类字段的 use case 请求。
+
+    参数:
+        继承本地年报导入请求字段；抽取 query 由 Service 固定为 fee_rates。
+
+    返回:
+        不可变请求 DTO。
+
+    异常:
+        本模型不执行 I/O，不抛出业务异常。
+    """
 
 
 @dataclass(frozen=True)
@@ -354,6 +478,55 @@ class FundReadingService:
             agent_result=routed.agent_result,
             routing_trace=routed.routing_trace,
         )
+
+    def extract_fee_rates(self, request: ExtractFeeRatesRequest) -> ExtractFeeRatesResult:
+        """基于 10B fee_rates 阅读定位结果抽取当前适用年费率字段。
+
+        参数:
+            request: 本地年报 fee_rates 抽取请求；Service 固定使用 query="费用"。
+
+        返回:
+            ExtractFeeRatesResult。成功时包含管理费、托管费、A 类销售服务费、
+            C 类销售服务费四条受控 DTO；失败时 fields 为空且 failure 为稳定分类。
+
+        异常:
+            DocumentToolError: 透传 PDF、repository、Docling conversion 或 parser health
+                的稳定失败分类；字段抽取失败写入 result.failure。
+        """
+
+        reading = self.read_local_report(
+            ReadLocalReportRequest(
+                pdf_path=request.pdf_path,
+                fund_code=request.fund_code,
+                fund_name=request.fund_name,
+                year=request.year,
+                work_dir=request.work_dir,
+                report_type=request.report_type,
+                share_class=request.share_class,
+                query=_FEE_RATES_QUERY,
+            )
+        )
+        if reading.agent_result.failure is not None:
+            return ExtractFeeRatesResult(
+                document_id=reading.document_id,
+                fields=(),
+                failure=reading.agent_result.failure,
+            )
+        try:
+            fields = _extract_fee_rate_fields(reading.agent_result)
+        except DocumentToolError as exc:
+            return ExtractFeeRatesResult(
+                document_id=reading.document_id,
+                fields=(),
+                failure=ToolFailure(code=exc.code, message=exc.message),
+            )
+        except Exception:
+            return ExtractFeeRatesResult(
+                document_id=reading.document_id,
+                fields=(),
+                failure=ToolFailure(code=FailureCode.UNAVAILABLE, message="fee_rates 字段抽取暂不可用"),
+            )
+        return ExtractFeeRatesResult(document_id=reading.document_id, fields=fields, failure=None)
 
     def list_reports(self, request: ListReportsRequest) -> ListReportsResult:
         """列出本地 completed reports 的安全摘要。
@@ -705,6 +878,96 @@ def _target_not_found_result(result: AgentRunResult) -> AgentRunResult:
         tool_trace=result.tool_trace,
         failure=ToolFailure(code=FailureCode.NOT_FOUND, message=_TARGET_NOT_FOUND_MESSAGE),
     )
+
+
+def _extract_fee_rate_fields(result: AgentRunResult) -> tuple[FeeRateExtraction, ...]:
+    """从 10B fee_rates 安全 answer 中抽取受控费率字段。"""
+
+    specs = _validated_fee_rate_specs()
+    segments = _fee_rate_segments(result.answer)
+    citations = _fee_rate_section_citations(result.citations)
+    fields: list[FeeRateExtraction] = []
+    for spec in specs:
+        segment = segments.get(spec.title)
+        citation = citations.get(spec.title)
+        if segment is None or citation is None:
+            raise DocumentToolError(FailureCode.NOT_FOUND, "fee_rates 候选章节不完整")
+        matches = tuple(spec.pattern.finditer(segment))
+        if len(matches) != 1:
+            raise DocumentToolError(FailureCode.NOT_FOUND, "fee_rates 字段无法唯一抽取")
+        match = matches[0]
+        raw_text = _compact_raw_text(match.group("raw"))
+        decimal_percent_text = spec.controlled_value or match.group("rate")
+        fields.append(
+            FeeRateExtraction(
+                field_name=spec.field_name,
+                decimal_percent_text=decimal_percent_text,
+                period=_FEE_RATE_PERIOD_YEAR,
+                share_class_scope=spec.share_class_scope,
+                raw_text=raw_text,
+                citation=citation,
+            )
+        )
+    return tuple(fields)
+
+
+def _validated_fee_rate_specs() -> tuple[_FeeRateExtractionSpec, ...]:
+    """校验 10C fee_rates 抽取配置，异常时映射为 schema_drift。"""
+
+    specs = tuple(_FEE_RATE_EXTRACTION_SPECS)
+    expected = (
+        (_FIELD_MANAGEMENT_FEE_RATE, _SHARE_SCOPE_ALL),
+        (_FIELD_CUSTODIAN_FEE_RATE, _SHARE_SCOPE_ALL),
+        (_FIELD_SALES_SERVICE_FEE_RATE, _SHARE_SCOPE_A),
+        (_FIELD_SALES_SERVICE_FEE_RATE, _SHARE_SCOPE_C),
+    )
+    actual = tuple((spec.field_name, spec.share_class_scope) for spec in specs)
+    if actual != expected:
+        raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "fee_rates 抽取配置异常")
+    for spec in specs:
+        if not spec.title or not spec.pattern.groupindex.get("raw"):
+            raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "fee_rates 抽取配置不完整")
+        if spec.controlled_value is None and not spec.pattern.groupindex.get("rate"):
+            raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "fee_rates 数值配置不完整")
+    return specs
+
+
+def _fee_rate_segments(answer: str) -> dict[str, str]:
+    """按 10B 三个固定披露标题切分安全 answer。"""
+
+    titles = ("基金管理费", "基金托管费", "销售服务费")
+    positions: list[tuple[str, int]] = []
+    search_start = 0
+    for title in titles:
+        position = answer.find(title, search_start)
+        if position < 0:
+            raise DocumentToolError(FailureCode.NOT_FOUND, "fee_rates 候选章节缺失")
+        positions.append((title, position))
+        search_start = position + len(title)
+
+    segments: dict[str, str] = {}
+    for index, (title, start) in enumerate(positions):
+        end = positions[index + 1][1] if index + 1 < len(positions) else len(answer)
+        segments[title] = answer[start:end]
+    return segments
+
+
+def _fee_rate_section_citations(citations: tuple[Citation, ...]) -> dict[str, Citation]:
+    """按 10B 聚合顺序为三段费率披露匹配 section citation。"""
+
+    titles = ("基金管理费", "基金托管费", "销售服务费")
+    section_citations = tuple(
+        citation for citation in citations if citation.locator.locator_kind is LocatorKind.SECTION
+    )
+    if len(section_citations) < len(titles):
+        raise DocumentToolError(FailureCode.NOT_FOUND, "fee_rates citation 不完整")
+    return dict(zip(titles, section_citations, strict=False))
+
+
+def _compact_raw_text(raw_text: str) -> str:
+    """压缩原文片段中的排版空白，但不改写披露值。"""
+
+    return re.sub(r"\s+", " ", raw_text).strip(" ：，。")
 
 
 def _bounded_unique_candidates(candidates: tuple[str, ...]) -> tuple[str, ...]:

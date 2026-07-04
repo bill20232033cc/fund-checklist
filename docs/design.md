@@ -680,6 +680,35 @@ Slice 10B 已经 MiMo review `ACCEPTED`：
 - 10B remaining blocking risk: none。
 - 10B 仍只完成 fee_rates 阅读定位；管理费率、托管费率、销售服务费率等字段值抽取后置，不属于 10B。
 
+Post-MVP 10C 裁决为 fee_rates value extraction contract：
+
+- 10C 是字段抽取 contract，不再属于纯阅读定位；仍必须通过 Service 边界消费 10B 已定位的安全章节 / citation，不得读取 raw Docling JSON、本地 PDF path、cache path、repository/private loader 或 `local_import_id`。
+- 10C 字段范围只包含三项：`management_fee_rate`、`custodian_fee_rate`、`sales_service_fee_rate`。
+- 10C 不抽取 `nav_growth_rate`、`benchmark_return_rate`、`turnover_rate`，不计算显性成本小计、总成本、扣费后收益率、年化收益率或 `R=A+B-C`。
+- 10C 口径固定为当前报告期适用的年费率；不是当期发生金额，不是历史调整前费率，不做历史期间加权。
+- 10C 必须处理份额类别口径：A 类销售服务费为不收取，C 类销售服务费为年费率；用户未指定 share class 时，返回 fund-level fee policy 中 A / C 两类口径，不猜默认份额。
+- 10C 遇到历史调整文字时，只抽取当前适用费率，并保留原文 citation；不得把调整前费率当成当前费率。
+- 10C 数值格式固定为受控 DTO 字段：`field_name`、`decimal_percent_text`、`period`、`share_class_scope`、`raw_text`、`citation`；`decimal_percent_text` 保持 `"1.20%"` 形式，`period` 固定为 `"year"`，不先转成 `0.012`。
+- 10C 失败语义不新增 failure code：字段未找到为 `not_found`；候选章节存在但无法唯一抽取为 `not_found`；配置异常为 `schema_drift`；内部异常为 `unavailable`。
+- 10C 可新增受控 extraction DTO 和 Service 方法 / use case；不得修改 `search_document` public contract，不得改变 Agent / Store / ToolService 职责边界。
+- 10C 暂不改变 CLI 默认输出格式；优先在 Service / tests 层验证结构化字段抽取，CLI 仍可保持 10B 的原文 answer / citation。
+- 10C 不接 LLM、embedding、外部搜索服务，不做开放语义理解、top-N rerank、歧义消解、template contract execution、chapter contract execution、自动报告或投资判断。
+
+Slice 10C 已经 MiMo review `ACCEPTED`：
+
+- Service 层已实现 fee_rates 三字段抽取 contract。
+- 抽取字段仍只限 `management_fee_rate`、`custodian_fee_rate`、`sales_service_fee_rate`。
+- 真实 CLI smoke 使用 `.fund_checklist_cli_smoke_10c`，`费用` exit code `0`；output 包含 `基金管理费`、`基金托管费`、`销售服务费`；Citations / Trace 存在；CLI 默认输出不暴露 `routing_trace`。
+- 10C remaining blocking risk: none reported。
+- 10C 没有进入净值增长率、基准收益率、换手率、成本计算、`R=A+B-C`、模板执行、自动报告或投资判断。
+
+Post-MVP 10D 暂定为 performance return fields extraction contract，开启前必须另行裁决：
+
+- 10D 候选字段为 `nav_growth_rate` 和 `benchmark_return_rate`。
+- 10D 开启前必须先裁决 period 口径，例如近 1 年、近 3 年、近 5 年、年度 2024 或成立以来；不得在同一字段名下混用多个期间。
+- `turnover_rate` 不进入 10D；它可能需要计算而非直接披露，后置为独立 turnover locator / calculation decision。
+- 10D 不得与 10C 合并，不得混入 fee_rates 字段抽取、成本计算、`R=A+B-C`、同类中位数、自动报告或投资判断。
+
 ### 8.3 Locator 最低标准
 
 MVP 采用宽松 locator 硬标准：
@@ -808,12 +837,12 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## 9. 已关闭裁决项
 
-MVP plan 已关闭。当前已完成到 Post-MVP Slice 10B；Slice 9F 因 keyword-level routing 无法证明 disclosure target success 被判定为 `BLOCKED_BY_DESIGN`；Slice 10A 已实现 Controlled disclosure target contract 并经 MiMo review `ACCEPTED`；Slice 10B 已实现 fee_rates reading locator 并经 MiMo review `ACCEPTED`。
+MVP plan 已关闭。当前已完成到 Post-MVP Slice 10C；Slice 9F 因 keyword-level routing 无法证明 disclosure target success 被判定为 `BLOCKED_BY_DESIGN`；Slice 10A 已实现 Controlled disclosure target contract 并经 MiMo review `ACCEPTED`；Slice 10B 已实现 fee_rates reading locator 并经 MiMo review `ACCEPTED`；Slice 10C 已实现 fee_rates value extraction contract 并经 MiMo review `ACCEPTED`。
 
 ## 10. 下一步最小可验证问题
 
 下一步只应验证一个问题：
 
 ```text
-下一步尚未裁决。若要进入字段值读取，必须另开字段抽取 contract，先裁决字段名、期间口径、份额类别、数值格式、citation 要求和失败语义；不得把管理费率、托管费率、销售服务费率、净值增长率、基准收益率或换手率抽取塞回 10B。若继续阅读定位路线，也必须保持 `search_document` contract、Agent/Store/ToolService、CLI 输出格式不变，不混入开放语义理解、embedding、LLM intent、top-N scan、rerank、歧义消解、template contract execution、calculation framework、字段抽取、自动报告或投资判断。
+下一步尚未裁决。若开启 10D，必须先裁决 performance return fields 的 period 口径，例如近 1 年、近 3 年、近 5 年、年度 2024 或成立以来；不得在同一字段名下混用多个期间。`turnover_rate` 不进入 10D，应后置为独立 turnover locator / calculation decision。不得把 10D 扩成成本计算、`R=A+B-C`、同类中位数、模板执行、自动报告或投资判断。
 ```

@@ -15,6 +15,7 @@ from fund_agent.fund.document_tools.errors import DocumentToolError
 from fund_agent.fund.document_tools.models import Citation, Locator, ToolFailure
 from fund_agent.fund.document_tools.persistent_repository import CATALOG_FILENAME
 from fund_agent.service import (
+    ExtractFeeRatesRequest,
     FundReadingService,
     ImportLocalReportRequest,
     ListReportsRequest,
@@ -188,6 +189,59 @@ class _FeeRatesHost:
             )
         return AgentRunResult(
             answer=f"来源章节: 6.4.10.2.1 {query}\n\n{query} 本段只作为阅读定位证据。",
+            citations=(_citation(document_id, LocatorKind.SECTION),),
+            tool_trace=(_trace_search(document_id, query, "success"),),
+            failure=None,
+        )
+
+
+class _FeeRatesValueHost:
+    """按 10C fee_rates 字段抽取口径返回安全章节原文。"""
+
+    calls: list[dict[str, str]] = []
+    management_answer: str = (
+        "来源章节: 7.4.10.2.1 基金管理费\n\n"
+        "注：(1)基金管理费每日计提，按月支付。本基金的管理费按前一日基金资产净值的1.20%的年费率计提。\n"
+        "计算方法如下：H=E×1.20%/当年天数\n"
+        "(2)本基金自2023年8月21日起，基金管理费的年费率由1.50%调整为1.20%。"
+    )
+    custodian_answer: str = (
+        "来源章节: 7.4.10.2.2 基金托管费\n\n"
+        "注：(1)基金托管费每日计提，按月支付。本基金的托管费按前一日基金资产净值的0.20%的年费率计提。\n"
+        "计算方法如下：H=E×0.20%/当年天数\n"
+        "(2)本基金自2023年8月21日起，基金托管费的年费率由0.25%调整为0.20%。"
+    )
+    sales_answer: str = (
+        "来源章节: 7.4.10.2.3 销售服务费\n\n"
+        "注：(1)基金销售服务费每日计提，按月支付。"
+        "本基金A类基金份额不收取销售服务费，"
+        "C类基金份额的销售服务费按前一日C类基金资产净值的0.40%年费率计提。"
+    )
+
+    def __init__(self, tool_service) -> None:
+        """保存 tool service 但不访问其内部 store。"""
+
+        self._tool_service = tool_service
+
+    def run(self, *, document_id: str, query: str) -> AgentRunResult:
+        """返回三段 fee_rates 安全阅读结果。"""
+
+        _FeeRatesValueHost.calls.append({"document_id": document_id, "query": query})
+        answer_by_query = {
+            "基金管理费": _FeeRatesValueHost.management_answer,
+            "基金托管费": _FeeRatesValueHost.custodian_answer,
+            "销售服务费": _FeeRatesValueHost.sales_answer,
+        }
+        answer = answer_by_query.get(query)
+        if answer is None:
+            return AgentRunResult(
+                answer="无关章节标题\n\n费用 只在正文中出现",
+                citations=(_citation(document_id, LocatorKind.SECTION),),
+                tool_trace=(_trace_search(document_id, query, "success"),),
+                failure=None,
+            )
+        return AgentRunResult(
+            answer=answer,
             citations=(_citation(document_id, LocatorKind.SECTION),),
             tool_trace=(_trace_search(document_id, query, "success"),),
             failure=None,
@@ -671,6 +725,108 @@ def test_fee_rates_profile_fails_closed_when_any_target_missing(tmp_path: Path) 
     assert all(attempt.profile_name == "fee_rates" for attempt in result.routing_trace)
 
 
+def test_extract_fee_rates_returns_controlled_dtos_with_raw_text_and_citation(tmp_path: Path) -> None:
+    """10C 只从 10B 安全定位结果抽取三类当前适用年费率字段。"""
+
+    _FakeConverter.calls.clear()
+    _FeeRatesValueHost.calls.clear()
+    pdf_path = tmp_path / "report.pdf"
+    work_dir = tmp_path / "work"
+    _write_pdf(pdf_path)
+    service = FundReadingService(converter_factory=_FakeConverter, host_factory=_FeeRatesValueHost)
+
+    result = service.extract_fee_rates(
+        ExtractFeeRatesRequest(
+            pdf_path=pdf_path,
+            fund_code="004393",
+            fund_name="安信企业价值优选混合型证券投资基金",
+            year=2024,
+            work_dir=work_dir,
+        )
+    )
+
+    assert result.failure is None
+    assert [call["query"] for call in _FeeRatesValueHost.calls] == [
+        "费用",
+        "基金管理费",
+        "基金托管费",
+        "销售服务费",
+    ]
+    values = {(field.field_name, field.share_class_scope): field for field in result.fields}
+    assert values[("management_fee_rate", "all_share_classes")].decimal_percent_text == "1.20%"
+    assert values[("custodian_fee_rate", "all_share_classes")].decimal_percent_text == "0.20%"
+    assert values[("sales_service_fee_rate", "A")].decimal_percent_text == "不收取"
+    assert values[("sales_service_fee_rate", "C")].decimal_percent_text == "0.40%"
+    assert "1.20%" in values[("management_fee_rate", "all_share_classes")].raw_text
+    assert "1.50%" not in values[("management_fee_rate", "all_share_classes")].raw_text
+    assert "0.20%" in values[("custodian_fee_rate", "all_share_classes")].raw_text
+    assert "0.25%" not in values[("custodian_fee_rate", "all_share_classes")].raw_text
+    assert values[("sales_service_fee_rate", "A")].decimal_percent_text != "0.00%"
+    assert all(field.period == "year" for field in result.fields)
+    assert all(field.raw_text for field in result.fields)
+    assert all(field.citation is not None for field in result.fields)
+
+
+def test_extract_fee_rates_fails_not_found_when_candidate_section_is_ambiguous(tmp_path: Path) -> None:
+    """候选章节存在但字段无法唯一抽取时必须返回 not_found。"""
+
+    _FakeConverter.calls.clear()
+    _FeeRatesValueHost.calls.clear()
+    original_answer = _FeeRatesValueHost.management_answer
+    _FeeRatesValueHost.management_answer = (
+        "来源章节: 7.4.10.2.1 基金管理费\n\n"
+        "本基金的管理费按前一日基金资产净值的1.20%的年费率计提。\n"
+        "本基金的管理费按前一日基金资产净值的1.30%的年费率计提。"
+    )
+    pdf_path = tmp_path / "report.pdf"
+    work_dir = tmp_path / "work"
+    _write_pdf(pdf_path)
+    service = FundReadingService(converter_factory=_FakeConverter, host_factory=_FeeRatesValueHost)
+
+    try:
+        result = service.extract_fee_rates(
+            ExtractFeeRatesRequest(
+                pdf_path=pdf_path,
+                fund_code="004393",
+                fund_name="安信企业价值优选混合型证券投资基金",
+                year=2024,
+                work_dir=work_dir,
+            )
+        )
+    finally:
+        _FeeRatesValueHost.management_answer = original_answer
+
+    assert result.fields == ()
+    assert result.failure is not None
+    assert result.failure.code is FailureCode.NOT_FOUND
+
+
+def test_extract_fee_rates_config_error_maps_to_schema_drift(monkeypatch, tmp_path: Path) -> None:
+    """抽取配置异常必须映射为 schema_drift，不新增失败分类。"""
+
+    _FakeConverter.calls.clear()
+    _FeeRatesValueHost.calls.clear()
+    monkeypatch.setattr(reading_service_module, "_FEE_RATE_EXTRACTION_SPECS", ())
+    pdf_path = tmp_path / "report.pdf"
+    work_dir = tmp_path / "work"
+    _write_pdf(pdf_path)
+    service = FundReadingService(converter_factory=_FakeConverter, host_factory=_FeeRatesValueHost)
+
+    result = service.extract_fee_rates(
+        ExtractFeeRatesRequest(
+            pdf_path=pdf_path,
+            fund_code="004393",
+            fund_name="安信企业价值优选混合型证券投资基金",
+            year=2024,
+            work_dir=work_dir,
+        )
+    )
+
+    assert result.fields == ()
+    assert result.failure is not None
+    assert result.failure.code is FailureCode.SCHEMA_DRIFT
+
+
 def test_read_local_report_records_non_profile_query_only_once(tmp_path: Path) -> None:
     """非受控 query 不走 fallback，routing_trace 只记录原始 query。"""
 
@@ -859,3 +1015,22 @@ def test_real_pdf_controlled_profiles_apply_disclosure_target_contract(tmp_path:
         "success",
         "success",
     ]
+
+    extracted = service.extract_fee_rates(
+        ExtractFeeRatesRequest(
+            pdf_path=REAL_SMOKE_PDF,
+            fund_code=REAL_SMOKE_FUND_CODE,
+            fund_name=REAL_SMOKE_FUND_NAME,
+            year=REAL_SMOKE_YEAR,
+            work_dir=work_dir,
+        )
+    )
+
+    assert extracted.failure is None
+    values = {(field.field_name, field.share_class_scope): field for field in extracted.fields}
+    assert values[("management_fee_rate", "all_share_classes")].decimal_percent_text == "1.20%"
+    assert values[("custodian_fee_rate", "all_share_classes")].decimal_percent_text == "0.20%"
+    assert values[("sales_service_fee_rate", "A")].decimal_percent_text == "不收取"
+    assert values[("sales_service_fee_rate", "C")].decimal_percent_text == "0.40%"
+    assert all(field.raw_text for field in extracted.fields)
+    assert all(field.citation is not None for field in extracted.fields)

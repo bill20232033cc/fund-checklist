@@ -301,3 +301,29 @@ uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值
 ```
 
 Slice 10B 不测试费率数值抽取、结构化字段输出、显性成本小计、总成本、扣费后收益率、年化收益率、开放语义理解、embedding、LLM intent、top-N scan、rerank、歧义消解、template contract execution、自动报告、投资判断或 release readiness。
+
+Post-MVP Slice 10C fee_rates value extraction contract 测试范围：
+
+- `FundReadingService.extract_fee_rates` 复用 10B fee_rates 阅读定位后的安全 Agent answer / citation，不读取 raw Docling JSON、本地 PDF path、cache path、repository/private loader 或 `local_import_id`。
+- 抽取字段仅限 `management_fee_rate`、`custodian_fee_rate`、`sales_service_fee_rate`。
+- 管理费率和托管费率只取当前报告期适用年费率，历史调整前费率不得当成当前值。
+- 销售服务费必须区分 A 类 `不收取` 和 C 类 `0.40%`，不得把“不收取”改写为 `0.00%`。
+- 每个字段 DTO 必须包含 `field_name`、`decimal_percent_text`、`period`、`share_class_scope`、`raw_text`、`citation`。
+- 字段未找到或候选章节无法唯一抽取返回 `not_found`；抽取配置异常返回 `schema_drift`；不新增 failure code 或 `partial_success`。
+- CLI 默认输出仍只展示 Answer、Citations、Trace，不展示结构化抽取 DTO 或 `routing_trace`。
+
+Slice 10C 验证命令：
+
+```bash
+uv run pytest tests/fund/service/test_reading_service.py tests/fund/cli/test_cli.py
+uv run pytest tests/fund/agent/test_minimal_tool_loop.py tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_service.py
+git diff --check
+```
+
+Slice 10C 真实 CLI smoke：
+
+```bash
+uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '费用' --work-dir .fund_checklist_cli_smoke_10c
+```
+
+Slice 10C 不测试净值增长率、基准收益率、换手率、显性成本小计、总成本、扣费后收益率、年化收益率、`R=A+B-C`、同类中位数、开放语义理解、embedding、LLM intent、top-N scan、rerank、歧义消解、template contract execution、chapter contract execution、自动报告、投资判断或 release readiness。
