@@ -8,7 +8,7 @@ import json
 from importlib.metadata import entry_points
 from pathlib import Path
 
-from fund_agent.agent import AgentRunResult
+from fund_agent.agent import AgentRunResult, ToolTraceEntry
 from fund_agent.cli.main import (
     CLASSIFIED_FAILURE_EXIT_CODE,
     SUCCESS_EXIT_CODE,
@@ -16,13 +16,19 @@ from fund_agent.cli.main import (
     build_parser,
     run_cli,
 )
-from fund_agent.fund.document_tools.constants import DOCLING_JSON_SUFFIX, FailureCode
+from fund_agent.fund.document_tools.constants import DOCLING_JSON_SUFFIX, FailureCode, LocatorKind, ToolName
 from fund_agent.fund.document_tools.errors import DocumentToolError
-from fund_agent.fund.document_tools.models import ToolFailure
+from fund_agent.fund.document_tools.models import Citation, Locator, ToolFailure
 from fund_agent.fund.document_tools.persistent_repository import CATALOG_FILENAME
+from fund_agent.service import ReadLocalReportResult
 
 cli_module = importlib.import_module("fund_agent.cli.main")
 service_module = importlib.import_module("fund_agent.service.reading_service")
+
+REAL_SMOKE_PDF = Path("基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf")
+REAL_SMOKE_FUND_CODE = "004393"
+REAL_SMOKE_FUND_NAME = "安信企业价值优选混合型证券投资基金"
+REAL_SMOKE_YEAR = "2024"
 
 
 def _write_pdf(path: Path) -> None:
@@ -83,6 +89,39 @@ def _run(args: list[str]) -> tuple[int, str, str]:
     stderr = io.StringIO()
     exit_code = run_cli(args, stdout=stdout, stderr=stderr)
     return exit_code, stdout.getvalue(), stderr.getvalue()
+
+
+def _citation(document_id: str, locator_kind: LocatorKind) -> Citation:
+    """构造 CLI 格式化所需的最小 citation。"""
+
+    return Citation(
+        document_id=document_id,
+        fund_code="004393",
+        fund_name="安信企业价值优选混合型证券投资基金",
+        year=2024,
+        report_type="annual_report",
+        locator=Locator(
+            document_id=document_id,
+            locator_kind=locator_kind,
+            section_ref="section-1",
+            table_ref="table-1" if locator_kind is LocatorKind.TABLE else None,
+            page_no=1,
+            page_range=None,
+            internal_ref=None,
+            internal_ref_available=False,
+        ),
+    )
+
+
+def _trace(tool_name: ToolName) -> ToolTraceEntry:
+    """构造 CLI 格式化所需的最小工具 trace。"""
+
+    return ToolTraceEntry(
+        tool_name=tool_name,
+        arguments={"document_id": "doc-1"},
+        result_kind="success",
+        failure_code=None,
+    )
 
 
 def test_cli_parses_read_command_arguments(tmp_path: Path) -> None:
@@ -156,14 +195,32 @@ def test_cli_happy_path_orchestrates_import_store_service_and_host(monkeypatch, 
     assert "local_import_id" not in combined
 
 
-def test_cli_controlled_alias_query_uses_service_routing_without_format_change(monkeypatch, tmp_path: Path) -> None:
-    """CLI 不新增输出格式，由 Service 将受控 alias 路由到实际 candidate。"""
+def test_cli_controlled_alias_query_keeps_plain_output(monkeypatch, tmp_path: Path) -> None:
+    """CLI 不展示 Service routing metadata，默认 plain text 输出格式不变。"""
 
-    _FakeConverter.calls.clear()
-    monkeypatch.setattr(service_module, "DoclingConverter", _FakeConverter)
     pdf_path = tmp_path / "report.pdf"
     work_dir = tmp_path / "work"
     _write_pdf(pdf_path)
+
+    class _FakeReadingService:
+        """替代真实 Service，隔离 CLI 输出格式测试。"""
+
+        def read_local_report(self, request):
+            """返回带 routing_trace 的结果，CLI 不应展示该字段。"""
+
+            assert request.query == "前十大持仓"
+            return ReadLocalReportResult(
+                document_id="doc-1",
+                agent_result=AgentRunResult(
+                    answer="8.3 期末按公允价值占基金资产净值比例大小排序的所有股票投资明细",
+                    citations=(_citation("doc-1", LocatorKind.TABLE),),
+                    tool_trace=(_trace(ToolName.SEARCH_DOCUMENT), _trace(ToolName.READ_SECTION)),
+                    failure=None,
+                ),
+                routing_trace=(),
+            )
+
+    monkeypatch.setattr(cli_module, "FundReadingService", _FakeReadingService)
 
     exit_code, stdout, stderr = _run(
         [
@@ -199,6 +256,86 @@ def test_cli_controlled_alias_query_uses_service_routing_without_format_change(m
     assert "raw Docling" not in combined
     assert ".docling.json" not in combined
     assert str(work_dir) not in combined
+
+
+def test_cli_real_pdf_controlled_profile_smokes_keep_plain_output(tmp_path: Path) -> None:
+    """真实 CLI smoke 必须应用 target contract 且不展示 routing_trace。"""
+
+    assert REAL_SMOKE_PDF.is_file(), "Slice 10A real-smoke PDF is required"
+    success_expectations = (
+        ("前十大持仓", ("股票投资明细", "前十名股票投资明细")),
+        ("资产配置", ("期末基金资产组合情况", "基金资产组合情况")),
+    )
+    work_dir = tmp_path / "real-cli-smoke-work"
+
+    for query, expected_evidence in success_expectations:
+        exit_code, stdout, stderr = _run(
+            [
+                "read",
+                "--pdf",
+                str(REAL_SMOKE_PDF),
+                "--fund-code",
+                REAL_SMOKE_FUND_CODE,
+                "--fund-name",
+                REAL_SMOKE_FUND_NAME,
+                "--year",
+                REAL_SMOKE_YEAR,
+                "--query",
+                query,
+                "--work-dir",
+                str(work_dir),
+            ]
+        )
+
+        combined = stdout + stderr
+        assert exit_code == SUCCESS_EXIT_CODE
+        assert stderr == ""
+        assert "Answer:" in stdout
+        assert any(evidence in stdout for evidence in expected_evidence)
+        assert "Citations:" in stdout
+        assert "- document_id=" in stdout
+        assert "Trace:" in stdout
+        assert "- search_document success" in stdout
+        assert "routing_trace" not in combined
+        assert "profile_name" not in combined
+        assert "selected_query" not in combined
+        assert "selected_index" not in combined
+        assert "raw Docling" not in combined
+        assert ".docling.json" not in combined
+        assert str(work_dir) not in combined
+
+    exit_code, stdout, stderr = _run(
+        [
+            "read",
+            "--pdf",
+            str(REAL_SMOKE_PDF),
+            "--fund-code",
+            REAL_SMOKE_FUND_CODE,
+            "--fund-name",
+            REAL_SMOKE_FUND_NAME,
+            "--year",
+            REAL_SMOKE_YEAR,
+            "--query",
+            "费用",
+            "--work-dir",
+            str(work_dir),
+        ]
+    )
+    combined = stdout + stderr
+    assert exit_code == SUCCESS_EXIT_CODE
+    assert stderr == ""
+    assert "Answer:" in stdout
+    assert "基金管理费" in stdout
+    assert "基金托管费" in stdout
+    assert "销售服务费" in stdout
+    assert "Citations:" in stdout
+    assert "- document_id=" in stdout
+    assert "Trace:" in stdout
+    assert "- search_document success" in stdout
+    assert "routing_trace" not in combined
+    assert "profile_name" not in combined
+    assert "selected_query" not in combined
+    assert "selected_index" not in combined
 
 
 def test_cli_reuses_existing_docling_json_without_converter(monkeypatch, tmp_path: Path) -> None:

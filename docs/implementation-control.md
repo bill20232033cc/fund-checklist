@@ -1,9 +1,9 @@
 # fund-checklist implementation-control
 
-更新时间：2026-07-03
-当前阶段：`POST_MVP_SLICE_9D_ACCEPTED_9E_PLANNED`
+更新时间：2026-07-04
+当前阶段：`POST_MVP_SLICE_10B_ACCEPTED`
 当前角色：control / CIC-lite controller
-当前目标：Slice 9D controlled query profile routing 已提交并可收口；下一步只设计并执行 Slice 9E Service routing attempts audit。不得扩成 gateflow / phaseflow / release-readiness，不新增 plan artifact，不进入开放语义理解、自动分词、embedding、LLM intent、template contract execution、calculation framework、`fund-checklist ask`、UI、自动报告或投资判断。
+当前目标：Slice 10B fee_rates reading locator 已经 MiMo `ACCEPTED`；当前无已裁决的下一实现 slice。不得扩成 gateflow / phaseflow / release-readiness，不新增 plan artifact，不进入 batch benchmark、开放语义理解、自动分词、embedding、LLM intent、template contract execution、calculation framework、费率数值抽取、`fund-checklist ask`、UI、自动报告或投资判断。
 
 ## 当前事实
 
@@ -151,6 +151,53 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - `routing_trace` 是 Service-level audit metadata，不暴露给 Agent，不并入 Agent `tool_trace`。
 - CLI 默认输出格式不变；citations、answer、failure code、`search_document` contract、Agent policy、Store search 均不变。
 - failure 语义保持稳定：所有 candidate 都无命中时仍为 `not_found`；routing 配置异常仍为 `schema_drift`；ToolService 内部异常仍为 `unavailable`。
+- Slice 9E 已完成并经 MiMo 明确 `ACCEPTED`；提交为 `336c94e Add service routing audit trace`。
+- Slice 9E 验证结果：`uv run pytest tests/fund/service/test_reading_service.py tests/fund/cli/test_cli.py` -> `32 passed`；`uv run pytest tests/fund/agent/test_minimal_tool_loop.py tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_service.py` -> `26 passed`；`git diff --check` 通过。
+- Post-MVP Slice 9F 裁决为 controlled profile real-smoke regression。
+- Slice 9F 不新增能力，只把 9D/9E 的三类 controlled profiles 在仓库本地真实 PDF 上固化为回归验证。
+- Slice 9F 真实样本范围仅限当前本地 PDF：`基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf`。样本缺失是 blocker，不得用 fake PDF 替代真实 smoke。
+- Slice 9F smoke queries 固定为三条：`前十大持仓`、`资产配置`、`费用`；不同时覆盖所有 alias，不扩大 profile 矩阵。
+- 每条 smoke 最小 expected evidence：
+  - `前十大持仓` -> `股票投资明细` 或 `前十名股票投资明细`。
+  - `资产配置` -> `期末基金资产组合情况` 或 `基金资产组合情况`。
+  - `费用` -> `基金费用` 或 `报告期内基金费用`。
+- 9F 只要求 exit code `0`、answer 包含 expected evidence 文本、Citations 存在、Trace 存在、CLI 默认输出不包含 `routing_trace`。
+- 9F 可在 Service 测试层继续断言 `routing_trace`；CLI smoke 层不展示 routing metadata。
+- 9F 不新增 profile、不新增 alias、不改 routing 规则、不改 `search_document` contract、不改 Agent/Store/ToolService、不改 CLI 输出格式、不做 benchmark 或 correctness evaluation。
+- Slice 9F verdict 为 `BLOCKED_BY_DESIGN` / `NOT_ACCEPTED`，不是 flaky smoke，也不是已知最小实现 bug。
+- Slice 9F 真实 CLI smoke 结果：
+  - `前十大持仓`: exit code `0`；answer 包含 `股票投资明细`；Citations / Trace 存在；无 `routing_trace`。
+  - `资产配置`: exit code `0`；answer 命中 `3.2.1 基金份额净值增长率...`，缺少 expected evidence `期末基金资产组合情况` / `基金资产组合情况`。
+  - `费用`: exit code `0`；answer 命中 `3.1 主要会计数据和财务指标`，缺少 expected evidence `基金费用` / `报告期内基金费用`。
+- Root cause：controlled alias original-query false positive；更一般地，keyword-level routing success 不能证明 disclosure target success。
+- 禁止把 9F 失败解释为“canonical candidates 不够多”或“真实 PDF 特殊”；当前问题是 query 命中与披露目标命中不是同一个事实。
+- `canonical-first` 不列为 10A 候选策略，也不作为 9F 修复方案；它仍是 keyword-level strategy，只改变候选顺序，不能建立 disclosure target success 契约。
+- 暂不引入 profile-specific evidence validation；该路线会引入 expected title pattern、section/table validator、score/confidence 或新 failure taxonomy，复杂度高，容易造成 doc truth drift。
+- Post-MVP 10A 裁决为 Controlled disclosure target contract，位置仍在 Service 层；Store / ToolService / Agent 不承担业务 profile 判断。
+- 10A 目标不是新增 synonym，而是为受控 profile 定义 disclosure target id、allowed evidence kind、acceptable section/table title family、expected citation kind 和 fail-closed semantics。
+- 10A 不做 LLM intent、embedding、top-N rerank、profile-specific complex validators、template contract execution、calculation framework、字段抽取、自动报告或投资判断。
+- Slice 10A 已经 MiMo review `ACCEPTED`。
+- Slice 10A 真实 CLI smoke 结果：
+  - `前十大持仓`: exit code `0`；evidence 为 `股票投资明细`；Citations / Trace 存在。
+  - `资产配置`: exit code `0`；evidence 为 `期末基金资产组合情况`；Citations / Trace 存在。
+  - `费用`: exit code `2`；`failure_code=not_found`；target contract fail-closed，没有把无关章节误判为成功。
+- `费用` 在当前 9D candidate 下 target-unmatched 是预期设计结果，不是 10A blocker。
+- Post-MVP 10B 裁决为 fee_rates reading locator，只做阅读定位和 citation，不抽取费率数值，不计算显性成本小计，不计算扣费后收益率。
+- 10B 将 `expenses` profile 改名 / 收窄为 `fee_rates`，`target_id` 为 `fee_rates`；旧 `expenses` 语义过宽，容易覆盖其他费用、交易费用、审计费用、所得税费用、佣金费率等对象。
+- `fee_rates` 的目标 disclosure sections 固定为三类：`基金管理费`、`基金托管费`、`销售服务费`。
+- `acceptable title family` 固定为：`基金管理费`、`基金托管费`、`销售服务费`。
+- 当前真实样本已存在三类披露，因此 10B smoke 对该样本要求三项目标全命中；不引入 `partial_success` 或新 failure taxonomy。
+- `fee_rates` aliases 可包含 `费用`、`费率`、`管理费`、`托管费`、`销售服务费`；alias 只用于进入 profile，不作为 evidence 成功条件。
+- controlled candidate queries 固定为原始 query、`基金管理费`、`基金托管费`、`销售服务费`；不把单独 `费率` 作为 evidence candidate。
+- Service 层可以对同一 profile 执行多个 target queries，并把多个安全 Agent result 聚合为一个 answer；每个 citation 必须来自实际命中的 section/table。
+- 10B 不修改 `search_document` public contract，不把业务 profile 判断下沉到 Store / ToolService / Agent，不改变 CLI 输出格式。
+- 10B 不做开放语义理解、自动分词、同义词扩散、embedding、LLM intent、top-N scan、rerank、歧义消解、字段抽取、自动报告或投资判断。
+- Slice 10B 已经 MiMo review `ACCEPTED`。
+- Slice 10B 真实 CLI smoke 结果：
+  - `费用`: exit code `0`；answer 同时包含 `基金管理费`、`基金托管费`、`销售服务费`。
+  - Citations / Trace 存在；CLI 默认输出不包含 `routing_trace`。
+- 10B remaining blocking risk: none。
+- 10B 仍只完成 fee_rates 阅读定位；管理费率、托管费率、销售服务费率等字段值抽取后置，不属于 10B。
 
 ## CIC-lite Rules
 
@@ -167,33 +214,28 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## Next Action
 
-执行 Slice 9E implementation + tests。Allowed write set：
-
-- `fund_agent/service/reading_service.py`
-- `fund_agent/service/__init__.py`，仅当新增 public `QueryRouteAttempt` / routing DTO 必须导出时允许
-- `tests/fund/service/test_reading_service.py`
-- `tests/fund/cli/test_cli.py`
-- `fund_agent/README.md`
-- `tests/README.md`
-- 必要时同步 `docs/design.md` / `docs/implementation-control.md`
+当前无已裁决的下一实现 slice。等待下一步裁决；不得把字段抽取、计算或模板执行作为 10B 续作直接实现。
 
 禁止事项：
 
-- 禁止新增或修改 9D controlled profiles。
+- 禁止把 10B closeout 扩成字段抽取或计算实现。
+- 禁止抽取管理费率、托管费率、销售服务费率、净值增长率、基准收益率或换手率。
+- 禁止输出结构化字段，例如 `management_fee_rate = 1.20%/年`。
+- 禁止计算显性成本小计、总成本、扣费后收益率或年化收益率。
+- 禁止新增 alias 覆盖矩阵。
 - 禁止改 `search_document` public contract。
 - 禁止把 routing 放入 Store / ToolService / Agent 层。
 - 禁止开放式 query normalization、自动分词、同义词扩散、query intent 分类、embedding 或 LLM intent。
 - 禁止扫描 top-N search results、rerank、歧义消解或 LLM 判断哪个表更相关。
-- 禁止新增 `selected_query`、`selected_index`、rationale、score、confidence、candidate_results 或 evidence links 等派生或解释字段。
-- 禁止把 `routing_trace` 并入 Agent `tool_trace` 或暴露给 Agent。
+- 禁止引入 score、confidence、rationale、`partial_success` 或新 failure taxonomy。
 - 禁止改变 CLI 默认输出格式。
-- 禁止把 9E 解释为新召回或泛化问答能力；9E 只证明 Service routing attempts 可审计。
+- 禁止把 10B 解释为泛化问答能力或 benchmark；10B 只建立 `fee_rates` 多 target 阅读定位。
 - 禁止新增 `fund-checklist ask` 或 CLI 参数。
 - 禁止接真实 LLM、embedding、外部搜索服务。
 - 禁止执行 template-informed intent routing、chapter contract execution、calculation framework、report audit、字段抽取、自动报告或投资判断。
 - 禁止暴露 raw Docling JSON、本地 PDF path、cache path、repository/private loader 或 `local_import_id`。
 
-最小验证命令：
+10B closeout 验证命令：
 
 ```bash
 uv run pytest tests/fund/service/test_reading_service.py tests/fund/cli/test_cli.py
@@ -205,7 +247,13 @@ uv run pytest tests/fund/service/test_reading_service.py tests/fund/cli/test_cli
 uv run pytest tests/fund/agent/test_minimal_tool_loop.py tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_service.py
 ```
 
-验收点：Service result 能记录 routing attempts：原始 query 直接成功、fallback candidate 成功、全部 candidate `not_found`、非受控 query 四类路径均可从 `routing_trace` 证实。CLI 默认输出格式、citation、answer、failure code、Agent `tool_trace`、`search_document` contract、Agent policy、Store search 不变；旧 Agent/Store/ToolService/CLI 测试不回退。
+10B 已完成真实 CLI smoke：
+
+```bash
+uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '费用' --work-dir .fund_checklist_cli_smoke_10b
+```
+
+验收点：10B 真实 CLI smoke 对 `--query 费用` exit code `0`，answer 同时包含 `基金管理费`、`基金托管费`、`销售服务费`，Citations / Trace 存在，CLI 默认输出不包含 `routing_trace`。旧 Service/CLI/Agent/Store/ToolService 测试不回退；未抽取费率数值，未计算成本或收益率。
 
 ## Implementation Slices
 
@@ -225,6 +273,9 @@ uv run pytest tests/fund/agent/test_minimal_tool_loop.py tests/fund/document_too
 9C. Table-backed first-hit consumption：Agent 只在 first hit 为 high-certainty table-backed result 时直接 `read_table`；不扫描 top-N、不做 rerank、synonym routing、LLM 判断或 section 摘要。
 9D. Controlled query profile routing：Service 层对三类 hardcoded profile 生成最多 3 个 candidate queries 并顺序调用既有 Host/Agent；不改 `search_document` contract，不做开放语义理解、embedding、LLM intent 或计算。
 9E. Service routing attempts audit：为 9D routing 增加最小 attempts 记录；只记录 query/profile/result/failure_code，不存 selected_query、score、confidence 或解释字段，不改 CLI/Agent/ToolService contract。
+9F. Controlled profile real-smoke regression：blocked by design；真实 smoke 证明 keyword-level routing success 不能证明 disclosure target success。
+10A. Controlled disclosure target contract：Service 层定义受控披露目标契约，区分 query 命中和披露目标命中；已 accepted；`费用` 在旧 target 下 fail-closed 为 `not_found`。
+10B. fee_rates reading locator：已 accepted；把 `expenses` 收窄为 `fee_rates`，定位 `基金管理费`、`基金托管费`、`销售服务费` 三个目标 disclosure sections；只做阅读定位和 citation，不抽取数值、不计算成本或收益率。
 
 ## MVP Acceptance Matrix
 

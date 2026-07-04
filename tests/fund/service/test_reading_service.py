@@ -10,9 +10,9 @@ import pytest
 
 import fund_agent.service.reading_service as reading_service_module
 from fund_agent.agent import AgentRunResult, ToolTraceEntry
-from fund_agent.fund.document_tools.constants import DOCLING_JSON_SUFFIX, FailureCode, ToolName
+from fund_agent.fund.document_tools.constants import DOCLING_JSON_SUFFIX, FailureCode, LocatorKind, ToolName
 from fund_agent.fund.document_tools.errors import DocumentToolError
-from fund_agent.fund.document_tools.models import ToolFailure
+from fund_agent.fund.document_tools.models import Citation, Locator, ToolFailure
 from fund_agent.fund.document_tools.persistent_repository import CATALOG_FILENAME
 from fund_agent.service import (
     FundReadingService,
@@ -21,6 +21,11 @@ from fund_agent.service import (
     QueryRouteAttempt,
     ReadLocalReportRequest,
 )
+
+REAL_SMOKE_PDF = Path("基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf")
+REAL_SMOKE_FUND_CODE = "004393"
+REAL_SMOKE_FUND_NAME = "安信企业价值优选混合型证券投资基金"
+REAL_SMOKE_YEAR = 2024
 
 
 def _write_pdf(path: Path) -> None:
@@ -110,6 +115,8 @@ class _RoutingHost:
 
     calls: list[dict[str, str]] = []
     success_query: str | None = None
+    success_answer: str | None = None
+    success_locator_kind: LocatorKind = LocatorKind.TABLE
 
     def __init__(self, tool_service) -> None:
         """保存 tool service 但不访问其内部 store。"""
@@ -122,8 +129,8 @@ class _RoutingHost:
         _RoutingHost.calls.append({"document_id": document_id, "query": query})
         if query == _RoutingHost.success_query:
             return AgentRunResult(
-                answer=f"命中 {query}",
-                citations=(),
+                answer=_RoutingHost.success_answer or f"命中 {query}",
+                citations=(_citation(document_id, _RoutingHost.success_locator_kind),),
                 tool_trace=(_trace_search(document_id, query, "success"),),
                 failure=None,
             )
@@ -132,6 +139,58 @@ class _RoutingHost:
             citations=(),
             tool_trace=(_trace_search(document_id, query, "failure", FailureCode.NOT_FOUND),),
             failure=ToolFailure(code=FailureCode.NOT_FOUND, message="未找到可读取的匹配章节"),
+        )
+
+
+class _AlwaysWrongTargetHost:
+    """返回 keyword-level success，但永远不满足 disclosure target。"""
+
+    calls: list[dict[str, str]] = []
+
+    def __init__(self, tool_service) -> None:
+        """保存 tool service 但不访问其内部 store。"""
+
+        self._tool_service = tool_service
+
+    def run(self, *, document_id: str, query: str) -> AgentRunResult:
+        """每个 candidate 都返回错误标题的成功结果。"""
+
+        _AlwaysWrongTargetHost.calls.append({"document_id": document_id, "query": query})
+        return AgentRunResult(
+            answer=f"无关章节标题\n\n{query} 只在正文中出现",
+            citations=(_citation(document_id, LocatorKind.SECTION),),
+            tool_trace=(_trace_search(document_id, query, "success"),),
+            failure=None,
+        )
+
+
+class _FeeRatesHost:
+    """按 10B fee_rates 目标返回多段可聚合结果。"""
+
+    calls: list[dict[str, str]] = []
+    successful_queries: set[str] = {"基金管理费", "基金托管费", "销售服务费"}
+
+    def __init__(self, tool_service) -> None:
+        """保存 tool service 但不访问其内部 store。"""
+
+        self._tool_service = tool_service
+
+    def run(self, *, document_id: str, query: str) -> AgentRunResult:
+        """原始 query 失败，三个费用 target query 分别返回安全结果。"""
+
+        _FeeRatesHost.calls.append({"document_id": document_id, "query": query})
+        if query not in _FeeRatesHost.successful_queries:
+            return AgentRunResult(
+                answer="无关章节标题\n\n费用 只在正文中出现",
+                citations=(_citation(document_id, LocatorKind.SECTION),),
+                tool_trace=(_trace_search(document_id, query, "success"),),
+                failure=None,
+            )
+        return AgentRunResult(
+            answer=f"来源章节: 6.4.10.2.1 {query}\n\n{query} 本段只作为阅读定位证据。",
+            citations=(_citation(document_id, LocatorKind.SECTION),),
+            tool_trace=(_trace_search(document_id, query, "success"),),
+            failure=None,
         )
 
 
@@ -161,6 +220,28 @@ def _trace_search(
         arguments={"document_id": document_id, "query": query},
         result_kind=result_kind,
         failure_code=failure_code,
+    )
+
+
+def _citation(document_id: str, locator_kind: LocatorKind) -> Citation:
+    """构造不含本地路径的最小 citation。"""
+
+    return Citation(
+        document_id=document_id,
+        fund_code="004393",
+        fund_name="安信企业价值优选混合型证券投资基金",
+        year=2024,
+        report_type="annual_report",
+        locator=Locator(
+            document_id=document_id,
+            locator_kind=locator_kind,
+            section_ref="section-1",
+            table_ref="table-1" if locator_kind is LocatorKind.TABLE else None,
+            page_no=1,
+            page_range=None,
+            internal_ref=None,
+            internal_ref_available=False,
+        ),
     )
 
 
@@ -345,20 +426,22 @@ def test_read_local_report_preserves_agent_failure_code(tmp_path: Path) -> None:
         ("持仓明细", ("持仓明细", "股票投资明细", "前十名股票投资明细")),
         ("资产配置", ("资产配置", "期末基金资产组合情况", "基金资产组合情况")),
         ("资产组合", ("资产组合", "期末基金资产组合情况", "基金资产组合情况")),
-        ("费用", ("费用", "基金费用", "报告期内基金费用")),
-        ("管理费", ("管理费", "基金费用", "报告期内基金费用")),
-        ("托管费", ("托管费", "基金费用", "报告期内基金费用")),
+        ("费用", ("费用", "基金管理费", "基金托管费", "销售服务费")),
+        ("费率", ("费率", "基金管理费", "基金托管费", "销售服务费")),
+        ("管理费", ("管理费", "基金管理费", "基金托管费", "销售服务费")),
+        ("托管费", ("托管费", "基金管理费", "基金托管费", "销售服务费")),
+        ("销售服务费", ("销售服务费", "基金管理费", "基金托管费")),
         ("股票投资明细", ("股票投资明细",)),
     ],
 )
 def test_controlled_query_profiles_generate_bounded_candidates(query: str, expected: tuple[str, ...]) -> None:
-    """Service 层 profile 只为三类 exact alias 生成最多 3 个候选。"""
+    """Service 层 profile 只为裁决内 exact alias 生成受控候选。"""
 
     candidates = reading_service_module._candidate_queries_for_query(query)
 
     assert candidates == expected
     assert query in candidates
-    assert len(candidates) <= 3
+    assert len(candidates) <= 4
 
 
 def test_read_local_report_routes_controlled_alias_to_first_successful_candidate(tmp_path: Path) -> None:
@@ -367,6 +450,8 @@ def test_read_local_report_routes_controlled_alias_to_first_successful_candidate
     _FakeConverter.calls.clear()
     _RoutingHost.calls.clear()
     _RoutingHost.success_query = "股票投资明细"
+    _RoutingHost.success_answer = "8.3 期末按公允价值占基金资产净值比例大小排序的所有股票投资明细"
+    _RoutingHost.success_locator_kind = LocatorKind.TABLE
     pdf_path = tmp_path / "report.pdf"
     work_dir = tmp_path / "work"
     _write_pdf(pdf_path)
@@ -384,7 +469,7 @@ def test_read_local_report_routes_controlled_alias_to_first_successful_candidate
     )
 
     assert result.agent_result.failure is None
-    assert result.agent_result.answer == "命中 股票投资明细"
+    assert result.agent_result.answer == "8.3 期末按公允价值占基金资产净值比例大小排序的所有股票投资明细"
     assert [call["query"] for call in _RoutingHost.calls] == ["前十大持仓", "股票投资明细"]
     assert result.routing_trace == (
         QueryRouteAttempt(
@@ -411,6 +496,8 @@ def test_read_local_report_records_original_query_success_without_fallback(tmp_p
     _FakeConverter.calls.clear()
     _RoutingHost.calls.clear()
     _RoutingHost.success_query = "前十大持仓"
+    _RoutingHost.success_answer = "8.3 期末按公允价值占基金资产净值比例大小排序的所有股票投资明细"
+    _RoutingHost.success_locator_kind = LocatorKind.TABLE
     pdf_path = tmp_path / "report.pdf"
     work_dir = tmp_path / "work"
     _write_pdf(pdf_path)
@@ -439,12 +526,159 @@ def test_read_local_report_records_original_query_success_without_fallback(tmp_p
     )
 
 
+def test_controlled_profile_does_not_short_circuit_on_keyword_only_success(tmp_path: Path) -> None:
+    """受控 profile 不得把 keyword-level success 当成 disclosure target success。"""
+
+    _FakeConverter.calls.clear()
+    _AlwaysWrongTargetHost.calls.clear()
+    pdf_path = tmp_path / "report.pdf"
+    work_dir = tmp_path / "work"
+    _write_pdf(pdf_path)
+    service = FundReadingService(converter_factory=_FakeConverter, host_factory=_AlwaysWrongTargetHost)
+
+    result = service.read_local_report(
+        ReadLocalReportRequest(
+            pdf_path=pdf_path,
+            fund_code="004393",
+            fund_name="安信企业价值优选混合型证券投资基金",
+            year=2024,
+            query="资产配置",
+            work_dir=work_dir,
+        )
+    )
+
+    assert result.agent_result.failure is not None
+    assert result.agent_result.failure.code is FailureCode.NOT_FOUND
+    assert [call["query"] for call in _AlwaysWrongTargetHost.calls] == [
+        "资产配置",
+        "期末基金资产组合情况",
+        "基金资产组合情况",
+    ]
+    assert result.routing_trace == (
+        QueryRouteAttempt(
+            query="资产配置",
+            profile_name="asset_allocation",
+            result_kind="failure",
+            failure_code=FailureCode.NOT_FOUND,
+        ),
+        QueryRouteAttempt(
+            query="期末基金资产组合情况",
+            profile_name="asset_allocation",
+            result_kind="failure",
+            failure_code=FailureCode.NOT_FOUND,
+        ),
+        QueryRouteAttempt(
+            query="基金资产组合情况",
+            profile_name="asset_allocation",
+            result_kind="failure",
+            failure_code=FailureCode.NOT_FOUND,
+        ),
+    )
+
+
+def test_fee_rates_profile_aggregates_all_target_sections(tmp_path: Path) -> None:
+    """fee_rates profile 必须聚合三类费用披露章节后才返回成功。"""
+
+    _FakeConverter.calls.clear()
+    _FeeRatesHost.calls.clear()
+    _FeeRatesHost.successful_queries = {"基金管理费", "基金托管费", "销售服务费"}
+    pdf_path = tmp_path / "report.pdf"
+    work_dir = tmp_path / "work"
+    _write_pdf(pdf_path)
+    service = FundReadingService(converter_factory=_FakeConverter, host_factory=_FeeRatesHost)
+
+    result = service.read_local_report(
+        ReadLocalReportRequest(
+            pdf_path=pdf_path,
+            fund_code="004393",
+            fund_name="安信企业价值优选混合型证券投资基金",
+            year=2024,
+            query="费用",
+            work_dir=work_dir,
+        )
+    )
+
+    assert result.agent_result.failure is None
+    assert "基金管理费" in result.agent_result.answer
+    assert "基金托管费" in result.agent_result.answer
+    assert "销售服务费" in result.agent_result.answer
+    assert len(result.agent_result.citations) == 3
+    assert [call["query"] for call in _FeeRatesHost.calls] == [
+        "费用",
+        "基金管理费",
+        "基金托管费",
+        "销售服务费",
+    ]
+    assert result.routing_trace == (
+        QueryRouteAttempt(
+            query="费用",
+            profile_name="fee_rates",
+            result_kind="failure",
+            failure_code=FailureCode.NOT_FOUND,
+        ),
+        QueryRouteAttempt(
+            query="基金管理费",
+            profile_name="fee_rates",
+            result_kind="success",
+            failure_code=None,
+        ),
+        QueryRouteAttempt(
+            query="基金托管费",
+            profile_name="fee_rates",
+            result_kind="success",
+            failure_code=None,
+        ),
+        QueryRouteAttempt(
+            query="销售服务费",
+            profile_name="fee_rates",
+            result_kind="success",
+            failure_code=None,
+        ),
+    )
+
+
+def test_fee_rates_profile_fails_closed_when_any_target_missing(tmp_path: Path) -> None:
+    """fee_rates 三目标未全命中时仍按 not_found fail-closed。"""
+
+    _FakeConverter.calls.clear()
+    _FeeRatesHost.calls.clear()
+    _FeeRatesHost.successful_queries = {"基金管理费", "基金托管费"}
+    pdf_path = tmp_path / "report.pdf"
+    work_dir = tmp_path / "work"
+    _write_pdf(pdf_path)
+    service = FundReadingService(converter_factory=_FakeConverter, host_factory=_FeeRatesHost)
+
+    result = service.read_local_report(
+        ReadLocalReportRequest(
+            pdf_path=pdf_path,
+            fund_code="004393",
+            fund_name="安信企业价值优选混合型证券投资基金",
+            year=2024,
+            query="费用",
+            work_dir=work_dir,
+        )
+    )
+
+    assert result.agent_result.failure is not None
+    assert result.agent_result.failure.code is FailureCode.NOT_FOUND
+    assert result.agent_result.answer == ""
+    assert [attempt.query for attempt in result.routing_trace] == [
+        "费用",
+        "基金管理费",
+        "基金托管费",
+        "销售服务费",
+    ]
+    assert all(attempt.profile_name == "fee_rates" for attempt in result.routing_trace)
+
+
 def test_read_local_report_records_non_profile_query_only_once(tmp_path: Path) -> None:
     """非受控 query 不走 fallback，routing_trace 只记录原始 query。"""
 
     _FakeConverter.calls.clear()
     _RoutingHost.calls.clear()
     _RoutingHost.success_query = "股票投资明细"
+    _RoutingHost.success_answer = "命中 股票投资明细"
+    _RoutingHost.success_locator_kind = LocatorKind.TABLE
     pdf_path = tmp_path / "report.pdf"
     work_dir = tmp_path / "work"
     _write_pdf(pdf_path)
@@ -479,6 +713,8 @@ def test_read_local_report_returns_not_found_after_all_candidates_miss(tmp_path:
     _FakeConverter.calls.clear()
     _RoutingHost.calls.clear()
     _RoutingHost.success_query = None
+    _RoutingHost.success_answer = None
+    _RoutingHost.success_locator_kind = LocatorKind.TABLE
     pdf_path = tmp_path / "report.pdf"
     work_dir = tmp_path / "work"
     _write_pdf(pdf_path)
@@ -531,7 +767,13 @@ def test_controlled_query_profile_config_error_maps_to_schema_drift(monkeypatch)
         reading_service_module._ControlledQueryProfile(
             name="bad",
             aliases=("前十大持仓",),
-            fallback_candidates=("a", "b", "c"),
+            fallback_candidates=("a", "b", "c", "d"),
+            disclosure_target=reading_service_module._ControlledDisclosureTarget(
+                target_id="bad",
+                allowed_evidence_kinds=(LocatorKind.SECTION,),
+                acceptable_title_family=("bad",),
+                expected_citation_kinds=(LocatorKind.SECTION,),
+            ),
         ),
     )
     monkeypatch.setattr(reading_service_module, "CONTROLLED_QUERY_PROFILES", bad_profiles)
@@ -551,3 +793,69 @@ def test_query_route_attempt_has_only_allowed_audit_fields() -> None:
         "result_kind",
         "failure_code",
     }
+
+
+def test_real_pdf_controlled_profiles_apply_disclosure_target_contract(tmp_path: Path) -> None:
+    """真实本地年报必须区分 disclosure target success 与 keyword success。"""
+
+    assert REAL_SMOKE_PDF.is_file(), "Slice 10A real-smoke PDF is required"
+    success_expectations = (
+        ("前十大持仓", "holdings_top10", ("股票投资明细", "前十名股票投资明细")),
+        ("资产配置", "asset_allocation", ("期末基金资产组合情况", "基金资产组合情况")),
+    )
+    service = FundReadingService()
+    work_dir = tmp_path / "real-smoke-work"
+
+    for query, profile_name, expected_evidence in success_expectations:
+        result = service.read_local_report(
+            ReadLocalReportRequest(
+                pdf_path=REAL_SMOKE_PDF,
+                fund_code=REAL_SMOKE_FUND_CODE,
+                fund_name=REAL_SMOKE_FUND_NAME,
+                year=REAL_SMOKE_YEAR,
+                query=query,
+                work_dir=work_dir,
+            )
+        )
+
+        assert result.agent_result.failure is None
+        assert any(evidence in result.agent_result.answer for evidence in expected_evidence)
+        assert result.agent_result.citations
+        assert result.agent_result.tool_trace
+        assert result.routing_trace
+        assert result.routing_trace[0].query == query
+        assert all(attempt.profile_name == profile_name for attempt in result.routing_trace)
+        assert result.routing_trace[-1].result_kind == "success"
+        assert result.routing_trace[-1].failure_code is None
+        assert result.routing_trace[-1].query in reading_service_module._candidate_queries_for_query(query)
+
+    fee_rates = service.read_local_report(
+        ReadLocalReportRequest(
+            pdf_path=REAL_SMOKE_PDF,
+            fund_code=REAL_SMOKE_FUND_CODE,
+            fund_name=REAL_SMOKE_FUND_NAME,
+            year=REAL_SMOKE_YEAR,
+            query="费用",
+            work_dir=work_dir,
+        )
+    )
+
+    assert fee_rates.agent_result.failure is None
+    assert "基金管理费" in fee_rates.agent_result.answer
+    assert "基金托管费" in fee_rates.agent_result.answer
+    assert "销售服务费" in fee_rates.agent_result.answer
+    assert fee_rates.agent_result.citations
+    assert fee_rates.agent_result.tool_trace
+    assert [attempt.query for attempt in fee_rates.routing_trace] == [
+        "费用",
+        "基金管理费",
+        "基金托管费",
+        "销售服务费",
+    ]
+    assert all(attempt.profile_name == "fee_rates" for attempt in fee_rates.routing_trace)
+    assert [attempt.result_kind for attempt in fee_rates.routing_trace] == [
+        "failure",
+        "success",
+        "success",
+        "success",
+    ]

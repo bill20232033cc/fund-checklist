@@ -12,6 +12,7 @@ from fund_agent.agent import AgentRunResult, MinimalFundDocumentAgent
 from fund_agent.fund.document_tools.constants import (
     DOCLING_JSON_SUFFIX,
     FailureCode,
+    LocatorKind,
     ReportType,
 )
 from fund_agent.fund.document_tools.docling_converter import DoclingConverter, make_docling_json_ref
@@ -33,10 +34,24 @@ DOCLING_JSON_DIRNAME = "docling_json"
 ConverterFactory = Callable[[Path], DoclingConverter]
 HostFactory = Callable[[FundDocumentToolService], MinimalHost]
 
-_MAX_QUERY_CANDIDATES = 3
+_MAX_QUERY_CANDIDATES = 4
 QueryRouteResultKind = Literal["success", "failure"]
 _ROUTE_RESULT_SUCCESS: QueryRouteResultKind = "success"
 _ROUTE_RESULT_FAILURE: QueryRouteResultKind = "failure"
+_TARGET_NOT_FOUND_MESSAGE = "未找到符合受控披露目标的证据"
+_TABLE_TITLE_PREFIX = "表格标题:"
+_SECTION_TITLE_PREFIX = "来源章节:"
+_TABLE_BLOCK_HEADER = "相关表格:"
+
+
+@dataclass(frozen=True)
+class _ControlledDisclosureTarget:
+    """Service 内部受控披露目标契约。"""
+
+    target_id: str
+    allowed_evidence_kinds: tuple[LocatorKind, ...]
+    acceptable_title_family: tuple[str, ...]
+    expected_citation_kinds: tuple[LocatorKind, ...]
 
 
 @dataclass(frozen=True)
@@ -46,6 +61,8 @@ class _ControlledQueryProfile:
     name: str
     aliases: tuple[str, ...]
     fallback_candidates: tuple[str, ...]
+    disclosure_target: _ControlledDisclosureTarget
+    require_all_target_candidates: bool = False
 
 
 @dataclass(frozen=True)
@@ -76,16 +93,35 @@ CONTROLLED_QUERY_PROFILES = (
         name="holdings_top10",
         aliases=("前十大持仓", "重仓股", "持仓明细"),
         fallback_candidates=("股票投资明细", "前十名股票投资明细"),
+        disclosure_target=_ControlledDisclosureTarget(
+            target_id="holdings_top10",
+            allowed_evidence_kinds=(LocatorKind.TABLE,),
+            acceptable_title_family=("股票投资明细", "前十名股票投资明细"),
+            expected_citation_kinds=(LocatorKind.TABLE,),
+        ),
     ),
     _ControlledQueryProfile(
         name="asset_allocation",
         aliases=("资产配置", "资产组合"),
         fallback_candidates=("期末基金资产组合情况", "基金资产组合情况"),
+        disclosure_target=_ControlledDisclosureTarget(
+            target_id="asset_allocation",
+            allowed_evidence_kinds=(LocatorKind.TABLE,),
+            acceptable_title_family=("期末基金资产组合情况", "基金资产组合情况"),
+            expected_citation_kinds=(LocatorKind.TABLE,),
+        ),
     ),
     _ControlledQueryProfile(
-        name="expenses",
-        aliases=("费用", "管理费", "托管费"),
-        fallback_candidates=("基金费用", "报告期内基金费用"),
+        name="fee_rates",
+        aliases=("费用", "费率", "管理费", "托管费", "销售服务费"),
+        fallback_candidates=("基金管理费", "基金托管费", "销售服务费"),
+        disclosure_target=_ControlledDisclosureTarget(
+            target_id="fee_rates",
+            allowed_evidence_kinds=(LocatorKind.SECTION, LocatorKind.TABLE),
+            acceptable_title_family=("基金管理费", "基金托管费", "销售服务费"),
+            expected_citation_kinds=(LocatorKind.SECTION, LocatorKind.TABLE),
+        ),
+        require_all_target_candidates=True,
     ),
 )
 
@@ -232,6 +268,8 @@ class _QueryRoutePlan:
 
     profile_name: str | None
     candidate_queries: tuple[str, ...]
+    disclosure_target: _ControlledDisclosureTarget | None
+    require_all_target_candidates: bool = False
 
 
 @dataclass(frozen=True)
@@ -417,10 +455,37 @@ class FundReadingService:
 
         last_not_found: AgentRunResult | None = None
         attempts: list[QueryRouteAttempt] = []
+        matched_results: list[AgentRunResult] = []
+        matched_titles: set[str] = set()
         route_plan = _route_plan_for_query(query)
         for candidate_query in route_plan.candidate_queries:
             result = host.run(document_id=document_id, query=candidate_query)
             if result.failure is None:
+                disclosure_titles = _matched_disclosure_titles(result, route_plan.disclosure_target)
+                if route_plan.disclosure_target is not None and not disclosure_titles:
+                    attempts.append(
+                        QueryRouteAttempt(
+                            query=candidate_query,
+                            profile_name=route_plan.profile_name,
+                            result_kind=_ROUTE_RESULT_FAILURE,
+                            failure_code=FailureCode.NOT_FOUND,
+                        )
+                    )
+                    last_not_found = _target_not_found_result(result)
+                    continue
+                if route_plan.require_all_target_candidates:
+                    attempts.append(
+                        QueryRouteAttempt(
+                            query=candidate_query,
+                            profile_name=route_plan.profile_name,
+                            result_kind=_ROUTE_RESULT_SUCCESS,
+                            failure_code=None,
+                        )
+                    )
+                    if any(title not in matched_titles for title in disclosure_titles):
+                        matched_results.append(result)
+                        matched_titles.update(disclosure_titles)
+                    continue
                 attempts.append(
                     QueryRouteAttempt(
                         query=candidate_query,
@@ -442,6 +507,19 @@ class FundReadingService:
             if result.failure.code is not FailureCode.NOT_FOUND:
                 return _QueryRouteRun(agent_result=result, routing_trace=tuple(attempts))
             last_not_found = result
+
+        if route_plan.require_all_target_candidates:
+            required_titles = set(route_plan.disclosure_target.acceptable_title_family) if route_plan.disclosure_target else set()
+            if required_titles and required_titles.issubset(matched_titles):
+                return _QueryRouteRun(
+                    agent_result=_aggregate_agent_results(tuple(matched_results)),
+                    routing_trace=tuple(attempts),
+                )
+            if matched_results:
+                return _QueryRouteRun(
+                    agent_result=_target_not_found_result(_aggregate_agent_results(tuple(matched_results))),
+                    routing_trace=tuple(attempts),
+                )
 
         if last_not_found is None:
             raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "controlled query routing 未生成候选 query")
@@ -499,7 +577,7 @@ def _single_report_summary(document_id: str, store: DoclingDocumentStore) -> Rep
 
 
 def _candidate_queries_for_query(query: str) -> tuple[str, ...]:
-    """按 hardcoded profile 为用户 query 生成最多 3 个候选 query。"""
+    """按 hardcoded profile 为用户 query 生成受控候选 query。"""
 
     return _route_plan_for_query(query).candidate_queries
 
@@ -512,19 +590,27 @@ def _route_plan_for_query(query: str) -> _QueryRoutePlan:
             return _QueryRoutePlan(
                 profile_name=profile.name,
                 candidate_queries=_bounded_unique_candidates((query, *profile.fallback_candidates)),
+                disclosure_target=profile.disclosure_target,
+                require_all_target_candidates=profile.require_all_target_candidates,
             )
-    return _QueryRoutePlan(profile_name=None, candidate_queries=(query,))
+    return _QueryRoutePlan(profile_name=None, candidate_queries=(query,), disclosure_target=None)
 
 
 def _validated_query_profiles() -> tuple[_ControlledQueryProfile, ...]:
     """校验受控 routing 配置，异常时映射为 schema_drift。"""
 
     seen_aliases: set[str] = set()
+    seen_targets: set[str] = set()
     for profile in CONTROLLED_QUERY_PROFILES:
         if not profile.name or not profile.aliases or not profile.fallback_candidates:
             raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "controlled query routing 配置不完整")
+        _validate_disclosure_target(profile.disclosure_target, seen_targets)
         if 1 + len(profile.fallback_candidates) > _MAX_QUERY_CANDIDATES:
             raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "controlled query routing 候选过多")
+        if profile.require_all_target_candidates and len(profile.fallback_candidates) != len(
+            profile.disclosure_target.acceptable_title_family
+        ):
+            raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "controlled query routing 多目标配置异常")
         for alias in profile.aliases:
             if not alias or alias in seen_aliases:
                 raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "controlled query routing alias 配置异常")
@@ -534,6 +620,91 @@ def _validated_query_profiles() -> tuple[_ControlledQueryProfile, ...]:
         if any(not candidate for candidate in profile.fallback_candidates):
             raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "controlled query routing candidate 为空")
     return tuple(CONTROLLED_QUERY_PROFILES)
+
+
+def _validate_disclosure_target(target: _ControlledDisclosureTarget, seen_targets: set[str]) -> None:
+    """校验受控披露目标契约，异常时映射为 schema_drift。"""
+
+    if not target.target_id or target.target_id in seen_targets:
+        raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "controlled disclosure target 配置异常")
+    seen_targets.add(target.target_id)
+    if not target.allowed_evidence_kinds or not target.acceptable_title_family or not target.expected_citation_kinds:
+        raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "controlled disclosure target 配置不完整")
+    allowed = set(target.allowed_evidence_kinds)
+    expected = set(target.expected_citation_kinds)
+    if not expected.issubset(allowed):
+        raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "controlled disclosure target citation 配置异常")
+    if any(not title for title in target.acceptable_title_family):
+        raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "controlled disclosure target title 配置为空")
+
+
+def _matched_disclosure_titles(
+    result: AgentRunResult,
+    target: _ControlledDisclosureTarget | None,
+) -> tuple[str, ...]:
+    """返回 Agent 安全 answer 命中的受控披露标题族。"""
+
+    if target is None:
+        return ("__uncontrolled__",)
+    citation_kinds = tuple(citation.locator.locator_kind for citation in result.citations)
+    if not any(kind in target.expected_citation_kinds for kind in citation_kinds):
+        return ()
+    if not any(kind in target.allowed_evidence_kinds for kind in citation_kinds):
+        return ()
+    title_lines = _target_title_lines(result.answer)
+    return tuple(
+        title
+        for title in target.acceptable_title_family
+        if any(title in line for line in title_lines)
+    )
+
+
+def _aggregate_agent_results(results: tuple[AgentRunResult, ...]) -> AgentRunResult:
+    """聚合同一受控 profile 的多个安全 Agent 成功结果。"""
+
+    if not results:
+        return AgentRunResult(
+            answer="",
+            citations=(),
+            tool_trace=(),
+            failure=ToolFailure(code=FailureCode.NOT_FOUND, message=_TARGET_NOT_FOUND_MESSAGE),
+        )
+    return AgentRunResult(
+        answer="\n\n".join(result.answer for result in results if result.answer),
+        citations=tuple(citation for result in results for citation in result.citations),
+        tool_trace=tuple(trace for result in results for trace in result.tool_trace),
+        failure=None,
+    )
+
+
+def _target_title_lines(answer: str) -> tuple[str, ...]:
+    """从 Agent 安全 answer 中提取 section/table title 行用于 Service 目标判定。"""
+
+    lines = tuple(line.strip() for line in answer.splitlines() if line.strip())
+    if not lines:
+        return ()
+
+    title_lines: list[str] = [lines[0]]
+    for line in lines:
+        if line.startswith(_SECTION_TITLE_PREFIX) or line.startswith(_TABLE_TITLE_PREFIX):
+            title_lines.append(line)
+
+    for index, line in enumerate(lines):
+        if line == _TABLE_BLOCK_HEADER and index + 1 < len(lines):
+            title_lines.append(lines[index + 1])
+            break
+    return tuple(dict.fromkeys(title_lines))
+
+
+def _target_not_found_result(result: AgentRunResult) -> AgentRunResult:
+    """把未满足 target contract 的 Agent success 转成 Service fail-closed 结果。"""
+
+    return AgentRunResult(
+        answer="",
+        citations=(),
+        tool_trace=result.tool_trace,
+        failure=ToolFailure(code=FailureCode.NOT_FOUND, message=_TARGET_NOT_FOUND_MESSAGE),
+    )
 
 
 def _bounded_unique_candidates(candidates: tuple[str, ...]) -> tuple[str, ...]:
