@@ -195,6 +195,46 @@ class _FeeRatesHost:
         )
 
 
+class _PerformanceReturnsHost:
+    """按 11A performance_returns 目标返回章节和表格 citation。"""
+
+    calls: list[dict[str, str]] = []
+    include_table_citation: bool = True
+
+    def __init__(self, tool_service) -> None:
+        """保存 tool service 但不访问其内部 store。"""
+
+        self._tool_service = tool_service
+
+    def run(self, *, document_id: str, query: str) -> AgentRunResult:
+        """原始 query 只作 keyword success，目标标题 query 返回 section/table 证据。"""
+
+        _PerformanceReturnsHost.calls.append({"document_id": document_id, "query": query})
+        target_title = "基金份额净值增长率及其与同期业绩比较基准收益率的比较"
+        if query != target_title:
+            return AgentRunResult(
+                answer=f"无关章节标题\n\n{query} 只在正文中出现",
+                citations=(_citation(document_id, LocatorKind.SECTION),),
+                tool_trace=(_trace_search(document_id, query, "success"),),
+                failure=None,
+            )
+        citations = [_citation(document_id, LocatorKind.SECTION)]
+        if _PerformanceReturnsHost.include_table_citation:
+            citations.append(_citation(document_id, LocatorKind.TABLE))
+        return AgentRunResult(
+            answer=(
+                f"来源章节: 3.2.1 {target_title}\n\n"
+                "相关表格:\n"
+                f"{target_title}\n"
+                "| 阶段 | 净值增长率 | 业绩比较基准收益率 |\n"
+                "| 过去三个月 | 原始披露片段 | 原始披露片段 |"
+            ),
+            citations=tuple(citations),
+            tool_trace=(_trace_search(document_id, query, "success"),),
+            failure=None,
+        )
+
+
 class _FeeRatesValueHost:
     """按 10C fee_rates 字段抽取口径返回安全章节原文。"""
 
@@ -485,6 +525,31 @@ def test_read_local_report_preserves_agent_failure_code(tmp_path: Path) -> None:
         ("管理费", ("管理费", "基金管理费", "基金托管费", "销售服务费")),
         ("托管费", ("托管费", "基金管理费", "基金托管费", "销售服务费")),
         ("销售服务费", ("销售服务费", "基金管理费", "基金托管费")),
+        (
+            "净值增长率",
+            (
+                "净值增长率",
+                "基金份额净值增长率及其与同期业绩比较基准收益率的比较",
+                "基金净值表现",
+                "业绩比较基准收益率",
+            ),
+        ),
+        (
+            "业绩比较基准收益率",
+            (
+                "业绩比较基准收益率",
+                "基金份额净值增长率及其与同期业绩比较基准收益率的比较",
+                "基金净值表现",
+            ),
+        ),
+        (
+            "基金净值表现",
+            (
+                "基金净值表现",
+                "基金份额净值增长率及其与同期业绩比较基准收益率的比较",
+                "业绩比较基准收益率",
+            ),
+        ),
         ("股票投资明细", ("股票投资明细",)),
     ],
 )
@@ -723,6 +788,94 @@ def test_fee_rates_profile_fails_closed_when_any_target_missing(tmp_path: Path) 
         "销售服务费",
     ]
     assert all(attempt.profile_name == "fee_rates" for attempt in result.routing_trace)
+
+
+def test_performance_returns_profile_locates_disclosure_with_section_and_table_citation(tmp_path: Path) -> None:
+    """performance_returns 只定位业绩表现披露，不抽取或计算收益字段。"""
+
+    _FakeConverter.calls.clear()
+    _PerformanceReturnsHost.calls.clear()
+    _PerformanceReturnsHost.include_table_citation = True
+    pdf_path = tmp_path / "report.pdf"
+    work_dir = tmp_path / "work"
+    _write_pdf(pdf_path)
+    service = FundReadingService(converter_factory=_FakeConverter, host_factory=_PerformanceReturnsHost)
+
+    result = service.read_local_report(
+        ReadLocalReportRequest(
+            pdf_path=pdf_path,
+            fund_code="004393",
+            fund_name="安信企业价值优选混合型证券投资基金",
+            year=2024,
+            query="净值增长率",
+            work_dir=work_dir,
+        )
+    )
+
+    assert result.agent_result.failure is None
+    assert "基金份额净值增长率及其与同期业绩比较基准收益率的比较" in result.agent_result.answer
+    assert "nav_growth_rate" not in result.agent_result.answer
+    assert "benchmark_return_rate" not in result.agent_result.answer
+    assert "decimal_percent_text" not in result.agent_result.answer
+    assert {citation.locator.locator_kind for citation in result.agent_result.citations} == {
+        LocatorKind.SECTION,
+        LocatorKind.TABLE,
+    }
+    assert [call["query"] for call in _PerformanceReturnsHost.calls] == [
+        "净值增长率",
+        "基金份额净值增长率及其与同期业绩比较基准收益率的比较",
+    ]
+    assert result.routing_trace == (
+        QueryRouteAttempt(
+            query="净值增长率",
+            profile_name="performance_returns",
+            result_kind="failure",
+            failure_code=FailureCode.NOT_FOUND,
+        ),
+        QueryRouteAttempt(
+            query="基金份额净值增长率及其与同期业绩比较基准收益率的比较",
+            profile_name="performance_returns",
+            result_kind="success",
+            failure_code=None,
+        ),
+    )
+
+
+def test_performance_returns_profile_requires_table_citation(tmp_path: Path) -> None:
+    """当前 11A target success 必须同时具备 section citation 和 table citation。"""
+
+    _FakeConverter.calls.clear()
+    _PerformanceReturnsHost.calls.clear()
+    _PerformanceReturnsHost.include_table_citation = False
+    pdf_path = tmp_path / "report.pdf"
+    work_dir = tmp_path / "work"
+    _write_pdf(pdf_path)
+    service = FundReadingService(converter_factory=_FakeConverter, host_factory=_PerformanceReturnsHost)
+
+    try:
+        result = service.read_local_report(
+            ReadLocalReportRequest(
+                pdf_path=pdf_path,
+                fund_code="004393",
+                fund_name="安信企业价值优选混合型证券投资基金",
+                year=2024,
+                query="净值增长率",
+                work_dir=work_dir,
+            )
+        )
+    finally:
+        _PerformanceReturnsHost.include_table_citation = True
+
+    assert result.agent_result.failure is not None
+    assert result.agent_result.failure.code is FailureCode.NOT_FOUND
+    assert [call["query"] for call in _PerformanceReturnsHost.calls] == [
+        "净值增长率",
+        "基金份额净值增长率及其与同期业绩比较基准收益率的比较",
+        "基金净值表现",
+        "业绩比较基准收益率",
+    ]
+    assert all(attempt.profile_name == "performance_returns" for attempt in result.routing_trace)
+    assert all(attempt.result_kind == "failure" for attempt in result.routing_trace)
 
 
 def test_extract_fee_rates_returns_controlled_dtos_with_raw_text_and_citation(tmp_path: Path) -> None:
@@ -1034,3 +1187,31 @@ def test_real_pdf_controlled_profiles_apply_disclosure_target_contract(tmp_path:
     assert values[("sales_service_fee_rate", "C")].decimal_percent_text == "0.40%"
     assert all(field.raw_text for field in extracted.fields)
     assert all(field.citation is not None for field in extracted.fields)
+
+    performance = service.read_local_report(
+        ReadLocalReportRequest(
+            pdf_path=REAL_SMOKE_PDF,
+            fund_code=REAL_SMOKE_FUND_CODE,
+            fund_name=REAL_SMOKE_FUND_NAME,
+            year=REAL_SMOKE_YEAR,
+            query="净值增长率",
+            work_dir=work_dir,
+        )
+    )
+
+    assert performance.agent_result.failure is None
+    assert "基金份额净值增长率及其与同期业绩比较基准收益率的比较" in performance.agent_result.answer
+    assert performance.agent_result.citations
+    assert {citation.locator.locator_kind for citation in performance.agent_result.citations} >= {
+        LocatorKind.SECTION,
+        LocatorKind.TABLE,
+    }
+    assert performance.agent_result.tool_trace
+    assert performance.routing_trace
+    assert performance.routing_trace[0].query == "净值增长率"
+    assert all(attempt.profile_name == "performance_returns" for attempt in performance.routing_trace)
+    assert performance.routing_trace[-1].result_kind == "success"
+    assert performance.routing_trace[-1].failure_code is None
+    assert "nav_growth_rate" not in performance.agent_result.answer
+    assert "benchmark_return_rate" not in performance.agent_result.answer
+    assert "decimal_percent_text" not in performance.agent_result.answer

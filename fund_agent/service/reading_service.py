@@ -62,6 +62,7 @@ class _ControlledDisclosureTarget:
     allowed_evidence_kinds: tuple[LocatorKind, ...]
     acceptable_title_family: tuple[str, ...]
     expected_citation_kinds: tuple[LocatorKind, ...]
+    require_all_expected_citation_kinds: bool = False
 
 
 @dataclass(frozen=True)
@@ -182,6 +183,25 @@ CONTROLLED_QUERY_PROFILES = (
             expected_citation_kinds=(LocatorKind.SECTION, LocatorKind.TABLE),
         ),
         require_all_target_candidates=True,
+    ),
+    _ControlledQueryProfile(
+        name="performance_returns",
+        aliases=("净值增长率", "业绩比较基准收益率", "基准收益率", "收益表现", "基金净值表现"),
+        fallback_candidates=(
+            "基金份额净值增长率及其与同期业绩比较基准收益率的比较",
+            "基金净值表现",
+            "业绩比较基准收益率",
+        ),
+        disclosure_target=_ControlledDisclosureTarget(
+            target_id="performance_returns",
+            allowed_evidence_kinds=(LocatorKind.SECTION, LocatorKind.TABLE),
+            acceptable_title_family=(
+                "基金份额净值增长率及其与同期业绩比较基准收益率的比较",
+                "基金净值表现",
+            ),
+            expected_citation_kinds=(LocatorKind.SECTION, LocatorKind.TABLE),
+            require_all_expected_citation_kinds=True,
+        ),
     ),
 )
 
@@ -820,7 +840,10 @@ def _matched_disclosure_titles(
     if target is None:
         return ("__uncontrolled__",)
     citation_kinds = tuple(citation.locator.locator_kind for citation in result.citations)
-    if not any(kind in target.expected_citation_kinds for kind in citation_kinds):
+    if target.require_all_expected_citation_kinds:
+        if not set(target.expected_citation_kinds).issubset(set(citation_kinds)):
+            return ()
+    elif not any(kind in target.expected_citation_kinds for kind in citation_kinds):
         return ()
     if not any(kind in target.allowed_evidence_kinds for kind in citation_kinds):
         return ()

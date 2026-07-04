@@ -34,7 +34,7 @@ PDF
 ```
 
 - 阅读工具层的目标是稳定阅读、检索、返回可引用片段；不是字段抽取、自动报告、投资判断、报告渲染或数据仓库晋升。
-- 目标架构固定为 `UI -> Service -> Host -> Agent`；基金文档读取、PDF source、Docling conversion、Docling document store、FundDocumentToolService 归 `fund_agent/fund`。
+- 目标架构固定为 `UI -> Service -> Host -> Agent`；`fund_agent/fund` 是基金文档领域能力包，不是四层结构中的一层。基金文档读取、PDF source、Docling conversion、Docling document store、FundDocumentToolService 归 `fund_agent/fund`，由 Service / Agent 通过受控边界使用。
 - Service / UI / Host / 展示层不得直接操作 PDF cache、Docling raw JSON、parser private payload 或本地路径。
 - Dayu 是参考，不是生产 runtime 依赖；禁止直接引入 `dayu-agent`、`dayu.host`、`dayu.engine`。
 - Docling production path for local-PDF MVP 已准入：PDF 通过 integrity check 后进入 `DoclingConverter`，Docling JSON 通过 parser_health 后进入 `DoclingDocumentStore`；不做与 `pdfplumber` 的替代路线比较，不做字段抽取 correctness benchmark。
@@ -48,6 +48,7 @@ PDF
 - `dayu/fins/README.md` 明确 Fins 有两条路径：
   - Agent augmentation path：Fins 给 Agent 注入财报读取工具、公司/source/processed/blob 窄仓储和工具服务。
   - Direct operation path：`UI -> FinsService -> Host -> FinsRuntime / pipeline`，覆盖下载、上传、预处理，不经过 Agent。
+- Fins 不是 `UI -> Service -> Host -> Agent` 四层中的一层，而是证券财报领域能力包；`FinsService` 是 direct operation 的 Service 入口，`FinsToolService` 是 Fins 内部给 Agent tools 使用的财报读取工具边界。
 - `dayu/fins/tools/service.py` 中 `FinsToolService` 负责参数校验、`document_id -> source_kind -> source -> processor` 路由、能力降级和 Processor LRU 缓存；它不是 Host，也不是 UI。
 - dayu 仓储协议拆成 `CompanyMetaRepositoryProtocol`、`SourceDocumentRepositoryProtocol`、`ProcessedDocumentRepositoryProtocol`、`DocumentBlobRepositoryProtocol`、`FilingMaintenanceRepositoryProtocol` 等窄协议，定义在 `dayu/fins/storage/repository_protocols.py`。
 - dayu CN/HK 下载链路已有 `PDF -> Docling JSON -> source meta 完成态` 的实际代码：`cn_download_filing_workflow.py` 下载或复用 PDF，转换或复用 Docling JSON，最后提交 source meta；`cn_download_source_upsert.py` 要求完成态 `primary_document` 指向 `_docling.json`。
@@ -82,6 +83,37 @@ PdfSourceProvider
 ```
 
 这条链路的成功标准是“工具可读、可查、可引用”，不是“能生成基金分析报告”。
+
+## 1.1 Contract 能力分层
+
+Docling JSON 是把 PDF 长期化、结构化、可索引化的文档底座。它不是 Agent / Service 可以直接读取的公共事实源；上层只能通过 `DoclingDocumentStore` 和 `FundDocumentToolService` 取得受控 section、table、search result、locator 和 citation。
+
+`FundDocumentToolService` 是读取 Docling 底座的工具地图。它负责把底层文档结构转换成可枚举、可定位、可截断、可引用的 reading tools；它不理解用户任务，也不执行投资分析。
+
+Service / scene contract 负责把任务拆成受控工具调用流程。Service 可以从 use case 出发选择或编排 contract，但不得绕过工具地图读取 raw Docling JSON、本地 PDF path、cache path、repository/private loader 或 `local_import_id`。
+
+后续 contract 必须按能力层级分开裁决和实现：
+
+```text
+reading contract
+  只定位证据，返回原文片段、locator、citation 和 trace。
+
+extraction contract
+  只从已定位证据中抽受控字段，返回字段 DTO、raw_text 和 citation。
+
+calculation contract
+  只基于受控字段和已裁决公式做确定性计算。
+
+report / judgment contract
+  后置，必须另开 gate；不得塞进 reading / extraction / calculation slice。
+```
+
+当前已实现 / 裁决的 slice 对应关系：
+
+- `fee_rates reading locator` 属于 reading contract。
+- `fee_rates value extraction contract` 属于 extraction contract。
+- `performance disclosure locator` 属于 reading contract。
+- `performance return fields extraction contract`、turnover calculation、`R=A+B-C`、报告章节生成均后置，不得混入 11A。
 
 ## 2. 当前设计目标
 
@@ -163,12 +195,10 @@ PdfSourceProvider
 - 读取 Fund 文档私有存储。
 - 在 Host 层读取 raw PDF、raw Docling JSON、本地路径或 Docling cache path。
 
-### 3.4 Agent / Fund
+### 3.4 Agent
 
 职责：
 
-- `fund_agent/fund` 承载基金文档领域能力包。
-- 实现 PDF source abstraction、blob store、Docling converter、Docling document store、FundDocumentToolService。
 - Agent 层负责 ToolRegistry / ToolTrace / context budget / tool loop。
 - MVP Slice 4 已实现 `MinimalFundDocumentAgent` 的最小 loop：`search_document -> read_section`。
 - Post-MVP Slice 5 扩展为 table-aware retrieval / citation loop：先读取命中章节，再通过 `list_tables` / `read_table` 读取同 section、同页或相邻页候选表格，按 query 命中和 proximity 排序；成功时 `answer` 只由 section/table tool result 生成，`citations` 同时包含 section/table citation。
@@ -184,6 +214,27 @@ PdfSourceProvider
 - 把 dayu 的 `dayu.host` / `dayu.engine` 作为生产 runtime 直接依赖。
 - 绕过 Fund documents / tool service 边界向上层暴露 raw PDF / raw Docling。
 - 在 Agent 层直接读取 store 私有字段、raw Docling payload、PDF cache 或本地路径。
+
+### 3.5 Fund 领域能力包
+
+`fund_agent/fund` 不是 `UI -> Service -> Host -> Agent` 四层结构中的一层，而是基金文档领域能力包。它与 Dayu 的 Fins 定位相同：向 Service / Agent 提供受控领域能力，不承担 use case 语义入口、Host run 管理或 Agent tool loop。
+
+职责：
+
+- 实现 PDF source abstraction、blob store、Docling converter、Docling document store、FundDocumentToolService。
+- `FundDocumentToolService` 是 Fund 包内部的工具服务边界，负责受控 section / table / search / excerpt / citation 能力。
+- 为 Agent tools 提供可枚举、可定位、可截断、可引用的文档读取结果。
+
+与 Service 的关系：
+
+- `FundReadingService` 是 use case / 业务语义入口，负责 query routing、target contract、fee_rates extraction contract 和 Host 调用。
+- `FundReadingService` 可以调用 `FundDocumentToolService` 或基于其安全结果编排业务 use case。
+- `FundDocumentToolService` 不等同于 `FundReadingService`；前者是领域工具边界，后者是业务用例边界。
+
+禁止：
+
+- 在 Fund 包中理解 UI intent、管理 Host 生命周期或实现 Agent loop。
+- 向 Service / Host / Agent / CLI 暴露 raw Docling JSON、本地 PDF path、cache path、repository/private loader 或 `local_import_id`。
 
 ## 4. Fund 文档域模型
 
@@ -709,6 +760,31 @@ Post-MVP 10D 暂定为 performance return fields extraction contract，开启前
 - `turnover_rate` 不进入 10D；它可能需要计算而非直接披露，后置为独立 turnover locator / calculation decision。
 - 10D 不得与 10C 合并，不得混入 fee_rates 字段抽取、成本计算、`R=A+B-C`、同类中位数、自动报告或投资判断。
 
+Post-MVP 11A 裁决为 performance disclosure locator，插入 10D 之前：
+
+- 11A 目标是定位业绩表现披露位置，不抽取结构化字段；10D performance return fields extraction 后置。
+- 11A 只回答净值增长率 / 业绩比较基准收益率相关披露在哪里，输出章节标题、表格片段、citation 和 trace。
+- 11A 不输出 `nav_growth_rate`、`benchmark_return_rate`、`period`、`decimal_percent_text` 等结构化字段，不计算 `A = R - B`。
+- 11A 仍放在 Service 层，作为 controlled disclosure profile；Store / ToolService / Agent 不承担自由语义理解。
+- profile 名称裁决为 `performance_returns`；名称只表示业绩表现披露定位，不代表字段抽取。
+- acceptable title family 固定为：`基金份额净值增长率及其与同期业绩比较基准收益率的比较`、`基金净值表现`。
+- 首批 aliases 固定为：`净值增长率`、`业绩比较基准收益率`、`基准收益率`、`收益表现`、`基金净值表现`；不纳入 `业绩`、`收益`、`表现` 等宽泛 alias。
+- candidate queries 固定为原始 query、`基金份额净值增长率及其与同期业绩比较基准收益率的比较`、`基金净值表现`、`业绩比较基准收益率`。
+- success 语义：必须命中 acceptable title family，并返回 section citation；若目标披露存在相关表格，则必须包含 table citation。真实样本存在表格，因此 11A smoke 要求 table citation。
+- 11A 不裁决 A/C 类字段值；若表格同时包含多个份额类别，只展示原始表格片段，不筛选、不判断、不抽值。
+- failure 语义沿用现有 failure code：目标披露未命中为 `not_found`；配置异常为 `schema_drift`；内部异常为 `unavailable`；不新增 `performance_not_found`、`period_not_found` 或 `partial_success`。
+- 真实 CLI smoke 使用 `--query '净值增长率'` 和 work dir `.fund_checklist_cli_smoke_11a`；验收必须 exit code `0`，answer 包含 `基金份额净值增长率及其与同期业绩比较基准收益率的比较`，Citations / Trace 存在，包含 table citation，CLI 默认输出不包含 `routing_trace`。
+- 11A 不接 LLM、embedding、外部搜索服务，不做开放语义理解、top-N rerank、歧义消解、字段抽取、calculation framework、template contract execution、chapter contract execution、自动报告或投资判断。
+
+Slice 11A 已经 MiMo review `ACCEPTED`：
+
+- 真实 CLI smoke 使用 `.fund_checklist_cli_smoke_11a`，`--query '净值增长率'` exit code `0`。
+- answer 包含 `3.2.1 基金份额净值增长率及其与同期业绩比较基准收益率的比较`。
+- Citations / Trace 存在，且包含 table citation：CLI 输出包含 `locator_kind=table`。
+- CLI 默认输出不暴露 `routing_trace`。
+- CLI 输出不包含 `nav_growth_rate`、`benchmark_return_rate` 或 `decimal_percent_text` DTO；没有字段值抽取或计算。
+- 11A remaining blocking risk: none reported。
+
 ### 8.3 Locator 最低标准
 
 MVP 采用宽松 locator 硬标准：
@@ -837,12 +913,12 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## 9. 已关闭裁决项
 
-MVP plan 已关闭。当前已完成到 Post-MVP Slice 10C；Slice 9F 因 keyword-level routing 无法证明 disclosure target success 被判定为 `BLOCKED_BY_DESIGN`；Slice 10A 已实现 Controlled disclosure target contract 并经 MiMo review `ACCEPTED`；Slice 10B 已实现 fee_rates reading locator 并经 MiMo review `ACCEPTED`；Slice 10C 已实现 fee_rates value extraction contract 并经 MiMo review `ACCEPTED`。
+MVP plan 已关闭。当前已完成到 Post-MVP Slice 11A；Slice 9F 因 keyword-level routing 无法证明 disclosure target success 被判定为 `BLOCKED_BY_DESIGN`；Slice 10A 已实现 Controlled disclosure target contract 并经 MiMo review `ACCEPTED`；Slice 10B 已实现 fee_rates reading locator 并经 MiMo review `ACCEPTED`；Slice 10C 已实现 fee_rates value extraction contract 并经 MiMo review `ACCEPTED`；Slice 11A 已实现 performance disclosure locator 并经 MiMo review `ACCEPTED`；10D performance return fields extraction 后置。
 
 ## 10. 下一步最小可验证问题
 
 下一步只应验证一个问题：
 
 ```text
-下一步尚未裁决。若开启 10D，必须先裁决 performance return fields 的 period 口径，例如近 1 年、近 3 年、近 5 年、年度 2024 或成立以来；不得在同一字段名下混用多个期间。`turnover_rate` 不进入 10D，应后置为独立 turnover locator / calculation decision。不得把 10D 扩成成本计算、`R=A+B-C`、同类中位数、模板执行、自动报告或投资判断。
+下一步尚未裁决。若开启 10D performance return fields extraction，必须先裁决 period 口径、份额类别口径、字段 DTO、citation 要求和失败语义；不得把 10D 扩成 `A=R-B`、`R=A+B-C`、换手率、成本计算、同类中位数、模板执行、自动报告或投资判断。若继续 reading locator 路线，也必须保持 `search_document` contract、Agent/Store/ToolService、CLI 输出格式不变。
 ```

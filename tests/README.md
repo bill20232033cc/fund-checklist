@@ -327,3 +327,28 @@ uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值
 ```
 
 Slice 10C 不测试净值增长率、基准收益率、换手率、显性成本小计、总成本、扣费后收益率、年化收益率、`R=A+B-C`、同类中位数、开放语义理解、embedding、LLM intent、top-N scan、rerank、歧义消解、template contract execution、chapter contract execution、自动报告、投资判断或 release readiness。
+
+Post-MVP Slice 11A performance disclosure locator 测试范围：
+
+- Service 层新增 `performance_returns` profile，aliases 仅覆盖 `净值增长率`、`业绩比较基准收益率`、`基准收益率`、`收益表现`、`基金净值表现`。
+- candidate queries 固定为原始 query、`基金份额净值增长率及其与同期业绩比较基准收益率的比较`、`基金净值表现`、`业绩比较基准收益率`。
+- target success 必须命中 acceptable title family：`基金份额净值增长率及其与同期业绩比较基准收益率的比较` 或 `基金净值表现`。
+- 当前真实样本要求同时具备 section citation 和 table citation；缺 table citation 时 fail-closed 为 `not_found`。
+- Service / CLI 真实 PDF smoke 对 `--query 净值增长率` 必须 exit code 0，answer 包含目标披露标题，CLI 默认输出仍只展示 Answer、Citations、Trace，不展示 `routing_trace`。
+- 11A 不输出 `nav_growth_rate`、`benchmark_return_rate`、`period`、`decimal_percent_text` 等结构化字段，不抽值、不计算。
+
+Slice 11A 验证命令：
+
+```bash
+uv run pytest tests/fund/service/test_reading_service.py tests/fund/cli/test_cli.py
+uv run pytest tests/fund/agent/test_minimal_tool_loop.py tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_service.py
+git diff --check
+```
+
+Slice 11A 真实 CLI smoke：
+
+```bash
+uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '净值增长率' --work-dir .fund_checklist_cli_smoke_11a
+```
+
+Slice 11A 不测试字段抽取、period 裁决、换手率、显性成本小计、总成本、扣费后收益率、年化收益率、`A=R-B`、`R=A+B-C`、Alpha/Beta/Cost 综合评估、同类中位数、开放语义理解、embedding、LLM intent、top-N scan、rerank、歧义消解、template contract execution、chapter contract execution、自动报告、投资判断或 release readiness。

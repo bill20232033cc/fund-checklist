@@ -337,6 +337,41 @@ def test_cli_real_pdf_controlled_profile_smokes_keep_plain_output(tmp_path: Path
     assert "selected_query" not in combined
     assert "selected_index" not in combined
 
+    exit_code, stdout, stderr = _run(
+        [
+            "read",
+            "--pdf",
+            str(REAL_SMOKE_PDF),
+            "--fund-code",
+            REAL_SMOKE_FUND_CODE,
+            "--fund-name",
+            REAL_SMOKE_FUND_NAME,
+            "--year",
+            REAL_SMOKE_YEAR,
+            "--query",
+            "净值增长率",
+            "--work-dir",
+            str(work_dir),
+        ]
+    )
+    combined = stdout + stderr
+    assert exit_code == SUCCESS_EXIT_CODE
+    assert stderr == ""
+    assert "Answer:" in stdout
+    assert "基金份额净值增长率及其与同期业绩比较基准收益率的比较" in stdout
+    assert "Citations:" in stdout
+    assert "locator_kind=section" in stdout
+    assert "locator_kind=table" in stdout
+    assert "Trace:" in stdout
+    assert "- search_document success" in stdout
+    assert "routing_trace" not in combined
+    assert "profile_name" not in combined
+    assert "selected_query" not in combined
+    assert "selected_index" not in combined
+    assert "nav_growth_rate" not in combined
+    assert "benchmark_return_rate" not in combined
+    assert "decimal_percent_text" not in combined
+
 
 def test_cli_reuses_existing_docling_json_without_converter(monkeypatch, tmp_path: Path) -> None:
     """Service catalog 已有 completed report 时，CLI 不触发重复 converter。"""
