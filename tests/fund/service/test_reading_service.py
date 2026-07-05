@@ -59,6 +59,76 @@ def _docling_payload() -> dict[str, object]:
     }
 
 
+def _table_cells(rows: tuple[tuple[str, ...], ...]) -> list[dict[str, object]]:
+    """把二维行转换成最小 Docling table_cells。"""
+
+    cells: list[dict[str, object]] = []
+    for row_index, row in enumerate(rows):
+        for column_index, text in enumerate(row):
+            cells.append(
+                {
+                    "start_row_offset_idx": row_index,
+                    "end_row_offset_idx": row_index + 1,
+                    "start_col_offset_idx": column_index,
+                    "end_col_offset_idx": column_index + 1,
+                    "text": text,
+                }
+            )
+    return cells
+
+
+def _performance_docling_payload(
+    *,
+    section_lines: tuple[str, ...] = ("安信企业价值优选混合A", "安信企业价值优选混合C"),
+    table_rows: tuple[tuple[tuple[str, ...], ...], ...] | None = None,
+) -> dict[str, object]:
+    """返回包含 performance_returns 章节和表格的最小 Docling-shaped JSON。"""
+
+    rows = table_rows or (
+        (
+            ("阶段", "份额净值 增长率①", "份额净值增长率标准差②", "业绩比较基准收益率③", "业绩比较基准收益率标准差④", "①－③", "②－④"),
+            ("过去三个月", "-2.45%", "1.31%", "-1.10%", "1.22%", "-1.35%", "0.09%"),
+            ("过去一年", "17.32%", "1.04%", "14.45%", "0.99%", "2.87%", "0.05%"),
+        ),
+        (
+            ("阶段", "份额净值 增长率①", "份额净值增长率标准差②", "业绩比较基准收益率③", "业绩比较基准收益率标准差④", "①－③", "②－④"),
+            ("过去三个月", "-2.60%", "1.31%", "-1.10%", "1.22%", "-1.50%", "0.09%"),
+            ("过去一年", "10.21%", "1.05%", "13.14%", "1.00%", "-2.93%", "0.05%"),
+        ),
+    )
+    return {
+        "schema_name": "DoclingDocument",
+        "texts": [
+            {
+                "self_ref": "#/texts/0",
+                "label": "section_header",
+                "text": "3.2.1 基金份额净值增长率及其与同期业绩比较基准收益率的比较",
+                "level": 1,
+                "prov": [{"page_no": 1}],
+            },
+            *(
+                {
+                    "self_ref": f"#/texts/{index}",
+                    "label": "text",
+                    "text": line,
+                    "prov": [{"page_no": 1}],
+                }
+                for index, line in enumerate(section_lines, start=1)
+            ),
+        ],
+        "tables": [
+            {
+                "self_ref": f"#/tables/{index}",
+                "label": "table",
+                "prov": [{"page_no": 1}],
+                "captions": [],
+                "data": {"table_cells": _table_cells(row_set)},
+            }
+            for index, row_set in enumerate(rows)
+        ],
+    }
+
+
 class _FakeConverter:
     """替代真实 DoclingConverter 的 Service 测试转换器。"""
 
@@ -77,6 +147,27 @@ class _FakeConverter:
         json_path = self._output_root / identity.document_id / f"{identity.document_id}{DOCLING_JSON_SUFFIX}"
         json_path.parent.mkdir(parents=True, exist_ok=True)
         json_path.write_text(json.dumps(_docling_payload(), ensure_ascii=False), encoding="utf-8")
+        return object()
+
+
+class _PerformanceConverter:
+    """写入 performance_returns 测试用 Docling JSON。"""
+
+    payload = staticmethod(_performance_docling_payload)
+
+    def __init__(self, output_root: Path) -> None:
+        """记录输出根目录。"""
+
+        self._output_root = Path(output_root)
+
+    def convert_pdf(self, *, identity, pdf_bytes: bytes) -> object:
+        """写入预置 performance Docling JSON。"""
+
+        assert pdf_bytes.startswith(b"%PDF-")
+        json_path = self._output_root / identity.document_id / f"{identity.document_id}{DOCLING_JSON_SUFFIX}"
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = _PerformanceConverter.payload()
+        json_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         return object()
 
 
@@ -235,6 +326,49 @@ class _PerformanceReturnsHost:
         )
 
 
+class _PerformanceExtractionHost:
+    """按 11A performance_returns 目标返回可用于抽取的 section/table citation。"""
+
+    calls: list[dict[str, str]] = []
+    include_table_citation: bool = True
+    cited_table_refs: tuple[str, ...] = ("table-0000",)
+
+    def __init__(self, tool_service) -> None:
+        """保存 tool service 但不访问其内部 store。"""
+
+        self._tool_service = tool_service
+
+    def run(self, *, document_id: str, query: str) -> AgentRunResult:
+        """原始 query fail-closed，目标标题 query 返回 section/table 定位。"""
+
+        _PerformanceExtractionHost.calls.append({"document_id": document_id, "query": query})
+        target_title = "基金份额净值增长率及其与同期业绩比较基准收益率的比较"
+        if query != target_title:
+            return AgentRunResult(
+                answer="",
+                citations=(),
+                tool_trace=(_trace_search(document_id, query, "failure", FailureCode.NOT_FOUND),),
+                failure=ToolFailure(code=FailureCode.NOT_FOUND, message="未找到可读取的匹配章节"),
+            )
+        citations = [_citation(document_id, LocatorKind.SECTION, section_ref="section-0000")]
+        if _PerformanceExtractionHost.include_table_citation:
+            citations.extend(
+                _citation(
+                    document_id,
+                    LocatorKind.TABLE,
+                    section_ref="section-0000",
+                    table_ref=table_ref,
+                )
+                for table_ref in _PerformanceExtractionHost.cited_table_refs
+            )
+        return AgentRunResult(
+            answer=f"来源章节: 3.2.1 {target_title}\n\n相关表格:\n{target_title}",
+            citations=tuple(citations),
+            tool_trace=(_trace_search(document_id, query, "success"),),
+            failure=None,
+        )
+
+
 class _FeeRatesValueHost:
     """按 10C fee_rates 字段抽取口径返回安全章节原文。"""
 
@@ -317,7 +451,13 @@ def _trace_search(
     )
 
 
-def _citation(document_id: str, locator_kind: LocatorKind) -> Citation:
+def _citation(
+    document_id: str,
+    locator_kind: LocatorKind,
+    *,
+    section_ref: str = "section-1",
+    table_ref: str | None = None,
+) -> Citation:
     """构造不含本地路径的最小 citation。"""
 
     return Citation(
@@ -329,8 +469,8 @@ def _citation(document_id: str, locator_kind: LocatorKind) -> Citation:
         locator=Locator(
             document_id=document_id,
             locator_kind=locator_kind,
-            section_ref="section-1",
-            table_ref="table-1" if locator_kind is LocatorKind.TABLE else None,
+            section_ref=section_ref,
+            table_ref=(table_ref or "table-1") if locator_kind is LocatorKind.TABLE else None,
             page_no=1,
             page_range=None,
             internal_ref=None,
@@ -1036,6 +1176,257 @@ def test_extract_fee_rates_config_error_maps_to_schema_drift(monkeypatch, tmp_pa
     assert result.failure.code is FailureCode.SCHEMA_DRIFT
 
 
+def test_extract_performance_returns_returns_past_1_year_table_dtos(tmp_path: Path) -> None:
+    """10D 只从目标 performance table 抽取 past_1_year 两个收益字段。"""
+
+    _PerformanceExtractionHost.calls.clear()
+    _PerformanceExtractionHost.include_table_citation = True
+    _PerformanceExtractionHost.cited_table_refs = ("table-0000", "table-0001")
+    _PerformanceConverter.payload = staticmethod(_performance_docling_payload)
+    pdf_path = tmp_path / "report.pdf"
+    work_dir = tmp_path / "work"
+    _write_pdf(pdf_path)
+    service = FundReadingService(
+        converter_factory=_PerformanceConverter,
+        host_factory=_PerformanceExtractionHost,
+    )
+
+    result = service.extract_performance_returns(
+        reading_service_module.ExtractPerformanceReturnsRequest(
+            pdf_path=pdf_path,
+            fund_code="004393",
+            fund_name="安信企业价值优选混合型证券投资基金",
+            year=2024,
+            work_dir=work_dir,
+        )
+    )
+
+    assert result.failure is None
+    assert [call["query"] for call in _PerformanceExtractionHost.calls] == [
+        "净值增长率",
+        "基金份额净值增长率及其与同期业绩比较基准收益率的比较",
+    ]
+    values = {(field.field_name, field.share_class_scope): field for field in result.fields}
+    assert values[("nav_growth_rate", "A")].decimal_percent_text == "17.32%"
+    assert values[("benchmark_return_rate", "A")].decimal_percent_text == "14.45%"
+    assert values[("nav_growth_rate", "C")].decimal_percent_text == "10.21%"
+    assert values[("benchmark_return_rate", "C")].decimal_percent_text == "13.14%"
+    assert all(field.period == "past_1_year" for field in result.fields)
+    assert all(field.citation.locator.locator_kind is LocatorKind.TABLE for field in result.fields)
+    assert {field.citation.locator.table_ref for field in result.fields} == {"table-0000", "table-0001"}
+    assert all(field.raw_text for field in result.fields)
+    assert all("过去一年" in field.raw_text for field in result.fields)
+    assert all("2.87%" not in field.raw_text for field in result.fields)
+    assert all("-2.93%" not in field.raw_text for field in result.fields)
+    assert {field.field_name for field in result.fields} == {
+        "nav_growth_rate",
+        "benchmark_return_rate",
+    }
+
+
+def test_extract_performance_returns_does_not_consume_uncited_same_section_table(tmp_path: Path) -> None:
+    """同 section 未被 11A table citation 指向的表格不得被 10D 消费。"""
+
+    _PerformanceExtractionHost.calls.clear()
+    _PerformanceExtractionHost.include_table_citation = True
+    _PerformanceExtractionHost.cited_table_refs = ("table-0000",)
+    _PerformanceConverter.payload = staticmethod(_performance_docling_payload)
+    pdf_path = tmp_path / "report.pdf"
+    work_dir = tmp_path / "work"
+    _write_pdf(pdf_path)
+    service = FundReadingService(
+        converter_factory=_PerformanceConverter,
+        host_factory=_PerformanceExtractionHost,
+    )
+
+    result = service.extract_performance_returns(
+        reading_service_module.ExtractPerformanceReturnsRequest(
+            pdf_path=pdf_path,
+            fund_code="004393",
+            fund_name="安信企业价值优选混合型证券投资基金",
+            year=2024,
+            work_dir=work_dir,
+            share_class="A",
+        )
+    )
+
+    assert result.failure is None
+    values = {(field.field_name, field.share_class_scope): field for field in result.fields}
+    assert values[("nav_growth_rate", "A")].decimal_percent_text == "17.32%"
+    assert values[("benchmark_return_rate", "A")].decimal_percent_text == "14.45%"
+    assert ("nav_growth_rate", "C") not in values
+    assert ("benchmark_return_rate", "C") not in values
+    assert {field.citation.locator.table_ref for field in result.fields} == {"table-0000"}
+
+
+def test_extract_performance_returns_fails_without_table_citation(tmp_path: Path) -> None:
+    """缺 table citation 时不得抽取 performance_returns 字段。"""
+
+    _PerformanceExtractionHost.calls.clear()
+    _PerformanceExtractionHost.include_table_citation = False
+    _PerformanceExtractionHost.cited_table_refs = ("table-0000",)
+    _PerformanceConverter.payload = staticmethod(_performance_docling_payload)
+    pdf_path = tmp_path / "report.pdf"
+    work_dir = tmp_path / "work"
+    _write_pdf(pdf_path)
+    service = FundReadingService(
+        converter_factory=_PerformanceConverter,
+        host_factory=_PerformanceExtractionHost,
+    )
+
+    try:
+        result = service.extract_performance_returns(
+            reading_service_module.ExtractPerformanceReturnsRequest(
+                pdf_path=pdf_path,
+                fund_code="004393",
+                fund_name="安信企业价值优选混合型证券投资基金",
+                year=2024,
+                work_dir=work_dir,
+            )
+        )
+    finally:
+        _PerformanceExtractionHost.include_table_citation = True
+
+    assert result.fields == ()
+    assert result.failure is not None
+    assert result.failure.code is FailureCode.NOT_FOUND
+
+
+def test_extract_performance_returns_fails_when_target_column_missing(tmp_path: Path) -> None:
+    """目标列缺失时必须 fail-closed 为 not_found。"""
+
+    _PerformanceExtractionHost.calls.clear()
+    _PerformanceExtractionHost.include_table_citation = True
+    _PerformanceExtractionHost.cited_table_refs = ("table-0000",)
+    rows = (
+        (
+            ("阶段", "份额净值增长率①", "份额净值增长率标准差②", "其他收益率", "①－③"),
+            ("过去一年", "17.32%", "1.04%", "14.45%", "2.87%"),
+        ),
+    )
+    _PerformanceConverter.payload = staticmethod(lambda: _performance_docling_payload(table_rows=rows))
+    pdf_path = tmp_path / "report.pdf"
+    work_dir = tmp_path / "work"
+    _write_pdf(pdf_path)
+    service = FundReadingService(
+        converter_factory=_PerformanceConverter,
+        host_factory=_PerformanceExtractionHost,
+    )
+
+    result = service.extract_performance_returns(
+        reading_service_module.ExtractPerformanceReturnsRequest(
+            pdf_path=pdf_path,
+            fund_code="004393",
+            fund_name="安信企业价值优选混合型证券投资基金",
+            year=2024,
+            work_dir=work_dir,
+        )
+    )
+
+    assert result.fields == ()
+    assert result.failure is not None
+    assert result.failure.code is FailureCode.NOT_FOUND
+
+
+def test_extract_performance_returns_fails_when_past_1_year_row_missing(tmp_path: Path) -> None:
+    """缺 过去一年 行时必须 fail-closed 为 not_found。"""
+
+    _PerformanceExtractionHost.calls.clear()
+    _PerformanceExtractionHost.include_table_citation = True
+    _PerformanceExtractionHost.cited_table_refs = ("table-0000",)
+    rows = (
+        (
+            ("阶段", "份额净值增长率①", "份额净值增长率标准差②", "业绩比较基准收益率③", "业绩比较基准收益率标准差④", "①－③"),
+            ("过去三个月", "-2.45%", "1.31%", "-1.10%", "1.22%", "-1.35%"),
+        ),
+    )
+    _PerformanceConverter.payload = staticmethod(lambda: _performance_docling_payload(table_rows=rows))
+    pdf_path = tmp_path / "report.pdf"
+    work_dir = tmp_path / "work"
+    _write_pdf(pdf_path)
+    service = FundReadingService(
+        converter_factory=_PerformanceConverter,
+        host_factory=_PerformanceExtractionHost,
+    )
+
+    result = service.extract_performance_returns(
+        reading_service_module.ExtractPerformanceReturnsRequest(
+            pdf_path=pdf_path,
+            fund_code="004393",
+            fund_name="安信企业价值优选混合型证券投资基金",
+            year=2024,
+            work_dir=work_dir,
+        )
+    )
+
+    assert result.fields == ()
+    assert result.failure is not None
+    assert result.failure.code is FailureCode.NOT_FOUND
+
+
+def test_extract_performance_returns_fails_when_share_class_is_ambiguous(tmp_path: Path) -> None:
+    """多份额表格无法从上下文唯一识别 share class 时必须 fail-closed。"""
+
+    _PerformanceExtractionHost.calls.clear()
+    _PerformanceExtractionHost.include_table_citation = True
+    _PerformanceExtractionHost.cited_table_refs = ("table-0000", "table-0001")
+    _PerformanceConverter.payload = staticmethod(
+        lambda: _performance_docling_payload(section_lines=("业绩比较基准说明",))
+    )
+    pdf_path = tmp_path / "report.pdf"
+    work_dir = tmp_path / "work"
+    _write_pdf(pdf_path)
+    service = FundReadingService(
+        converter_factory=_PerformanceConverter,
+        host_factory=_PerformanceExtractionHost,
+    )
+
+    result = service.extract_performance_returns(
+        reading_service_module.ExtractPerformanceReturnsRequest(
+            pdf_path=pdf_path,
+            fund_code="004393",
+            fund_name="安信企业价值优选混合型证券投资基金",
+            year=2024,
+            work_dir=work_dir,
+        )
+    )
+
+    assert result.fields == ()
+    assert result.failure is not None
+    assert result.failure.code is FailureCode.NOT_FOUND
+
+
+def test_extract_performance_returns_config_error_maps_to_schema_drift(monkeypatch, tmp_path: Path) -> None:
+    """performance_returns 抽取配置异常必须映射为 schema_drift。"""
+
+    _PerformanceExtractionHost.calls.clear()
+    _PerformanceExtractionHost.include_table_citation = True
+    _PerformanceExtractionHost.cited_table_refs = ("table-0000",)
+    _PerformanceConverter.payload = staticmethod(_performance_docling_payload)
+    monkeypatch.setattr(reading_service_module, "_PERFORMANCE_RETURN_EXTRACTION_SPECS", ())
+    pdf_path = tmp_path / "report.pdf"
+    work_dir = tmp_path / "work"
+    _write_pdf(pdf_path)
+    service = FundReadingService(
+        converter_factory=_PerformanceConverter,
+        host_factory=_PerformanceExtractionHost,
+    )
+
+    result = service.extract_performance_returns(
+        reading_service_module.ExtractPerformanceReturnsRequest(
+            pdf_path=pdf_path,
+            fund_code="004393",
+            fund_name="安信企业价值优选混合型证券投资基金",
+            year=2024,
+            work_dir=work_dir,
+        )
+    )
+
+    assert result.fields == ()
+    assert result.failure is not None
+    assert result.failure.code is FailureCode.SCHEMA_DRIFT
+
+
 def test_read_local_report_records_non_profile_query_only_once(tmp_path: Path) -> None:
     """非受控 query 不走 fallback，routing_trace 只记录原始 query。"""
 
@@ -1289,3 +1680,17 @@ def test_real_pdf_controlled_profiles_apply_disclosure_target_contract(tmp_path:
     assert "nav_growth_rate" not in performance.agent_result.answer
     assert "benchmark_return_rate" not in performance.agent_result.answer
     assert "decimal_percent_text" not in performance.agent_result.answer
+
+    performance_fields = service.extract_performance_returns(
+        reading_service_module.ExtractPerformanceReturnsRequest(
+            pdf_path=REAL_SMOKE_PDF,
+            fund_code=REAL_SMOKE_FUND_CODE,
+            fund_name=REAL_SMOKE_FUND_NAME,
+            year=REAL_SMOKE_YEAR,
+            work_dir=work_dir,
+        )
+    )
+
+    assert performance_fields.fields == ()
+    assert performance_fields.failure is not None
+    assert performance_fields.failure.code is FailureCode.NOT_FOUND

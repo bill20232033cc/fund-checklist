@@ -1,9 +1,9 @@
 # fund-checklist implementation-control
 
 更新时间：2026-07-05
-当前阶段：`POST_MVP_SLICE_11B_ACCEPTED`
+当前阶段：`POST_MVP_SLICE_10D_ACCEPTED`
 当前角色：control / CIC-lite controller
-当前目标：Slice 11B disclosure locator contract registry 已经 MiMo `ACCEPTED`；当前无已裁决的下一实现 slice。若开启 11C turnover source disclosure locator，必须先裁决 profile name、aliases、candidate queries、acceptable title family、table citation 要求、失败语义和真实 CLI smoke 验收。若开启 10D performance return fields extraction，仍必须另行裁决 period 口径。不得扩成 gateflow / phaseflow / release-readiness，不新增 plan artifact，不进入 batch benchmark、开放语义理解、自动分词、embedding、LLM intent、template contract execution、chapter contract execution、calculation framework、`fund-checklist ask`、UI、自动报告或投资判断。
+当前目标：Slice 10D performance return fields extraction contract 已经 MiMo `ACCEPTED`；当前无已裁决的下一实现 slice。若优先处理 10D 剩余非阻塞风险，下一步应先裁决 performance table citation specificity。不得扩成 gateflow / phaseflow / release-readiness，不新增 plan artifact，不进入 batch benchmark、开放语义理解、自动分词、embedding、LLM intent、template contract execution、chapter contract execution、calculation framework、`fund-checklist ask`、UI、自动报告或投资判断。
 
 ## 当前事实
 
@@ -216,9 +216,31 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
   - Citations / Trace 存在；CLI 默认输出不包含 `routing_trace`。
 - 10C remaining blocking risk: none reported。
 - 10C 没有进入净值增长率、基准收益率、换手率、成本计算、`R=A+B-C`、模板执行、自动报告或投资判断。
-- Post-MVP 10D 暂定为 performance return fields extraction contract，候选字段为 `nav_growth_rate` 和 `benchmark_return_rate`；开启前必须另行裁决 period 口径。
-- `turnover_rate` 不进入 10D；它可能需要计算而非直接披露，后置为独立 turnover locator / calculation decision。
-- 10D 不得与 10C 合并，不得混入 fee_rates 字段抽取、成本计算、`R=A+B-C`、同类中位数、自动报告或投资判断。
+- Post-MVP 10D 裁决为 performance return fields extraction contract。
+- 10D 目标是在 11A 已定位的 performance disclosure table 中抽取受控字段，不重新做开放检索。
+- 首批字段只允许 `nav_growth_rate` 和 `benchmark_return_rate`。
+- 首批 period 裁决为 `past_1_year`，对应真实样本表格行标题 `过去一年`；不得把它命名为 `report_year` 或年度 2024。
+- 10D 不抽取近 3 年、近 5 年、成立以来、年度序列表或图表数据；后续 period 必须另开裁决。
+- 10D 不抽取 `excess_return`、`annualized_return`、`max_drawdown`、`volatility`、`sharpe`、`tracking_error`、`turnover_rate`。
+- 10D 不计算 `A=R-B`、`R=A+B-C`、显性成本小计、总成本、扣费后收益率、年化收益率或同类中位数。
+- share class 口径：用户未指定 share class 时不得猜默认份额；可返回所有可唯一识别 share class 的 `past_1_year` DTO。若 share class 无法从表格上下文唯一识别，则 fail-closed 为 `not_found`。
+- 若某个 share class 没有 `过去一年` 行，不得合成或外推该 share class 的 `past_1_year` 字段。
+- DTO 字段固定为：`field_name`、`decimal_percent_text`、`period`、`share_class_scope`、`raw_text`、`citation`。
+- `decimal_percent_text` 保持原文百分号格式，例如 `"17.32%"`；不先转为小数。
+- 数据源只允许来自 11A acceptable title family：`基金份额净值增长率及其与同期业绩比较基准收益率的比较`、`基金净值表现`。
+- 10D 必须 table-first：目标字段必须来自 table citation；section-only evidence 不足以抽字段。
+- 列标题必须能唯一匹配 `份额净值增长率` / `基金份额净值增长率` 和 `业绩比较基准收益率`；行标题必须唯一匹配 `过去一年`。
+- 失败语义沿用现有 failure code：目标表格未找到、目标列缺失、period 行缺失、share class 无法区分、数值无法唯一抽取均为 `not_found`；extractor 配置异常为 `schema_drift`；内部异常为 `unavailable`。
+- 10D 可新增受控 extraction DTO 和 Service 方法 / use case；不得修改 `search_document` public contract，不得改变 Agent / Store / ToolService 职责边界。
+- 10D 暂不改变 CLI 默认输出格式；字段 DTO 先在 Service / tests 层验证，CLI 仍保持阅读 answer / citation / trace。
+- 10D 不接 LLM、embedding、外部搜索服务，不做开放语义理解、top-N rerank、歧义消解、template contract execution、chapter contract execution、自动报告或投资判断。
+- 当前样本年报未直接披露 `turnover_rate`；后续不做 `turnover_rate` locator，也不把股票买入 / 卖出金额、投资组合重大变动或股票投资明细包装成换手率 evidence。若未来需要换手率，必须另开 calculation / external-data gate，先裁决公式、数据源、期间、基金资产净值口径、失败语义和 citation。
+- Slice 10D 已经 MiMo review `ACCEPTED`。
+- Slice 10D Service extraction summary：
+  - fake multi-table cited case returns A/C `nav_growth_rate` and `benchmark_return_rate`, `period=past_1_year`, `raw_text` present, citations are table locators.
+  - uncited same-section table regression covered: only cited table is consumed.
+  - current real PDF Service extraction fail-closes if 11A cites a table without `过去一年`; it does not scan sibling tables.
+- 10D remaining blocking risk: none reported。剩余非阻塞风险是：real-PDF extraction success depends on the 11A locator citing the actual `过去一年` performance table.
 - Post-MVP 11A 裁决为 performance disclosure locator，插入 10D 之前；11A 只做业绩表现披露定位和 citation，不抽取结构化字段。
 - 11A profile 名称为 `performance_returns`；名称只表示业绩表现披露定位，不代表字段抽取。
 - acceptable title family 固定为：`基金份额净值增长率及其与同期业绩比较基准收益率的比较`、`基金净值表现`。
@@ -274,15 +296,16 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## Next Action
 
-当前无已裁决的下一实现 slice。若开启 11C turnover source disclosure locator，必须先裁决 profile name、aliases、candidate queries、acceptable title family、table citation 要求、失败语义和真实 CLI smoke 验收；11C 只能做来源披露定位，不得输出 `turnover_rate`、不计算换手率、不估算隐性交易成本。若进入 10D，仍必须先裁决 `nav_growth_rate` / `benchmark_return_rate` 的 period 口径、份额类别口径、字段 DTO、citation 要求和失败语义。
+当前无已裁决的下一实现 slice。若优先处理 10D 剩余非阻塞风险，下一步应先裁决 performance table citation specificity：如何让 11A / Service locator 在不扫描 top-N、不做 rerank、不绕过 citation 的前提下，引用实际包含 `过去一年`、`份额净值增长率` 和 `业绩比较基准收益率` 的 performance table。
 
 禁止事项：
 
-- 禁止把 11B closeout 扩成 10D 字段抽取。
-- 禁止在 11B closeout 新增披露对象定位能力。
-- 禁止在未裁决 period 前抽取净值增长率或基准收益率。
-- 禁止输出 `nav_growth_rate`、`benchmark_return_rate`、`period`、`decimal_percent_text` 等结构化字段。
-- 禁止抽取换手率；`turnover_rate` 后置为独立 turnover locator / calculation decision。
+- 禁止把 10D 扩成计算、报告或投资判断。
+- 禁止新增披露对象定位能力。
+- 禁止把 `past_1_year` 命名为 `report_year` 或年度 2024。
+- 禁止抽取近 3 年、近 5 年、成立以来、年度序列表或图表数据。
+- 禁止输出 `excess_return`、`annualized_return`、`max_drawdown`、`volatility`、`sharpe`、`tracking_error`、`turnover_rate`。
+- 禁止抽取换手率；禁止新增 `turnover_rate` locator；禁止把股票买入 / 卖出金额包装成换手率 evidence。
 - 禁止计算显性成本小计、总成本、扣费后收益率或年化收益率。
 - 禁止实现 `R=A+B-C`、Alpha/Beta/Cost 综合评估、同类中位数或判断生成。
 - 禁止新增 alias 覆盖矩阵；11B 只允许把既有 aliases 迁入 registry，不扩大 alias 范围。
@@ -292,13 +315,13 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - 禁止扫描 top-N search results、rerank、歧义消解或 LLM 判断哪个表更相关。
 - 禁止引入 score、confidence、rationale、`partial_success` 或新 failure taxonomy。
 - 禁止改变 CLI 默认输出格式。
-- 禁止把 11B 解释为泛化问答能力或 benchmark；11B 只建立 Service 内部 locator contract registry。
+- 禁止把 10D 解释为泛化字段抽取能力或 benchmark；10D 只抽取已裁决的两个 `past_1_year` performance return 字段。
 - 禁止新增 `fund-checklist ask` 或 CLI 参数。
 - 禁止接真实 LLM、embedding、外部搜索服务。
 - 禁止执行 template-informed intent routing、chapter contract execution、calculation framework、report audit、自动报告或投资判断。
 - 禁止暴露 raw Docling JSON、本地 PDF path、cache path、repository/private loader 或 `local_import_id`。
 
-11B closeout 验证命令：
+10D closeout 验证命令：
 
 ```bash
 uv run pytest tests/fund/service/test_reading_service.py tests/fund/cli/test_cli.py
@@ -310,13 +333,13 @@ uv run pytest tests/fund/service/test_reading_service.py tests/fund/cli/test_cli
 uv run pytest tests/fund/agent/test_minimal_tool_loop.py tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_service.py
 ```
 
-11B 已保留 11A 已完成真实 CLI smoke 行为：
+10D 已保留 11A/11B 已完成真实 CLI smoke 行为：
 
 ```bash
 uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '净值增长率' --work-dir .fund_checklist_cli_smoke_11a
 ```
 
-11B 已完成真实 CLI smoke：
+10D 真实 CLI smoke：
 
 ```bash
 uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '前十大持仓' --work-dir .fund_checklist_cli_smoke_11b_holdings
@@ -325,7 +348,7 @@ uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值
 uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '净值增长率' --work-dir .fund_checklist_cli_smoke_11b_performance
 ```
 
-验收点：11B 真实 CLI smoke 对 `前十大持仓`、`资产配置`、`费用`、`净值增长率` 均保持既有 accepted 行为；`费用` output 包含 `基金管理费`、`基金托管费`、`销售服务费`；`净值增长率` answer 包含 `基金份额净值增长率及其与同期业绩比较基准收益率的比较`，包含 table citation，CLI 默认输出不包含 `routing_trace`。未输出 `nav_growth_rate` / `benchmark_return_rate` 字段 DTO，未抽值或计算。MiMo verdict: `ACCEPTED`；remaining blocking risk: none reported。
+验收点：10D 真实 CLI smoke 对 `净值增长率` 保持既有 accepted 行为；answer 包含 `基金份额净值增长率及其与同期业绩比较基准收益率的比较`，包含 citation / trace / table citation，CLI 默认输出不包含 `routing_trace`，且不暴露 `nav_growth_rate` / `benchmark_return_rate` 字段 DTO。Service 层 fake multi-table cited case 可返回 A/C `past_1_year` DTO；真实 PDF Service extraction 在 cited table 不含 `过去一年` 时 fail-closed，不扫描 sibling tables。MiMo verdict: `ACCEPTED`；remaining blocking risk: none reported。
 
 ## Implementation Slices
 
@@ -349,7 +372,7 @@ uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值
 10A. Controlled disclosure target contract：Service 层定义受控披露目标契约，区分 query 命中和披露目标命中；已 accepted；`费用` 在旧 target 下 fail-closed 为 `not_found`。
 10B. fee_rates reading locator：已 accepted；把 `expenses` 收窄为 `fee_rates`，定位 `基金管理费`、`基金托管费`、`销售服务费` 三个目标 disclosure sections；只做阅读定位和 citation，不抽取数值、不计算成本或收益率。
 10C. fee_rates value extraction contract：已 accepted；抽取 `management_fee_rate`、`custodian_fee_rate`、`sales_service_fee_rate` 三个当前适用年费率字段；不抽取收益/换手率，不做成本或收益计算。
-10D. performance return fields extraction contract：deferred；候选为 `nav_growth_rate` / `benchmark_return_rate`，开启前必须另行裁决 period 口径；`turnover_rate` 后置。
+10D. performance return fields extraction contract：已 accepted；基于 11A 已定位的 performance disclosure table 抽取 `past_1_year` 的 `nav_growth_rate` / `benchmark_return_rate` 受控 DTO；不计算、不改 CLI 默认输出；不做 `turnover_rate` locator。
 11A. performance disclosure locator：已 accepted；定位 `基金份额净值增长率及其与同期业绩比较基准收益率的比较` / `基金净值表现` 披露，返回 section/table citation 和原始表格片段；不抽值、不计算。
 11B. disclosure locator contract registry：已 accepted；把既有 controlled disclosure profiles 收敛为 Service 内部 locator contract registry；不新增披露对象，不抽值、不计算、不改 public tool / CLI contract。
 

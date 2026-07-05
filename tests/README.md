@@ -378,3 +378,34 @@ uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值
 ```
 
 Slice 11B 不测试新增 profile、字段抽取、净值增长率或基准收益率字段 DTO、换手率、显性成本小计、总成本、扣费后收益率、年化收益率、`A=R-B`、`R=A+B-C`、开放语义理解、embedding、LLM intent、top-N scan、rerank、template contract execution、chapter contract execution、自动报告、投资判断或 release readiness。
+
+Post-MVP Slice 10D performance return fields extraction contract 测试范围：
+
+- `FundReadingService.extract_performance_returns` 复用 11A `performance_returns` 定位结果，再通过 `FundDocumentToolService.read_table` 读取实际 table locator 的受控二维行，不读取 raw Docling JSON、本地 PDF path、cache path、repository/private loader 或 `local_import_id`。
+- 抽取字段仅限 `nav_growth_rate`、`benchmark_return_rate`。
+- period 固定为 `past_1_year`，只对应表格行 `过去一年`；不命名为 report_year 或年度 2024。
+- 字段值保持原文百分号文本，例如 `17.32%`；不转小数。
+- 用户未指定 share class 时，只返回可从 section/table 上下文唯一识别的 share class DTO；无法唯一识别时返回 `not_found`。
+- 某 share class 缺 `过去一年` 行时不合成、不外推；若没有任何可抽取字段则返回 `not_found`。
+- 缺 table citation、缺目标列、缺 `过去一年` 行、share class ambiguous 或数值无法唯一抽取均返回 `not_found`；抽取配置异常返回 `schema_drift`。
+- raw_text 只包含目标 period/列/单元格，不输出或计算 `A=R-B`。
+- CLI 默认输出仍只展示 Answer、Citations、Trace，不展示结构化抽取 DTO 或 `routing_trace`。
+
+Slice 10D 验证命令：
+
+```bash
+uv run pytest tests/fund/service/test_reading_service.py tests/fund/cli/test_cli.py
+uv run pytest tests/fund/agent/test_minimal_tool_loop.py tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_service.py
+git diff --check
+```
+
+Slice 10D 真实 CLI smoke：
+
+```bash
+uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '前十大持仓' --work-dir .fund_checklist_cli_smoke_11b_holdings
+uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '资产配置' --work-dir .fund_checklist_cli_smoke_11b_asset
+uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '费用' --work-dir .fund_checklist_cli_smoke_11b_fees
+uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '净值增长率' --work-dir .fund_checklist_cli_smoke_11b_performance
+```
+
+Slice 10D 不测试近 3 年、近 5 年、成立以来、年度序列表、图表数据、`excess_return`、`annualized_return`、`max_drawdown`、`volatility`、`sharpe`、`tracking_error`、`turnover_rate`、显性成本小计、总成本、扣费后收益率、年化收益率、`A=R-B`、`R=A+B-C`、同类中位数、开放语义理解、embedding、LLM intent、top-N scan、rerank、template contract execution、chapter contract execution、自动报告、投资判断或 release readiness。

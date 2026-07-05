@@ -753,12 +753,35 @@ Slice 10C 已经 MiMo review `ACCEPTED`：
 - 10C remaining blocking risk: none reported。
 - 10C 没有进入净值增长率、基准收益率、换手率、成本计算、`R=A+B-C`、模板执行、自动报告或投资判断。
 
-Post-MVP 10D 暂定为 performance return fields extraction contract，开启前必须另行裁决：
+Post-MVP 10D 裁决为 performance return fields extraction contract：
 
-- 10D 候选字段为 `nav_growth_rate` 和 `benchmark_return_rate`。
-- 10D 开启前必须先裁决 period 口径，例如近 1 年、近 3 年、近 5 年、年度 2024 或成立以来；不得在同一字段名下混用多个期间。
-- `turnover_rate` 不进入 10D；它可能需要计算而非直接披露，后置为独立 turnover locator / calculation decision。
-- 10D 不得与 10C 合并，不得混入 fee_rates 字段抽取、成本计算、`R=A+B-C`、同类中位数、自动报告或投资判断。
+- 10D 目标是在 11A 已定位的 performance disclosure table 中抽取受控字段，不重新做开放检索。
+- 首批字段只允许 `nav_growth_rate` 和 `benchmark_return_rate`。
+- 首批 period 裁决为 `past_1_year`，对应真实样本表格行标题 `过去一年`；不得把它命名为 `report_year` 或年度 2024。
+- 10D 不抽取近 3 年、近 5 年、成立以来、年度序列表或图表数据；后续 period 必须另开裁决。
+- 10D 不抽取 `excess_return`、`annualized_return`、`max_drawdown`、`volatility`、`sharpe`、`tracking_error`、`turnover_rate`。
+- 10D 不计算 `A = R - B`、`R = A + B - C`、显性成本小计、总成本、扣费后收益率、年化收益率或同类中位数。
+- share class 口径：用户未指定 share class 时不得猜默认份额；可返回所有可唯一识别 share class 的 `past_1_year` DTO。若 share class 无法从表格上下文唯一识别，则 fail-closed 为 `not_found`。
+- 若某个 share class 没有 `过去一年` 行，不得合成或外推该 share class 的 `past_1_year` 字段。
+- DTO 字段固定为：`field_name`、`decimal_percent_text`、`period`、`share_class_scope`、`raw_text`、`citation`。
+- `decimal_percent_text` 保持原文百分号格式，例如 `"17.32%"`；不先转为小数。
+- 数据源只允许来自 11A acceptable title family：`基金份额净值增长率及其与同期业绩比较基准收益率的比较`、`基金净值表现`。
+- 10D 必须 table-first：目标字段必须来自 table citation；section-only evidence 不足以抽字段。
+- 列标题必须能唯一匹配 `份额净值增长率` / `基金份额净值增长率` 和 `业绩比较基准收益率`；行标题必须唯一匹配 `过去一年`。
+- 失败语义沿用现有 failure code：目标表格未找到、目标列缺失、period 行缺失、share class 无法区分、数值无法唯一抽取均为 `not_found`；extractor 配置异常为 `schema_drift`；内部异常为 `unavailable`。
+- 10D 可新增受控 extraction DTO 和 Service 方法 / use case；不得修改 `search_document` public contract，不得改变 Agent / Store / ToolService 职责边界。
+- 10D 暂不改变 CLI 默认输出格式；字段 DTO 先在 Service / tests 层验证，CLI 仍保持阅读 answer / citation / trace。
+- 10D 不接 LLM、embedding、外部搜索服务，不做开放语义理解、top-N rerank、歧义消解、template contract execution、chapter contract execution、自动报告或投资判断。
+- 当前样本年报未直接披露 `turnover_rate`；后续不做 `turnover_rate` locator，也不把股票买入 / 卖出金额、投资组合重大变动或股票投资明细包装成换手率 evidence。若未来需要换手率，必须另开 calculation / external-data gate，先裁决公式、数据源、期间、基金资产净值口径、失败语义和 citation。
+
+Slice 10D 已经 MiMo review `ACCEPTED`：
+
+- Service 层已实现 performance return fields extraction contract。
+- fake multi-table cited case 可返回 A / C 两类 `nav_growth_rate` 和 `benchmark_return_rate`，`period=past_1_year`，`raw_text` 存在，citation 均为 table locator。
+- 已覆盖同 section 未被引用表格的回归：10D 只消费 11A result 中实际 cited table，不扫描 sibling tables。
+- 当前真实 PDF Service extraction 在 11A 引用的 table 不含 `过去一年` 时 fail-closed；不会绕过 citation 去扫描 sibling tables。
+- 10D remaining blocking risk: none reported。剩余非阻塞风险是：真实 PDF 字段抽取成功依赖 11A locator 引用到实际包含 `过去一年` 的 performance table。
+- 10D 没有进入 `A=R-B`、`R=A+B-C`、换手率、成本计算、同类中位数、模板执行、自动报告或投资判断。
 
 Post-MVP 11A 裁决为 performance disclosure locator，插入 10D 之前：
 
@@ -941,12 +964,12 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## 9. 已关闭裁决项
 
-MVP plan 已关闭。当前已完成到 Post-MVP Slice 11B；Slice 9F 因 keyword-level routing 无法证明 disclosure target success 被判定为 `BLOCKED_BY_DESIGN`；Slice 10A 已实现 Controlled disclosure target contract 并经 MiMo review `ACCEPTED`；Slice 10B 已实现 fee_rates reading locator 并经 MiMo review `ACCEPTED`；Slice 10C 已实现 fee_rates value extraction contract 并经 MiMo review `ACCEPTED`；Slice 11A 已实现 performance disclosure locator 并经 MiMo review `ACCEPTED`；Slice 11B 已实现 disclosure locator contract registry 并经 MiMo review `ACCEPTED`；10D performance return fields extraction 后置。
+MVP plan 已关闭。当前已完成到 Post-MVP Slice 10D；Slice 9F 因 keyword-level routing 无法证明 disclosure target success 被判定为 `BLOCKED_BY_DESIGN`；Slice 10A 已实现 Controlled disclosure target contract 并经 MiMo review `ACCEPTED`；Slice 10B 已实现 fee_rates reading locator 并经 MiMo review `ACCEPTED`；Slice 10C 已实现 fee_rates value extraction contract 并经 MiMo review `ACCEPTED`；Slice 11A 已实现 performance disclosure locator 并经 MiMo review `ACCEPTED`；Slice 11B 已实现 disclosure locator contract registry 并经 MiMo review `ACCEPTED`；Slice 10D 已实现 performance return fields extraction contract 并经 MiMo review `ACCEPTED`。
 
 ## 10. 下一步最小可验证问题
 
 下一步只应验证一个问题：
 
 ```text
-下一步尚未裁决。若后续开启 11C turnover source disclosure locator，必须先裁决 profile name、aliases、candidate queries、acceptable title family、table citation 要求、失败语义和真实 CLI smoke 验收；11C 只能做来源披露定位，不得输出 `turnover_rate`、不计算换手率、不估算隐性交易成本。若后续开启 10D performance return fields extraction，仍必须另行裁决 period 口径、份额类别口径、字段 DTO、citation 要求和失败语义。
+下一步尚未裁决。若优先处理 10D 剩余非阻塞风险，下一步应先裁决 performance table citation specificity：如何让 11A / Service locator 在不扫描 top-N、不做 rerank、不绕过 citation 的前提下，引用实际包含 `过去一年`、`份额净值增长率` 和 `业绩比较基准收益率` 的 performance table。不得把该工作扩成开放语义理解、字段计算、`A=R-B`、`R=A+B-C`、换手率、成本计算、模板执行、自动报告或投资判断。
 ```
