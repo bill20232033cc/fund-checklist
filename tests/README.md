@@ -36,7 +36,7 @@ uv run pytest tests/fund/cli/test_cli.py
 - `MinimalHost` 只调用 Agent loop，不访问 Docling store、raw Docling JSON 或本地路径。
 - `FundReadingService` 覆盖 `import_local_report`、`read_local_report`、`list_reports`，负责编排 import、repository-backed load、必要时 Docling conversion fallback 和 Host 调用。
 - Service 调 Host 时只传 `document_id` 和 `query`；catalog 有 completed report 时复用，catalog record 指向的 Docling JSON 缺失时 fail-closed，不自动 repair/rebuild/reconvert。
-- Service 对 hardcoded controlled query profiles 生成受控 candidate queries，并只在 `not_found`、disclosure target mismatch 或多目标未完成时按顺序尝试下一个 Host/Agent run。
+- Service 对 disclosure locator contract registry 生成受控 candidate queries，并只在 `not_found`、disclosure target mismatch 或多目标未完成时按顺序尝试下一个 Host/Agent run。
 - `fund-checklist read` 使用 argparse 参数解析，只实现 read 子命令；console script entrypoint 指向 `fund_agent.cli.main:main`。
 - CLI happy path 通过 `FundReadingService` 串起 reading use case；CLI 单测用 fake converter 或 fake Service，避免重复真实 Docling conversion。
 - CLI classified failure 输出稳定 failure code 且退出码为 2；unexpected exception 退出码为 1。
@@ -352,3 +352,29 @@ uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值
 ```
 
 Slice 11A 不测试字段抽取、period 裁决、换手率、显性成本小计、总成本、扣费后收益率、年化收益率、`A=R-B`、`R=A+B-C`、Alpha/Beta/Cost 综合评估、同类中位数、开放语义理解、embedding、LLM intent、top-N scan、rerank、歧义消解、template contract execution、chapter contract execution、自动报告、投资判断或 release readiness。
+
+Post-MVP Slice 11B disclosure locator contract registry 测试范围：
+
+- Service 内部 registry 只保留 `profile_name`、`aliases`、`candidate_queries`、`acceptable_title_family`、`requires_table_citation`、`extraction_allowed` 六类 reading locator contract 字段。
+- registry 只迁移既有 `holdings_top10`、`asset_allocation`、`fee_rates`、`performance_returns` 四类 profile，不新增披露对象，不扩大 alias。
+- `extraction_allowed` 固定为 `False`；registry 配置异常映射为 `schema_drift`。
+- 既有四类 locator 行为不回退：持仓、资产配置、费用和净值增长率仍命中对应披露标题与 citation；CLI 默认输出不展示 `routing_trace` 或结构化字段 DTO。
+
+Slice 11B 验证命令：
+
+```bash
+uv run pytest tests/fund/service/test_reading_service.py tests/fund/cli/test_cli.py
+uv run pytest tests/fund/agent/test_minimal_tool_loop.py tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_service.py
+git diff --check
+```
+
+Slice 11B 真实 CLI smoke：
+
+```bash
+uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '前十大持仓' --work-dir .fund_checklist_cli_smoke_11b_holdings
+uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '资产配置' --work-dir .fund_checklist_cli_smoke_11b_asset
+uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '费用' --work-dir .fund_checklist_cli_smoke_11b_fees
+uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '净值增长率' --work-dir .fund_checklist_cli_smoke_11b_performance
+```
+
+Slice 11B 不测试新增 profile、字段抽取、净值增长率或基准收益率字段 DTO、换手率、显性成本小计、总成本、扣费后收益率、年化收益率、`A=R-B`、`R=A+B-C`、开放语义理解、embedding、LLM intent、top-N scan、rerank、template contract execution、chapter contract execution、自动报告、投资判断或 release readiness。

@@ -785,6 +785,34 @@ Slice 11A 已经 MiMo review `ACCEPTED`：
 - CLI 输出不包含 `nav_growth_rate`、`benchmark_return_rate` 或 `decimal_percent_text` DTO；没有字段值抽取或计算。
 - 11A remaining blocking risk: none reported。
 
+Post-MVP 11B 裁决为 disclosure locator contract registry：
+
+- 11B 目标是把现有 controlled disclosure profiles 收敛为 Service 层内部 locator contract registry，降低后续继续堆零散 hardcoded profile 的风险。
+- 11B 不新增新的披露对象定位能力；只迁移 / 规范已有 `holdings_top10`、`asset_allocation`、`fee_rates`、`performance_returns` 等 reading locator profile。
+- registry 最小字段固定为：`profile_name`、`aliases`、`candidate_queries`、`acceptable_title_family`、`requires_table_citation`、`extraction_allowed`。
+- `profile_name` 是内部 profile 名称，不作为 public tool 输出或用户可见契约。
+- `aliases` 只用于判断用户 query 是否进入该受控 profile；alias 本身不得作为 evidence 成功条件或 citation 来源。
+- `candidate_queries` 是 Service 层按顺序调用既有 Host / Agent / `search_document` 的受控检索候选，不修改 `search_document` public contract。
+- `acceptable_title_family` 是披露目标成功条件；只有命中可接受标题族才算 profile 成功，不能把 keyword 命中当成 disclosure target success。
+- `requires_table_citation` 只表达该 profile 是否要求 table citation；若为 true 且目标样本存在表格，最终 evidence 必须包含 table citation。
+- `extraction_allowed` 在 11B 固定为 `False`；registry 只表达阅读定位 contract，不开放字段抽取、计算或章节生成。
+- 11B 仍放在 Service 层；Store / ToolService / Agent 不承担 routing registry、自由语义理解或 target success 判定。
+- 11B 不改变 CLI 默认输出格式，不暴露 `routing_trace`，不新增 DTO，不新增 public failure code。
+- failure 语义沿用现有 failure code：所有 candidate 未命中目标披露为 `not_found`；registry 配置异常为 `schema_drift`；内部异常为 `unavailable`。
+- 11B 不接 LLM、embedding、外部搜索服务，不做开放语义理解、自动分词、同义词扩散、top-N rerank、歧义消解、字段抽取、calculation framework、template contract execution、chapter contract execution、自动报告或投资判断。
+- 11B 验收必须证明已有 locator 能力不回退：`前十大持仓`、`资产配置`、`费用`、`净值增长率` 四类查询仍按既有 accepted contract 返回目标 disclosure evidence / citation；`费用` 仍命中 `基金管理费`、`基金托管费`、`销售服务费`；`净值增长率` 仍包含 table citation 且不输出结构化字段 DTO。
+
+Slice 11B 已经 MiMo review `ACCEPTED`：
+
+- Service 层已将既有 controlled disclosure profiles 收敛为 disclosure locator contract registry。
+- registry 保持四类既有 profile：`holdings_top10`、`asset_allocation`、`fee_rates`、`performance_returns`；未新增披露对象，未扩大 alias。
+- 真实 CLI smoke 结果：
+  - `前十大持仓`: exit code `0`；命中 `股票投资明细`；Citations / Trace / table citation 存在；CLI 默认输出不包含 `routing_trace`。
+  - `资产配置`: exit code `0`；命中 `期末基金资产组合情况`；Citations / Trace / table citation 存在；CLI 默认输出不包含 `routing_trace`。
+  - `费用`: exit code `0`；命中 `基金管理费`、`基金托管费`、`销售服务费`；Citations / Trace 存在；CLI 默认输出不包含 `routing_trace`。
+  - `净值增长率`: exit code `0`；命中 `基金份额净值增长率及其与同期业绩比较基准收益率的比较`；Citations / Trace / table citation 存在；未输出结构化字段 DTO。
+- 11B remaining blocking risk: none reported。
+
 ### 8.3 Locator 最低标准
 
 MVP 采用宽松 locator 硬标准：
@@ -913,12 +941,12 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## 9. 已关闭裁决项
 
-MVP plan 已关闭。当前已完成到 Post-MVP Slice 11A；Slice 9F 因 keyword-level routing 无法证明 disclosure target success 被判定为 `BLOCKED_BY_DESIGN`；Slice 10A 已实现 Controlled disclosure target contract 并经 MiMo review `ACCEPTED`；Slice 10B 已实现 fee_rates reading locator 并经 MiMo review `ACCEPTED`；Slice 10C 已实现 fee_rates value extraction contract 并经 MiMo review `ACCEPTED`；Slice 11A 已实现 performance disclosure locator 并经 MiMo review `ACCEPTED`；10D performance return fields extraction 后置。
+MVP plan 已关闭。当前已完成到 Post-MVP Slice 11B；Slice 9F 因 keyword-level routing 无法证明 disclosure target success 被判定为 `BLOCKED_BY_DESIGN`；Slice 10A 已实现 Controlled disclosure target contract 并经 MiMo review `ACCEPTED`；Slice 10B 已实现 fee_rates reading locator 并经 MiMo review `ACCEPTED`；Slice 10C 已实现 fee_rates value extraction contract 并经 MiMo review `ACCEPTED`；Slice 11A 已实现 performance disclosure locator 并经 MiMo review `ACCEPTED`；Slice 11B 已实现 disclosure locator contract registry 并经 MiMo review `ACCEPTED`；10D performance return fields extraction 后置。
 
 ## 10. 下一步最小可验证问题
 
 下一步只应验证一个问题：
 
 ```text
-下一步尚未裁决。若开启 10D performance return fields extraction，必须先裁决 period 口径、份额类别口径、字段 DTO、citation 要求和失败语义；不得把 10D 扩成 `A=R-B`、`R=A+B-C`、换手率、成本计算、同类中位数、模板执行、自动报告或投资判断。若继续 reading locator 路线，也必须保持 `search_document` contract、Agent/Store/ToolService、CLI 输出格式不变。
+下一步尚未裁决。若后续开启 11C turnover source disclosure locator，必须先裁决 profile name、aliases、candidate queries、acceptable title family、table citation 要求、失败语义和真实 CLI smoke 验收；11C 只能做来源披露定位，不得输出 `turnover_rate`、不计算换手率、不估算隐性交易成本。若后续开启 10D performance return fields extraction，仍必须另行裁决 period 口径、份额类别口径、字段 DTO、citation 要求和失败语义。
 ```

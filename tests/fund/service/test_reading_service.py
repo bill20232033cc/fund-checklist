@@ -563,6 +563,62 @@ def test_controlled_query_profiles_generate_bounded_candidates(query: str, expec
     assert len(candidates) <= 4
 
 
+def test_disclosure_locator_registry_has_only_reading_contract_fields() -> None:
+    """11B registry 只表达披露定位 contract，不开放抽取或 public DTO。"""
+
+    assert {field.name for field in fields(reading_service_module._DisclosureLocatorContract)} == {
+        "profile_name",
+        "aliases",
+        "candidate_queries",
+        "acceptable_title_family",
+        "requires_table_citation",
+        "extraction_allowed",
+    }
+    registry = {
+        contract.profile_name: contract
+        for contract in reading_service_module.DISCLOSURE_LOCATOR_CONTRACT_REGISTRY
+    }
+    assert tuple(registry) == (
+        "holdings_top10",
+        "asset_allocation",
+        "fee_rates",
+        "performance_returns",
+    )
+    assert registry["holdings_top10"].aliases == ("前十大持仓", "重仓股", "持仓明细")
+    assert registry["holdings_top10"].candidate_queries == ("股票投资明细", "前十名股票投资明细")
+    assert registry["holdings_top10"].acceptable_title_family == ("股票投资明细", "前十名股票投资明细")
+    assert registry["holdings_top10"].requires_table_citation is True
+    assert registry["asset_allocation"].aliases == ("资产配置", "资产组合")
+    assert registry["asset_allocation"].candidate_queries == ("期末基金资产组合情况", "基金资产组合情况")
+    assert registry["asset_allocation"].acceptable_title_family == (
+        "期末基金资产组合情况",
+        "基金资产组合情况",
+    )
+    assert registry["asset_allocation"].requires_table_citation is True
+    assert registry["fee_rates"].aliases == ("费用", "费率", "管理费", "托管费", "销售服务费")
+    assert registry["fee_rates"].candidate_queries == ("基金管理费", "基金托管费", "销售服务费")
+    assert registry["fee_rates"].acceptable_title_family == ("基金管理费", "基金托管费", "销售服务费")
+    assert registry["fee_rates"].requires_table_citation is False
+    assert registry["performance_returns"].aliases == (
+        "净值增长率",
+        "业绩比较基准收益率",
+        "基准收益率",
+        "收益表现",
+        "基金净值表现",
+    )
+    assert registry["performance_returns"].candidate_queries == (
+        "基金份额净值增长率及其与同期业绩比较基准收益率的比较",
+        "基金净值表现",
+        "业绩比较基准收益率",
+    )
+    assert registry["performance_returns"].acceptable_title_family == (
+        "基金份额净值增长率及其与同期业绩比较基准收益率的比较",
+        "基金净值表现",
+    )
+    assert registry["performance_returns"].requires_table_citation is True
+    assert all(contract.extraction_allowed is False for contract in registry.values())
+
+
 def test_read_local_report_routes_controlled_alias_to_first_successful_candidate(tmp_path: Path) -> None:
     """受控 alias 命中时，Service 必须按候选顺序返回第一个成功 Agent result。"""
 
@@ -1073,22 +1129,40 @@ def test_controlled_query_profile_config_error_maps_to_schema_drift(monkeypatch)
     """routing 配置异常必须 fail-closed 为 schema_drift。"""
 
     bad_profiles = (
-        reading_service_module._ControlledQueryProfile(
-            name="bad",
+        reading_service_module._DisclosureLocatorContract(
+            profile_name="bad",
             aliases=("前十大持仓",),
-            fallback_candidates=("a", "b", "c", "d"),
-            disclosure_target=reading_service_module._ControlledDisclosureTarget(
-                target_id="bad",
-                allowed_evidence_kinds=(LocatorKind.SECTION,),
-                acceptable_title_family=("bad",),
-                expected_citation_kinds=(LocatorKind.SECTION,),
-            ),
+            candidate_queries=("a", "b", "c", "d"),
+            acceptable_title_family=("bad",),
+            requires_table_citation=False,
+            extraction_allowed=False,
         ),
     )
-    monkeypatch.setattr(reading_service_module, "CONTROLLED_QUERY_PROFILES", bad_profiles)
+    monkeypatch.setattr(reading_service_module, "DISCLOSURE_LOCATOR_CONTRACT_REGISTRY", bad_profiles)
 
     with pytest.raises(DocumentToolError) as exc_info:
         reading_service_module._candidate_queries_for_query("前十大持仓")
+
+    assert exc_info.value.code is FailureCode.SCHEMA_DRIFT
+
+
+def test_disclosure_locator_registry_rejects_extraction_enabled_contract(monkeypatch) -> None:
+    """11B registry 的 extraction_allowed 必须固定为 False。"""
+
+    bad_registry = (
+        reading_service_module._DisclosureLocatorContract(
+            profile_name="fee_rates",
+            aliases=("费用",),
+            candidate_queries=("基金管理费",),
+            acceptable_title_family=("基金管理费",),
+            requires_table_citation=False,
+            extraction_allowed=True,
+        ),
+    )
+    monkeypatch.setattr(reading_service_module, "DISCLOSURE_LOCATOR_CONTRACT_REGISTRY", bad_registry)
+
+    with pytest.raises(DocumentToolError) as exc_info:
+        reading_service_module._candidate_queries_for_query("费用")
 
     assert exc_info.value.code is FailureCode.SCHEMA_DRIFT
 

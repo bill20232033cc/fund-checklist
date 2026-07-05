@@ -1,9 +1,9 @@
 # fund-checklist implementation-control
 
-更新时间：2026-07-04
-当前阶段：`POST_MVP_SLICE_11A_ACCEPTED`
+更新时间：2026-07-05
+当前阶段：`POST_MVP_SLICE_11B_ACCEPTED`
 当前角色：control / CIC-lite controller
-当前目标：Slice 11A performance disclosure locator 已经 MiMo `ACCEPTED`；当前无已裁决的下一实现 slice。若开启 10D performance return fields extraction，必须先裁决 period 口径。不得扩成 gateflow / phaseflow / release-readiness，不新增 plan artifact，不进入 batch benchmark、开放语义理解、自动分词、embedding、LLM intent、template contract execution、chapter contract execution、calculation framework、`fund-checklist ask`、UI、自动报告或投资判断。
+当前目标：Slice 11B disclosure locator contract registry 已经 MiMo `ACCEPTED`；当前无已裁决的下一实现 slice。若开启 11C turnover source disclosure locator，必须先裁决 profile name、aliases、candidate queries、acceptable title family、table citation 要求、失败语义和真实 CLI smoke 验收。若开启 10D performance return fields extraction，仍必须另行裁决 period 口径。不得扩成 gateflow / phaseflow / release-readiness，不新增 plan artifact，不进入 batch benchmark、开放语义理解、自动分词、embedding、LLM intent、template contract execution、chapter contract execution、calculation framework、`fund-checklist ask`、UI、自动报告或投资判断。
 
 ## 当前事实
 
@@ -237,6 +237,27 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
   - CLI 默认输出不包含 `routing_trace`。
   - CLI 输出不包含 `nav_growth_rate`、`benchmark_return_rate` 或 `decimal_percent_text` DTO；没有字段值抽取或计算。
 - 11A remaining blocking risk: none reported。
+- Post-MVP 11B 裁决为 disclosure locator contract registry。
+- 11B 目标是把现有 controlled disclosure profiles 收敛为 Service 层内部 locator contract registry，降低后续继续堆零散 hardcoded profile 的风险。
+- 11B 不新增新的披露对象定位能力；只迁移 / 规范已有 `holdings_top10`、`asset_allocation`、`fee_rates`、`performance_returns` 等 reading locator profile。
+- registry 最小字段固定为：`profile_name`、`aliases`、`candidate_queries`、`acceptable_title_family`、`requires_table_citation`、`extraction_allowed`。
+- `profile_name` 是内部 profile 名称，不作为 public tool 输出或用户可见契约。
+- `aliases` 只用于判断用户 query 是否进入该受控 profile；alias 本身不得作为 evidence 成功条件或 citation 来源。
+- `candidate_queries` 是 Service 层按顺序调用既有 Host / Agent / `search_document` 的受控检索候选，不修改 `search_document` public contract。
+- `acceptable_title_family` 是披露目标成功条件；只有命中可接受标题族才算 profile 成功，不能把 keyword 命中当成 disclosure target success。
+- `requires_table_citation` 只表达该 profile 是否要求 table citation；若为 true 且目标样本存在表格，最终 evidence 必须包含 table citation。
+- `extraction_allowed` 在 11B 固定为 `False`；registry 只表达阅读定位 contract，不开放字段抽取、计算或章节生成。
+- 11B 仍放在 Service 层；Store / ToolService / Agent 不承担 routing registry、自由语义理解或 target success 判定。
+- 11B 不改变 CLI 默认输出格式，不暴露 `routing_trace`，不新增 DTO，不新增 public failure code。
+- failure 语义沿用现有 failure code：所有 candidate 未命中目标披露为 `not_found`；registry 配置异常为 `schema_drift`；内部异常为 `unavailable`。
+- 11B 不接 LLM、embedding、外部搜索服务，不做开放语义理解、自动分词、同义词扩散、top-N rerank、歧义消解、字段抽取、calculation framework、template contract execution、chapter contract execution、自动报告或投资判断。
+- Slice 11B 已经 MiMo review `ACCEPTED`。
+- Slice 11B 真实 CLI smoke 结果：
+  - `前十大持仓`: exit code `0`；命中 `股票投资明细`；Citations / Trace / table citation 存在；CLI 默认输出不包含 `routing_trace`。
+  - `资产配置`: exit code `0`；命中 `期末基金资产组合情况`；Citations / Trace / table citation 存在；CLI 默认输出不包含 `routing_trace`。
+  - `费用`: exit code `0`；命中 `基金管理费`、`基金托管费`、`销售服务费`；Citations / Trace 存在；CLI 默认输出不包含 `routing_trace`。
+  - `净值增长率`: exit code `0`；命中 `基金份额净值增长率及其与同期业绩比较基准收益率的比较`；Citations / Trace / table citation 存在；未输出结构化字段 DTO。
+- 11B remaining blocking risk: none reported。
 
 ## CIC-lite Rules
 
@@ -253,30 +274,31 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## Next Action
 
-当前无已裁决的下一实现 slice。等待下一步裁决；若进入 10D，必须先裁决 `nav_growth_rate` / `benchmark_return_rate` 的 period 口径、份额类别口径、字段 DTO、citation 要求和失败语义。
+当前无已裁决的下一实现 slice。若开启 11C turnover source disclosure locator，必须先裁决 profile name、aliases、candidate queries、acceptable title family、table citation 要求、失败语义和真实 CLI smoke 验收；11C 只能做来源披露定位，不得输出 `turnover_rate`、不计算换手率、不估算隐性交易成本。若进入 10D，仍必须先裁决 `nav_growth_rate` / `benchmark_return_rate` 的 period 口径、份额类别口径、字段 DTO、citation 要求和失败语义。
 
 禁止事项：
 
-- 禁止把 11A closeout 扩成 10D 字段抽取。
+- 禁止把 11B closeout 扩成 10D 字段抽取。
+- 禁止在 11B closeout 新增披露对象定位能力。
 - 禁止在未裁决 period 前抽取净值增长率或基准收益率。
 - 禁止输出 `nav_growth_rate`、`benchmark_return_rate`、`period`、`decimal_percent_text` 等结构化字段。
 - 禁止抽取换手率；`turnover_rate` 后置为独立 turnover locator / calculation decision。
 - 禁止计算显性成本小计、总成本、扣费后收益率或年化收益率。
 - 禁止实现 `R=A+B-C`、Alpha/Beta/Cost 综合评估、同类中位数或判断生成。
-- 禁止新增 alias 覆盖矩阵；仅允许裁决内的 `performance_returns` aliases。
+- 禁止新增 alias 覆盖矩阵；11B 只允许把既有 aliases 迁入 registry，不扩大 alias 范围。
 - 禁止改 `search_document` public contract。
 - 禁止把 routing 放入 Store / ToolService / Agent 层。
 - 禁止开放式 query normalization、自动分词、同义词扩散、query intent 分类、embedding 或 LLM intent。
 - 禁止扫描 top-N search results、rerank、歧义消解或 LLM 判断哪个表更相关。
 - 禁止引入 score、confidence、rationale、`partial_success` 或新 failure taxonomy。
 - 禁止改变 CLI 默认输出格式。
-- 禁止把 11A 解释为泛化问答能力或 benchmark；11A 只建立 performance disclosure locator。
+- 禁止把 11B 解释为泛化问答能力或 benchmark；11B 只建立 Service 内部 locator contract registry。
 - 禁止新增 `fund-checklist ask` 或 CLI 参数。
 - 禁止接真实 LLM、embedding、外部搜索服务。
 - 禁止执行 template-informed intent routing、chapter contract execution、calculation framework、report audit、自动报告或投资判断。
 - 禁止暴露 raw Docling JSON、本地 PDF path、cache path、repository/private loader 或 `local_import_id`。
 
-11A closeout 验证命令：
+11B closeout 验证命令：
 
 ```bash
 uv run pytest tests/fund/service/test_reading_service.py tests/fund/cli/test_cli.py
@@ -288,13 +310,22 @@ uv run pytest tests/fund/service/test_reading_service.py tests/fund/cli/test_cli
 uv run pytest tests/fund/agent/test_minimal_tool_loop.py tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_service.py
 ```
 
-11A 已完成真实 CLI smoke：
+11B 已保留 11A 已完成真实 CLI smoke 行为：
 
 ```bash
 uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '净值增长率' --work-dir .fund_checklist_cli_smoke_11a
 ```
 
-验收点：11A 真实 CLI smoke 对 `--query 净值增长率` exit code `0`，answer 包含 `基金份额净值增长率及其与同期业绩比较基准收益率的比较`，Citations / Trace 存在，包含 table citation，CLI 默认输出不包含 `routing_trace`。未输出 `nav_growth_rate` / `benchmark_return_rate` 字段 DTO，未抽值或计算。旧 Service/CLI/Agent/Store/ToolService 测试不回退。
+11B 已完成真实 CLI smoke：
+
+```bash
+uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '前十大持仓' --work-dir .fund_checklist_cli_smoke_11b_holdings
+uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '资产配置' --work-dir .fund_checklist_cli_smoke_11b_asset
+uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '费用' --work-dir .fund_checklist_cli_smoke_11b_fees
+uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '净值增长率' --work-dir .fund_checklist_cli_smoke_11b_performance
+```
+
+验收点：11B 真实 CLI smoke 对 `前十大持仓`、`资产配置`、`费用`、`净值增长率` 均保持既有 accepted 行为；`费用` output 包含 `基金管理费`、`基金托管费`、`销售服务费`；`净值增长率` answer 包含 `基金份额净值增长率及其与同期业绩比较基准收益率的比较`，包含 table citation，CLI 默认输出不包含 `routing_trace`。未输出 `nav_growth_rate` / `benchmark_return_rate` 字段 DTO，未抽值或计算。MiMo verdict: `ACCEPTED`；remaining blocking risk: none reported。
 
 ## Implementation Slices
 
@@ -320,6 +351,7 @@ uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值
 10C. fee_rates value extraction contract：已 accepted；抽取 `management_fee_rate`、`custodian_fee_rate`、`sales_service_fee_rate` 三个当前适用年费率字段；不抽取收益/换手率，不做成本或收益计算。
 10D. performance return fields extraction contract：deferred；候选为 `nav_growth_rate` / `benchmark_return_rate`，开启前必须另行裁决 period 口径；`turnover_rate` 后置。
 11A. performance disclosure locator：已 accepted；定位 `基金份额净值增长率及其与同期业绩比较基准收益率的比较` / `基金净值表现` 披露，返回 section/table citation 和原始表格片段；不抽值、不计算。
+11B. disclosure locator contract registry：已 accepted；把既有 controlled disclosure profiles 收敛为 Service 内部 locator contract registry；不新增披露对象，不抽值、不计算、不改 public tool / CLI contract。
 
 ## MVP Acceptance Matrix
 

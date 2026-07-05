@@ -55,25 +55,15 @@ _SHARE_SCOPE_C = "C"
 
 
 @dataclass(frozen=True)
-class _ControlledDisclosureTarget:
-    """Service 内部受控披露目标契约。"""
+class _DisclosureLocatorContract:
+    """Service 内部披露定位 registry contract。"""
 
-    target_id: str
-    allowed_evidence_kinds: tuple[LocatorKind, ...]
-    acceptable_title_family: tuple[str, ...]
-    expected_citation_kinds: tuple[LocatorKind, ...]
-    require_all_expected_citation_kinds: bool = False
-
-
-@dataclass(frozen=True)
-class _ControlledQueryProfile:
-    """Service 内部受控 query profile 配置。"""
-
-    name: str
+    profile_name: str
     aliases: tuple[str, ...]
-    fallback_candidates: tuple[str, ...]
-    disclosure_target: _ControlledDisclosureTarget
-    require_all_target_candidates: bool = False
+    candidate_queries: tuple[str, ...]
+    acceptable_title_family: tuple[str, ...]
+    requires_table_citation: bool
+    extraction_allowed: bool
 
 
 @dataclass(frozen=True)
@@ -149,59 +139,45 @@ class ExtractFeeRatesResult:
     failure: ToolFailure | None = None
 
 
-CONTROLLED_QUERY_PROFILES = (
-    _ControlledQueryProfile(
-        name="holdings_top10",
+DISCLOSURE_LOCATOR_CONTRACT_REGISTRY = (
+    _DisclosureLocatorContract(
+        profile_name="holdings_top10",
         aliases=("前十大持仓", "重仓股", "持仓明细"),
-        fallback_candidates=("股票投资明细", "前十名股票投资明细"),
-        disclosure_target=_ControlledDisclosureTarget(
-            target_id="holdings_top10",
-            allowed_evidence_kinds=(LocatorKind.TABLE,),
-            acceptable_title_family=("股票投资明细", "前十名股票投资明细"),
-            expected_citation_kinds=(LocatorKind.TABLE,),
-        ),
+        candidate_queries=("股票投资明细", "前十名股票投资明细"),
+        acceptable_title_family=("股票投资明细", "前十名股票投资明细"),
+        requires_table_citation=True,
+        extraction_allowed=False,
     ),
-    _ControlledQueryProfile(
-        name="asset_allocation",
+    _DisclosureLocatorContract(
+        profile_name="asset_allocation",
         aliases=("资产配置", "资产组合"),
-        fallback_candidates=("期末基金资产组合情况", "基金资产组合情况"),
-        disclosure_target=_ControlledDisclosureTarget(
-            target_id="asset_allocation",
-            allowed_evidence_kinds=(LocatorKind.TABLE,),
-            acceptable_title_family=("期末基金资产组合情况", "基金资产组合情况"),
-            expected_citation_kinds=(LocatorKind.TABLE,),
-        ),
+        candidate_queries=("期末基金资产组合情况", "基金资产组合情况"),
+        acceptable_title_family=("期末基金资产组合情况", "基金资产组合情况"),
+        requires_table_citation=True,
+        extraction_allowed=False,
     ),
-    _ControlledQueryProfile(
-        name="fee_rates",
+    _DisclosureLocatorContract(
+        profile_name="fee_rates",
         aliases=("费用", "费率", "管理费", "托管费", "销售服务费"),
-        fallback_candidates=("基金管理费", "基金托管费", "销售服务费"),
-        disclosure_target=_ControlledDisclosureTarget(
-            target_id="fee_rates",
-            allowed_evidence_kinds=(LocatorKind.SECTION, LocatorKind.TABLE),
-            acceptable_title_family=("基金管理费", "基金托管费", "销售服务费"),
-            expected_citation_kinds=(LocatorKind.SECTION, LocatorKind.TABLE),
-        ),
-        require_all_target_candidates=True,
+        candidate_queries=("基金管理费", "基金托管费", "销售服务费"),
+        acceptable_title_family=("基金管理费", "基金托管费", "销售服务费"),
+        requires_table_citation=False,
+        extraction_allowed=False,
     ),
-    _ControlledQueryProfile(
-        name="performance_returns",
+    _DisclosureLocatorContract(
+        profile_name="performance_returns",
         aliases=("净值增长率", "业绩比较基准收益率", "基准收益率", "收益表现", "基金净值表现"),
-        fallback_candidates=(
+        candidate_queries=(
             "基金份额净值增长率及其与同期业绩比较基准收益率的比较",
             "基金净值表现",
             "业绩比较基准收益率",
         ),
-        disclosure_target=_ControlledDisclosureTarget(
-            target_id="performance_returns",
-            allowed_evidence_kinds=(LocatorKind.SECTION, LocatorKind.TABLE),
-            acceptable_title_family=(
-                "基金份额净值增长率及其与同期业绩比较基准收益率的比较",
-                "基金净值表现",
-            ),
-            expected_citation_kinds=(LocatorKind.SECTION, LocatorKind.TABLE),
-            require_all_expected_citation_kinds=True,
+        acceptable_title_family=(
+            "基金份额净值增长率及其与同期业绩比较基准收益率的比较",
+            "基金净值表现",
         ),
+        requires_table_citation=True,
+        extraction_allowed=False,
     ),
 )
 
@@ -412,8 +388,7 @@ class _QueryRoutePlan:
 
     profile_name: str | None
     candidate_queries: tuple[str, ...]
-    disclosure_target: _ControlledDisclosureTarget | None
-    require_all_target_candidates: bool = False
+    locator_contract: _DisclosureLocatorContract | None
 
 
 @dataclass(frozen=True)
@@ -654,8 +629,8 @@ class FundReadingService:
         for candidate_query in route_plan.candidate_queries:
             result = host.run(document_id=document_id, query=candidate_query)
             if result.failure is None:
-                disclosure_titles = _matched_disclosure_titles(result, route_plan.disclosure_target)
-                if route_plan.disclosure_target is not None and not disclosure_titles:
+                disclosure_titles = _matched_disclosure_titles(result, route_plan.locator_contract)
+                if route_plan.locator_contract is not None and not disclosure_titles:
                     attempts.append(
                         QueryRouteAttempt(
                             query=candidate_query,
@@ -666,7 +641,7 @@ class FundReadingService:
                     )
                     last_not_found = _target_not_found_result(result)
                     continue
-                if route_plan.require_all_target_candidates:
+                if _requires_all_target_titles(route_plan.locator_contract):
                     attempts.append(
                         QueryRouteAttempt(
                             query=candidate_query,
@@ -701,8 +676,10 @@ class FundReadingService:
                 return _QueryRouteRun(agent_result=result, routing_trace=tuple(attempts))
             last_not_found = result
 
-        if route_plan.require_all_target_candidates:
-            required_titles = set(route_plan.disclosure_target.acceptable_title_family) if route_plan.disclosure_target else set()
+        if _requires_all_target_titles(route_plan.locator_contract):
+            required_titles = (
+                set(route_plan.locator_contract.acceptable_title_family) if route_plan.locator_contract else set()
+            )
             if required_titles and required_titles.issubset(matched_titles):
                 return _QueryRouteRun(
                     agent_result=_aggregate_agent_results(tuple(matched_results)),
@@ -778,79 +755,84 @@ def _candidate_queries_for_query(query: str) -> tuple[str, ...]:
 def _route_plan_for_query(query: str) -> _QueryRoutePlan:
     """返回 query 对应的 Service routing plan，不做开放语义理解。"""
 
-    for profile in _validated_query_profiles():
-        if query in profile.aliases:
+    for contract in _validated_locator_contracts():
+        if query in contract.aliases:
             return _QueryRoutePlan(
-                profile_name=profile.name,
-                candidate_queries=_bounded_unique_candidates((query, *profile.fallback_candidates)),
-                disclosure_target=profile.disclosure_target,
-                require_all_target_candidates=profile.require_all_target_candidates,
+                profile_name=contract.profile_name,
+                candidate_queries=_bounded_unique_candidates((query, *contract.candidate_queries)),
+                locator_contract=contract,
             )
-    return _QueryRoutePlan(profile_name=None, candidate_queries=(query,), disclosure_target=None)
+    return _QueryRoutePlan(profile_name=None, candidate_queries=(query,), locator_contract=None)
 
 
-def _validated_query_profiles() -> tuple[_ControlledQueryProfile, ...]:
-    """校验受控 routing 配置，异常时映射为 schema_drift。"""
+def _validated_locator_contracts() -> tuple[_DisclosureLocatorContract, ...]:
+    """校验 Service 内部披露定位 registry，异常时映射为 schema_drift。"""
 
     seen_aliases: set[str] = set()
-    seen_targets: set[str] = set()
-    for profile in CONTROLLED_QUERY_PROFILES:
-        if not profile.name or not profile.aliases or not profile.fallback_candidates:
-            raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "controlled query routing 配置不完整")
-        _validate_disclosure_target(profile.disclosure_target, seen_targets)
-        if 1 + len(profile.fallback_candidates) > _MAX_QUERY_CANDIDATES:
-            raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "controlled query routing 候选过多")
-        if profile.require_all_target_candidates and len(profile.fallback_candidates) != len(
-            profile.disclosure_target.acceptable_title_family
+    seen_profiles: set[str] = set()
+    for contract in DISCLOSURE_LOCATOR_CONTRACT_REGISTRY:
+        if not contract.profile_name or contract.profile_name in seen_profiles:
+            raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "disclosure locator registry profile 配置异常")
+        seen_profiles.add(contract.profile_name)
+        if (
+            not contract.aliases
+            or not contract.candidate_queries
+            or not contract.acceptable_title_family
+            or contract.extraction_allowed
         ):
-            raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "controlled query routing 多目标配置异常")
-        for alias in profile.aliases:
+            raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "disclosure locator registry 配置不完整")
+        if 1 + len(contract.candidate_queries) > _MAX_QUERY_CANDIDATES:
+            raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "disclosure locator registry 候选过多")
+        if len(set(contract.candidate_queries)) != len(contract.candidate_queries):
+            raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "disclosure locator registry candidate 配置异常")
+        if any(not candidate for candidate in contract.candidate_queries):
+            raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "disclosure locator registry candidate 为空")
+        if len(set(contract.acceptable_title_family)) != len(contract.acceptable_title_family):
+            raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "disclosure locator registry title 配置异常")
+        if any(not title for title in contract.acceptable_title_family):
+            raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "disclosure locator registry title 为空")
+        if _requires_all_target_titles(contract) and set(contract.candidate_queries) != set(
+            contract.acceptable_title_family
+        ):
+            raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "disclosure locator registry 多目标配置异常")
+        for alias in contract.aliases:
             if not alias or alias in seen_aliases:
-                raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "controlled query routing alias 配置异常")
+                raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "disclosure locator registry alias 配置异常")
             seen_aliases.add(alias)
-        if len(set(profile.fallback_candidates)) != len(profile.fallback_candidates):
-            raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "controlled query routing candidate 配置异常")
-        if any(not candidate for candidate in profile.fallback_candidates):
-            raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "controlled query routing candidate 为空")
-    return tuple(CONTROLLED_QUERY_PROFILES)
+    return tuple(DISCLOSURE_LOCATOR_CONTRACT_REGISTRY)
 
 
-def _validate_disclosure_target(target: _ControlledDisclosureTarget, seen_targets: set[str]) -> None:
-    """校验受控披露目标契约，异常时映射为 schema_drift。"""
+def _requires_all_target_titles(contract: _DisclosureLocatorContract | None) -> bool:
+    """判断 locator contract 是否要求可接受标题族全量命中。"""
 
-    if not target.target_id or target.target_id in seen_targets:
-        raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "controlled disclosure target 配置异常")
-    seen_targets.add(target.target_id)
-    if not target.allowed_evidence_kinds or not target.acceptable_title_family or not target.expected_citation_kinds:
-        raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "controlled disclosure target 配置不完整")
-    allowed = set(target.allowed_evidence_kinds)
-    expected = set(target.expected_citation_kinds)
-    if not expected.issubset(allowed):
-        raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "controlled disclosure target citation 配置异常")
-    if any(not title for title in target.acceptable_title_family):
-        raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "controlled disclosure target title 配置为空")
+    if contract is None:
+        return False
+    return (
+        not contract.requires_table_citation
+        and len(contract.acceptable_title_family) > 1
+        and set(contract.candidate_queries) == set(contract.acceptable_title_family)
+    )
 
 
 def _matched_disclosure_titles(
     result: AgentRunResult,
-    target: _ControlledDisclosureTarget | None,
+    contract: _DisclosureLocatorContract | None,
 ) -> tuple[str, ...]:
     """返回 Agent 安全 answer 命中的受控披露标题族。"""
 
-    if target is None:
+    if contract is None:
         return ("__uncontrolled__",)
     citation_kinds = tuple(citation.locator.locator_kind for citation in result.citations)
-    if target.require_all_expected_citation_kinds:
-        if not set(target.expected_citation_kinds).issubset(set(citation_kinds)):
-            return ()
-    elif not any(kind in target.expected_citation_kinds for kind in citation_kinds):
+    if not citation_kinds:
         return ()
-    if not any(kind in target.allowed_evidence_kinds for kind in citation_kinds):
+    if contract.requires_table_citation and LocatorKind.TABLE not in citation_kinds:
+        return ()
+    if contract.profile_name == "performance_returns" and LocatorKind.SECTION not in citation_kinds:
         return ()
     title_lines = _target_title_lines(result.answer)
     return tuple(
         title
-        for title in target.acceptable_title_family
+        for title in contract.acceptable_title_family
         if any(title in line for line in title_lines)
     )
 
