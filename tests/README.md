@@ -409,3 +409,23 @@ uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值
 ```
 
 Slice 10D 不测试近 3 年、近 5 年、成立以来、年度序列表、图表数据、`excess_return`、`annualized_return`、`max_drawdown`、`volatility`、`sharpe`、`tracking_error`、`turnover_rate`、显性成本小计、总成本、扣费后收益率、年化收益率、`A=R-B`、`R=A+B-C`、同类中位数、开放语义理解、embedding、LLM intent、top-N scan、rerank、template contract execution、chapter contract execution、自动报告、投资判断或 release readiness。
+
+Post-MVP Slice 10F annual performance table extraction 测试范围：
+
+- `FundReadingService.extract_annual_performance` 复用 `performance_returns` 定位结果，只从固定标题族 `基金份额净值增长率及其与同期业绩比较基准收益率的比较` 对应的受控 table locator 抽取字段。
+- DTO 字段仅限 `annual_nav_growth_rate`、`annual_benchmark_return_rate`，并包含 `report_year`、`source_period_label`、`share_class_scope`、`raw_text`、`citation`。
+- `report_year` 来自 request.year；`source_period_label` 固定为原文 `过去一年`，且 `raw_text` 必须保留 `过去一年`。
+- 成功路径覆盖不依赖章节编号、cited signature 表格、A/C 类完整表格和真实 PDF A 类 `17.32%` / `14.45%`。
+- fail-closed 覆盖管理人报告文字不得 fallback、缺 table citation、未被 citation 指向的 signature 表不得消费、目标列缺失、`过去一年` 行缺失、share class 全部字段不完整、配置异常映射 `schema_drift`。
+- partial-by-share-class 允许；partial-by-field 不允许。
+- CLI 默认输出仍只展示 Answer、Citations、Trace，不展示结构化年度业绩 DTO 或 `routing_trace`。
+
+Slice 10F 验证命令：
+
+```bash
+uv run pytest tests/fund/service/test_reading_service.py tests/fund/cli/test_cli.py
+uv run pytest tests/fund/agent/test_minimal_tool_loop.py tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_service.py
+git diff --check
+```
+
+Slice 10F 不测试标准差、超额收益、年度序列、近 3 年、近 5 年、成立以来、图表数据、OCR / chart parsing、管理人报告 fallback、`A=R-B`、`R=A+B-C`、换手率、显性成本小计、总成本、扣费后收益率、年化收益率、同类中位数、开放语义理解、embedding、LLM intent、template contract execution、chapter contract execution、自动报告、投资判断或 release readiness。

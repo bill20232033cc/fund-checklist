@@ -55,12 +55,15 @@ _PERFORMANCE_RETURNS_QUERY = "净值增长率"
 _PERFORMANCE_RETURN_PERIOD_PAST_1_YEAR = "past_1_year"
 _PERFORMANCE_RETURN_PERIOD_TEXT = "过去一年"
 _PERFORMANCE_TABLE_MAX_ROWS = 20
+_ANNUAL_PERFORMANCE_TITLE_FAMILY = "基金份额净值增长率及其与同期业绩比较基准收益率的比较"
 _FEE_RATE_NO_CHARGE_TEXT = "不收取"
 _FIELD_MANAGEMENT_FEE_RATE = "management_fee_rate"
 _FIELD_CUSTODIAN_FEE_RATE = "custodian_fee_rate"
 _FIELD_SALES_SERVICE_FEE_RATE = "sales_service_fee_rate"
 _FIELD_NAV_GROWTH_RATE = "nav_growth_rate"
 _FIELD_BENCHMARK_RETURN_RATE = "benchmark_return_rate"
+_FIELD_ANNUAL_NAV_GROWTH_RATE = "annual_nav_growth_rate"
+_FIELD_ANNUAL_BENCHMARK_RETURN_RATE = "annual_benchmark_return_rate"
 _SHARE_SCOPE_ALL = "all_share_classes"
 _SHARE_SCOPE_A = "A"
 _SHARE_SCOPE_C = "C"
@@ -200,6 +203,57 @@ class ExtractPerformanceReturnsResult:
     failure: ToolFailure | None = None
 
 
+@dataclass(frozen=True)
+class AnnualPerformanceExtraction:
+    """Service 层年度业绩表格受控字段抽取 DTO。
+
+    参数:
+        field_name: 受控字段名，仅允许 annual_nav_growth_rate 或
+            annual_benchmark_return_rate。
+        decimal_percent_text: 披露文本值，保持 "17.32%" 百分号格式。
+        report_year: 请求指定的报告自然年度。
+        source_period_label: 表格原文期间标签，10F 固定为 过去一年。
+        share_class_scope: 表格上下文可唯一识别的份额类别。
+        raw_text: 支撑该字段的安全表格行/单元格原文片段，必须保留 过去一年。
+        citation: 支撑该字段的实际 table citation。
+
+    返回:
+        不可变字段抽取结果。
+
+    异常:
+        本模型不执行 I/O，不抛出业务异常。
+    """
+
+    field_name: str
+    decimal_percent_text: str
+    report_year: int
+    source_period_label: str
+    share_class_scope: str
+    raw_text: str
+    citation: Citation
+
+
+@dataclass(frozen=True)
+class ExtractAnnualPerformanceResult:
+    """年度业绩字段抽取 use case 的安全结果。
+
+    参数:
+        document_id: public reading tools 使用的内容身份。
+        fields: 成功抽取的受控字段 DTO；失败时为空。
+        failure: 稳定失败分类；成功时为 None。
+
+    返回:
+        可供 Service 调用方消费的结构化抽取结果。
+
+    异常:
+        本模型不抛出业务异常。
+    """
+
+    document_id: str
+    fields: tuple[AnnualPerformanceExtraction, ...]
+    failure: ToolFailure | None = None
+
+
 DISCLOSURE_LOCATOR_CONTRACT_REGISTRY = (
     _DisclosureLocatorContract(
         profile_name="holdings_top10",
@@ -313,6 +367,19 @@ _PERFORMANCE_RETURN_EXTRACTION_SPECS = (
     ),
 )
 
+_ANNUAL_PERFORMANCE_EXTRACTION_SPECS = (
+    _PerformanceReturnExtractionSpec(
+        field_name=_FIELD_ANNUAL_NAV_GROWTH_RATE,
+        column_keywords=("份额净值增长率",),
+        excluded_keywords=("标准差",),
+    ),
+    _PerformanceReturnExtractionSpec(
+        field_name=_FIELD_ANNUAL_BENCHMARK_RETURN_RATE,
+        column_keywords=("业绩比较基准收益率",),
+        excluded_keywords=("标准差",),
+    ),
+)
+
 
 @dataclass(frozen=True)
 class ImportLocalReportRequest:
@@ -365,6 +432,22 @@ class ExtractPerformanceReturnsRequest(ImportLocalReportRequest):
     参数:
         继承本地年报导入请求字段；抽取 query 由 Service 固定为 performance_returns。
         share_class 可用于显式限定单份额表格；未指定时不得猜默认份额。
+
+    返回:
+        不可变请求 DTO。
+
+    异常:
+        本模型不执行 I/O，不抛出业务异常。
+    """
+
+
+@dataclass(frozen=True)
+class ExtractAnnualPerformanceRequest(ImportLocalReportRequest):
+    """抽取年度业绩表格字段的 use case 请求。
+
+    参数:
+        继承本地年报导入请求字段；Service 固定使用 performance_returns locator。
+        year 同时作为 DTO 的 report_year；share_class 可显式限定 A/C。
 
     返回:
         不可变请求 DTO。
@@ -677,6 +760,64 @@ class FundReadingService:
                 failure=ToolFailure(code=FailureCode.UNAVAILABLE, message="performance_returns 字段抽取暂不可用"),
             )
         return ExtractPerformanceReturnsResult(document_id=document_id, fields=fields, failure=None)
+
+    def extract_annual_performance(
+        self,
+        request: ExtractAnnualPerformanceRequest,
+    ) -> ExtractAnnualPerformanceResult:
+        """从 title-family matched performance comparison table 抽取年度收益字段。
+
+        参数:
+            request: 本地年报年度业绩抽取请求；Service 固定使用
+                performance_returns locator，并只接受标题族为
+                基金份额净值增长率及其与同期业绩比较基准收益率的比较的表格证据。
+
+        返回:
+            ExtractAnnualPerformanceResult。成功时包含可唯一识别份额类别的
+            annual_nav_growth_rate / annual_benchmark_return_rate DTO；失败时 fields
+            为空且 failure 为稳定分类。
+
+        异常:
+            DocumentToolError: 透传 PDF、repository、Docling conversion 或 parser health
+                的稳定失败分类；字段抽取失败写入 result.failure。
+        """
+
+        prepared = self._prepare_completed_report(request)
+        document_id = prepared.import_result.identity.document_id
+        tool_service = FundDocumentToolService({document_id: prepared.store})
+        host = self._host_factory(tool_service)
+        routed = self._run_with_query_candidates(
+            host=host,
+            document_id=document_id,
+            query=_ANNUAL_PERFORMANCE_TITLE_FAMILY,
+        )
+        if routed.agent_result.failure is not None:
+            return ExtractAnnualPerformanceResult(
+                document_id=document_id,
+                fields=(),
+                failure=routed.agent_result.failure,
+            )
+        try:
+            fields = _extract_annual_performance_fields(
+                document_id=document_id,
+                result=routed.agent_result,
+                tool_service=tool_service,
+                report_year=request.year,
+                requested_share_class=request.share_class,
+            )
+        except DocumentToolError as exc:
+            return ExtractAnnualPerformanceResult(
+                document_id=document_id,
+                fields=(),
+                failure=ToolFailure(code=exc.code, message=exc.message),
+            )
+        except Exception:
+            return ExtractAnnualPerformanceResult(
+                document_id=document_id,
+                fields=(),
+                failure=ToolFailure(code=FailureCode.UNAVAILABLE, message="annual performance 字段抽取暂不可用"),
+            )
+        return ExtractAnnualPerformanceResult(document_id=document_id, fields=fields, failure=None)
 
     def list_reports(self, request: ListReportsRequest) -> ListReportsResult:
         """列出本地 completed reports 的安全摘要。
@@ -1197,6 +1338,99 @@ def _extract_performance_return_fields(
     return tuple(fields)
 
 
+def _extract_annual_performance_fields(
+    *,
+    document_id: str,
+    result: AgentRunResult,
+    tool_service: FundDocumentToolService,
+    report_year: int,
+    requested_share_class: str | None,
+) -> tuple[AnnualPerformanceExtraction, ...]:
+    """从 title-family matched table 中抽取年度收益字段。"""
+
+    specs = _validated_annual_performance_specs()
+    source_section_refs = _annual_performance_source_section_refs(result)
+    table_refs = _annual_performance_table_refs(
+        document_id=document_id,
+        result=result,
+        tool_service=tool_service,
+        source_section_refs=source_section_refs,
+        specs=specs,
+    )
+
+    section_text_by_ref: dict[str, str] = {}
+    for section_ref in source_section_refs:
+        section = tool_service.read_section(document_id, section_ref)
+        if isinstance(section, ToolFailure):
+            raise DocumentToolError(section.code, section.message)
+        section_text_by_ref[section_ref] = section.text
+
+    tables: list[TableContent] = []
+    for table_ref in table_refs:
+        table = tool_service.read_table(document_id, table_ref, max_rows=_PERFORMANCE_TABLE_MAX_ROWS)
+        if isinstance(table, ToolFailure):
+            raise DocumentToolError(table.code, table.message)
+        if table.section_ref not in source_section_refs:
+            continue
+        tables.append(table)
+
+    header_tables = tuple(table for table in tables if _performance_column_indexes(table.rows, specs))
+    if not header_tables:
+        raise DocumentToolError(FailureCode.NOT_FOUND, "annual performance 目标列缺失")
+
+    share_scopes = _annual_performance_table_share_scopes(
+        header_tables,
+        section_text_by_ref=section_text_by_ref,
+        requested_share_class=requested_share_class,
+    )
+    requested_scope = _normalize_share_class_scope(requested_share_class) if requested_share_class else None
+    if requested_share_class and requested_scope is None:
+        raise DocumentToolError(FailureCode.NOT_FOUND, "annual performance 份额类别无法唯一识别")
+
+    fields: list[AnnualPerformanceExtraction] = []
+    for table in header_tables:
+        share_scope = share_scopes.get(table.table_ref)
+        if share_scope is None:
+            raise DocumentToolError(FailureCode.NOT_FOUND, "annual performance 份额类别无法唯一识别")
+        if requested_scope is not None and share_scope != requested_scope:
+            continue
+        row = _performance_past_year_row(table.rows)
+        if row is None:
+            continue
+        indexes = _performance_column_indexes(table.rows, specs)
+        if indexes is None:
+            raise DocumentToolError(FailureCode.NOT_FOUND, "annual performance 目标列缺失")
+
+        share_fields: list[AnnualPerformanceExtraction] = []
+        try:
+            for spec in specs:
+                column_index = indexes[spec.field_name]
+                value = _single_percent_text(row[column_index])
+                share_fields.append(
+                    AnnualPerformanceExtraction(
+                        field_name=spec.field_name,
+                        decimal_percent_text=value,
+                        report_year=report_year,
+                        source_period_label=_PERFORMANCE_RETURN_PERIOD_TEXT,
+                        share_class_scope=share_scope,
+                        raw_text=_performance_raw_text(
+                            period_text=row[0],
+                            column_text=table.rows[0][column_index],
+                            value_text=value,
+                        ),
+                        citation=table.citation,
+                    )
+                )
+        except DocumentToolError:
+            continue
+        if len(share_fields) == len(specs):
+            fields.extend(share_fields)
+
+    if not fields:
+        raise DocumentToolError(FailureCode.NOT_FOUND, "annual performance 过去一年完整字段缺失")
+    return tuple(fields)
+
+
 def _validated_performance_return_specs() -> tuple[_PerformanceReturnExtractionSpec, ...]:
     """校验 10D performance_returns 抽取配置，异常时映射为 schema_drift。"""
 
@@ -1208,6 +1442,56 @@ def _validated_performance_return_specs() -> tuple[_PerformanceReturnExtractionS
     for spec in specs:
         if not spec.column_keywords or any(not keyword for keyword in spec.column_keywords):
             raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "performance_returns 抽取配置不完整")
+    return specs
+
+
+def _annual_performance_table_share_scopes(
+    tables: tuple[TableContent, ...],
+    *,
+    section_text_by_ref: dict[str, str],
+    requested_share_class: str | None,
+) -> dict[str, str]:
+    """按 10F 表格自身和 section 上下文绑定年度业绩份额类别。"""
+
+    try:
+        return _performance_table_share_scopes(
+            tables,
+            section_text_by_ref=section_text_by_ref,
+            requested_share_class=requested_share_class,
+        )
+    except DocumentToolError:
+        inferred = {
+            table.table_ref: scope
+            for table in tables
+            if (scope := _annual_performance_share_scope_from_rows(table.rows)) is not None
+        }
+        if len(inferred) == len(tables):
+            return inferred
+        raise
+
+
+def _annual_performance_share_scope_from_rows(rows: tuple[tuple[str, ...], ...]) -> str | None:
+    """从年度业绩表的受控行标签识别 A/C 份额类别。"""
+
+    normalized_rows = tuple(_normalize_disclosure_text(cell) for row in rows for cell in row)
+    if any("自基金转型起至今" in cell for cell in normalized_rows):
+        return _SHARE_SCOPE_A
+    if any("自基金合同生效起至今" in cell for cell in normalized_rows):
+        return _SHARE_SCOPE_C
+    return None
+
+
+def _validated_annual_performance_specs() -> tuple[_PerformanceReturnExtractionSpec, ...]:
+    """校验 10F annual performance 抽取配置，异常时映射为 schema_drift。"""
+
+    specs = tuple(_ANNUAL_PERFORMANCE_EXTRACTION_SPECS)
+    expected = (_FIELD_ANNUAL_NAV_GROWTH_RATE, _FIELD_ANNUAL_BENCHMARK_RETURN_RATE)
+    actual = tuple(spec.field_name for spec in specs)
+    if actual != expected:
+        raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "annual performance 抽取配置异常")
+    for spec in specs:
+        if not spec.column_keywords or any(not keyword for keyword in spec.column_keywords):
+            raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "annual performance 抽取配置不完整")
     return specs
 
 
@@ -1226,6 +1510,62 @@ def _performance_table_citation_refs(result: AgentRunResult) -> tuple[tuple[str,
     if not table_refs:
         raise DocumentToolError(FailureCode.NOT_FOUND, "performance_returns 缺少 table citation")
     return table_refs
+
+
+def _annual_performance_source_section_refs(result: AgentRunResult) -> tuple[str, ...]:
+    """返回命中 10F 固定 title family 的 section refs。"""
+
+    title_lines = _target_title_lines(result.answer)
+    if not any(_ANNUAL_PERFORMANCE_TITLE_FAMILY in line for line in title_lines):
+        raise DocumentToolError(FailureCode.NOT_FOUND, "annual performance 目标 title-family 未找到")
+    section_refs = tuple(
+        dict.fromkeys(
+            citation.locator.section_ref
+            for citation in result.citations
+            if citation.locator.locator_kind is LocatorKind.SECTION and citation.locator.section_ref
+        )
+    )
+    if not section_refs:
+        raise DocumentToolError(FailureCode.NOT_FOUND, "annual performance section citation 缺失")
+    return section_refs
+
+
+def _annual_performance_table_refs(
+    *,
+    document_id: str,
+    result: AgentRunResult,
+    tool_service: FundDocumentToolService,
+    source_section_refs: tuple[str, ...],
+    specs: tuple[_PerformanceReturnExtractionSpec, ...],
+) -> tuple[str, ...]:
+    """从 title-family section 内定位满足 10F signature 的候选表格。"""
+
+    cited_table_refs = tuple(
+        dict.fromkeys(
+            citation.locator.table_ref
+            for citation in result.citations
+            if citation.locator.locator_kind is LocatorKind.TABLE
+            and citation.locator.section_ref in source_section_refs
+            and citation.locator.table_ref
+        )
+    )
+    if not cited_table_refs:
+        raise DocumentToolError(FailureCode.NOT_FOUND, "annual performance table citation 缺失")
+    refs: list[str] = []
+    for table_ref in cited_table_refs:
+        table = tool_service.read_table(document_id, table_ref, max_rows=_PERFORMANCE_TABLE_MAX_ROWS)
+        if isinstance(table, ToolFailure):
+            raise DocumentToolError(table.code, table.message)
+        if table.section_ref not in source_section_refs:
+            continue
+        if _performance_column_indexes(table.rows, specs) is None:
+            continue
+        refs.append(table.table_ref)
+
+    refs_tuple = tuple(dict.fromkeys(refs))
+    if not refs_tuple:
+        raise DocumentToolError(FailureCode.NOT_FOUND, "annual performance 目标列缺失")
+    return refs_tuple
 
 
 def _performance_column_indexes(

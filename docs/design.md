@@ -781,7 +781,62 @@ Slice 10D 已经 MiMo review `ACCEPTED`：
 - 已覆盖同 section 未被引用表格的回归：10D 只消费 11A result 中实际 cited table，不扫描 sibling tables。
 - 当前真实 PDF Service extraction 在 11A 引用的 table 不含 `过去一年` 时 fail-closed；不会绕过 citation 去扫描 sibling tables。
 - 10D remaining blocking risk: none reported。剩余非阻塞风险是：真实 PDF 字段抽取成功依赖 11A locator 引用到实际包含 `过去一年` 的 performance table。
+- `past_1_year` 是 10D 底层抽取能力，对应年报表格原文 `过去一年`；它不作为后续主分析口径扩展。用户分析语义中，“2024 年度”比“过去一年”更自然；“过去 5 年”应理解为多个自然年度或明确年度序列，而不是 10D 的 `past_1_year` 行。
 - 10D 没有进入 `A=R-B`、`R=A+B-C`、换手率、成本计算、同类中位数、模板执行、自动报告或投资判断。
+
+Post-MVP 10E 裁决为 annual performance returns source decision：
+
+- 10E 不是字段抽取实现 slice，而是 source decision slice。
+- 10E 目标是裁决“年度业绩数据”应来自哪个公开披露位置，避免继续围绕 `past_1_year` 修 citation specificity。
+- 10E 首批只回答 source decision，不新增 DTO、不抽值、不计算、不改 CLI。
+- 10E 是 docs-only slice；预期写入只限 `docs/design.md` 和 `docs/implementation-control.md`，除非另行裁决，不修改 Python 代码、测试或 README。
+- 候选来源限定为：
+  - title-family matched performance comparison table：`基金份额净值增长率及其与同期业绩比较基准收益率的比较`
+  - 管理人报告 / 报告期内基金的业绩表现文字，例如“本报告期基金份额净值增长率为...同期业绩比较基准收益率为...”
+  - `自基金合同生效以来基金每年净值增长率及其与同期业绩比较基准收益率的比较` 年度图 / 表
+- 10E 不扩大到基金净值表现图、第三方平台、净值数据库、季报 / 半年报、基金合同或招募说明书。
+- source 可用性判定标准：能定位到稳定章节 / 表格 / 文本；能给出 citation；能表达自然年度或报告期年度；能区分 A/C 份额或明确 fund-level；不依赖图像解析 / OCR；不依赖模型猜字段。
+- 10E source 类型固定为 `table`、`text`、`chart_or_image`、`unsupported`。
+- 年度语义固定为自然年度 / 报告期年度，例如 `2024`；不再把 `过去一年` 作为主分析口径。
+- 本地样本核验范围固定为 `基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf` 及既有 `.fund_checklist_cli_smoke_*` Docling JSON；smoke artifact 不纳入提交。
+- 样本核验结论：
+  - title-family matched performance comparison table 在 2024 年度报告第 6 / 7 页可定位到稳定表格；标题为 `基金份额净值增长率及其与同期业绩比较基准收益率的比较`。样本中的章节编号为 `3.2.1`，但编号不得作为 contract；只可作为样本观察。
+  - 该表格 source 类型裁决为 `table`，是后续年度业绩 deterministic extraction 的 primary source。
+  - 管理人报告 / 报告期内基金的业绩表现文字可定位到 stable text，source 类型为 `text`；但其位置和句式可能随年份变化，因此仅作为 secondary reference，不作为 10F 首批 extraction source。
+  - `自基金合同生效以来基金每年净值增长率及其与同期业绩比较基准收益率的比较` 在当前样本中表现为图 / 图片，source 类型为 `chart_or_image`，不进入当前 deterministic extraction。
+- 10E source decision：选择 title-family matched performance comparison table。年度业绩数据当前应来自 `基金份额净值增长率及其与同期业绩比较基准收益率的比较` 标准披露表；不得依赖 `3.2.1` 章节编号。
+- 后续推荐：
+  - 后续可开 10F annual performance table extraction from title-family matched table。
+  - 管理人报告年度文字后置为 secondary reference，不作为 10F fallback。
+  - 年度图 / 图片不得进入抽取；除非另开 chart/OCR gate，否则不做 annual performance chart extraction。
+- 10E 不做 `past_1_year` citation specificity，不做 `A=R-B`、`R=A+B-C`、换手率、成本计算、同类中位数、模板执行、自动报告或投资判断。
+
+Post-MVP 10F 裁决为 annual performance table extraction from title-family matched table：
+
+- 10F 目标是从 title-family matched performance comparison table 中抽取年度收益字段。
+- 10F 不依赖章节编号；样本中的 `3.2.1` 只是观察值，不能写入 public contract、locator contract 或测试断言。
+- source title family 固定为：`基金份额净值增长率及其与同期业绩比较基准收益率的比较`。`基金净值表现` 可作为上层 section context，但不能单独作为字段抽取表成功条件。
+- table signature 必须包含：`source_period_label = 过去一年`、`份额净值增长率` / `基金份额净值增长率` 列、`业绩比较基准收益率` 列。
+- 年度语义裁决为：`report_year = request.year`，`source_period_label = 过去一年`。用户 / DTO 层表达为 `2024` 等自然年度，citation / raw_text 必须保留原文 `过去一年`。
+- 首批字段只抽 `annual_nav_growth_rate` 和 `annual_benchmark_return_rate`。
+- 10F 不抽标准差、超额收益、年度序列、近 3 年 / 近 5 年、成立以来、图表数据或管理人报告文字。
+- DTO 字段固定为：`field_name`、`decimal_percent_text`、`report_year`、`source_period_label`、`share_class_scope`、`raw_text`、`citation`。
+- share class 口径：用户未指定 share class 时，返回所有可唯一识别的 share class DTO。
+- partial-by-share-class 允许；partial-by-field 不允许。某个 share class 同时具备两个字段则返回该 share class；某个 share class 缺任一字段则不返回该 share class；若全部 share class 都不完整则整体 `not_found`。
+- 管理人报告文字不作为 10F fallback；不得用文字披露补齐缺失 share class、缺失行或缺失字段。
+- 失败语义沿用现有 failure code：目标 title-family table 未找到、table citation 缺失、`过去一年` 行缺失、目标列缺失、share class 无法识别、某 share class 字段不完整且无其它完整 share class，均为 `not_found`；配置异常为 `schema_drift`；内部异常为 `unavailable`。
+- 10F 不改 CLI 默认输出；字段 DTO 先在 Service / tests 层验证。
+- 真实 PDF 验收必须证明至少 A 类可从 2024 年度报告标准披露表抽取：`annual_nav_growth_rate = 17.32%`，`annual_benchmark_return_rate = 14.45%`。C 类是否返回取决于标准披露表是否存在完整 `过去一年` 行，不得外推或 fallback。
+- 10F 不做 `A=R-B`、`R=A+B-C`、换手率、成本计算、同类中位数、模板执行、自动报告或投资判断。
+
+Slice 10F 已经 MiMo review `ACCEPTED`：
+
+- Service 层已实现 annual performance table extraction from title-family matched table。
+- 真实 PDF annual DTO：
+  - `annual_nav_growth_rate`，`report_year=2024`，`source_period_label=过去一年`，`share_class_scope=A`，`decimal_percent_text=17.32%`，table citation `table-0010`。
+  - `annual_benchmark_return_rate`，`report_year=2024`，`source_period_label=过去一年`，`share_class_scope=A`，`decimal_percent_text=14.45%`，table citation `table-0010`。
+- 10F remaining blocking risk: none reported。
+- 10F 没有依赖章节编号，没有使用管理人报告文字 fallback，没有进入 `A=R-B`、`R=A+B-C`、换手率、成本计算、同类中位数、模板执行、自动报告或投资判断。
 
 Post-MVP 11A 裁决为 performance disclosure locator，插入 10D 之前：
 
@@ -964,12 +1019,12 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## 9. 已关闭裁决项
 
-MVP plan 已关闭。当前已完成到 Post-MVP Slice 10D；Slice 9F 因 keyword-level routing 无法证明 disclosure target success 被判定为 `BLOCKED_BY_DESIGN`；Slice 10A 已实现 Controlled disclosure target contract 并经 MiMo review `ACCEPTED`；Slice 10B 已实现 fee_rates reading locator 并经 MiMo review `ACCEPTED`；Slice 10C 已实现 fee_rates value extraction contract 并经 MiMo review `ACCEPTED`；Slice 11A 已实现 performance disclosure locator 并经 MiMo review `ACCEPTED`；Slice 11B 已实现 disclosure locator contract registry 并经 MiMo review `ACCEPTED`；Slice 10D 已实现 performance return fields extraction contract 并经 MiMo review `ACCEPTED`。
+MVP plan 已关闭。当前已完成到 Post-MVP Slice 10F；Slice 9F 因 keyword-level routing 无法证明 disclosure target success 被判定为 `BLOCKED_BY_DESIGN`；Slice 10A 已实现 Controlled disclosure target contract 并经 MiMo review `ACCEPTED`；Slice 10B 已实现 fee_rates reading locator 并经 MiMo review `ACCEPTED`；Slice 10C 已实现 fee_rates value extraction contract 并经 MiMo review `ACCEPTED`；Slice 11A 已实现 performance disclosure locator 并经 MiMo review `ACCEPTED`；Slice 11B 已实现 disclosure locator contract registry 并经 MiMo review `ACCEPTED`；Slice 10D 已实现 performance return fields extraction contract 并经 MiMo review `ACCEPTED`；Slice 10E 裁决年度业绩 deterministic source 选择 title-family matched performance comparison table；Slice 10F 已实现 annual performance table extraction 并经 MiMo review `ACCEPTED`。
 
 ## 10. 下一步最小可验证问题
 
 下一步只应验证一个问题：
 
 ```text
-下一步尚未裁决。若优先处理 10D 剩余非阻塞风险，下一步应先裁决 performance table citation specificity：如何让 11A / Service locator 在不扫描 top-N、不做 rerank、不绕过 citation 的前提下，引用实际包含 `过去一年`、`份额净值增长率` 和 `业绩比较基准收益率` 的 performance table。不得把该工作扩成开放语义理解、字段计算、`A=R-B`、`R=A+B-C`、换手率、成本计算、模板执行、自动报告或投资判断。
+下一步尚未裁决。若继续收益链路，下一步可裁决 annual excess return calculation：基于 10F 已抽取的 `annual_nav_growth_rate` 和 `annual_benchmark_return_rate` 计算年度超额收益；开启前必须先裁决公式、百分数精度、share class 口径、citation 指向、失败语义和 CLI 展示边界。不得直接进入 `R=A+B-C`、换手率、成本计算、模板执行、自动报告或投资判断。
 ```
