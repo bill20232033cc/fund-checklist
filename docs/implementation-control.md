@@ -1,9 +1,9 @@
 # fund-checklist implementation-control
 
-更新时间：2026-07-05
-当前阶段：`POST_MVP_SLICE_10F_ACCEPTED`
+更新时间：2026-07-06
+当前阶段：`POST_MVP_SLICE_10G_ACCEPTED`
 当前角色：control / CIC-lite controller
-当前目标：Slice 10F annual performance table extraction from title-family matched table 已经 MiMo `ACCEPTED`；当前无已裁决的下一实现 slice。若继续收益链路，下一步可裁决 annual excess return calculation。不得扩成 gateflow / phaseflow / release-readiness，不新增 plan artifact，不进入 batch benchmark、开放语义理解、自动分词、embedding、LLM intent、template contract execution、chapter contract execution、calculation framework、`fund-checklist ask`、UI、自动报告或投资判断。
+当前目标：Slice 10G annual excess return disclosed-field extraction 已经 MiMo `ACCEPTED`；当前无已裁决的下一实现 slice。若继续收益链路，建议先裁决 annual performance multi-year scope。不得扩成 gateflow / phaseflow / release-readiness，不新增 plan artifact，不进入 batch benchmark、开放语义理解、自动分词、embedding、LLM intent、template contract execution、chapter contract execution、calculation framework、`fund-checklist ask`、UI、自动报告或投资判断。
 
 ## 当前事实
 
@@ -283,6 +283,30 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
   - `annual_benchmark_return_rate`，`report_year=2024`，`source_period_label=过去一年`，`share_class_scope=A`，`decimal_percent_text=14.45%`，table citation `table-0010`。
 - 10F remaining blocking risk: none reported。
 - 10F 没有依赖章节编号，没有使用管理人报告文字 fallback，没有进入 `A=R-B`、`R=A+B-C`、换手率、成本计算、同类中位数、模板执行、自动报告或投资判断。
+- Post-MVP 10G 裁决为 annual excess return disclosed-field extraction。
+- 10G 目标是从 title-family matched performance comparison table 中抽取年报显式披露的年度超额收益字段。
+- 10G source title family 沿用 10F：`基金份额净值增长率及其与同期业绩比较基准收益率的比较`；不得依赖样本章节编号 `3.2.1`。
+- 10G table signature 必须包含：`source_period_label = 过去一年`、`份额净值增长率` / `基金份额净值增长率` 列、`业绩比较基准收益率` 列，以及显式披露列 `①－③`。
+- 10G 字段固定为 `annual_excess_return`，语义为年报表格中直接披露的 `份额净值增长率 - 业绩比较基准收益率` 对应列值。
+- DTO 字段固定为：`field_name`、`decimal_percent_text`、`report_year`、`source_period_label`、`share_class_scope`、`source_column_label`、`raw_text`、`citation`。
+- 固定 DTO 口径：`field_name=annual_excess_return`，`report_year=request.year`，`source_period_label=过去一年`，`source_column_label=①－③`。
+- `decimal_percent_text` 保持原文百分号格式；不先转成小数，不重新计算，不做四舍五入。
+- share class 口径沿用 10F：用户未指定 share class 时，返回所有可唯一识别且具备完整 `过去一年` / `①－③` 数据的 share class DTO。
+- partial-by-share-class 允许；某 share class 缺 `过去一年` 行、缺 `①－③` 列值或无法唯一识别时，不返回该 share class；若全部 share class 都缺失则整体 `not_found`。
+- 管理人报告文字、年度图 / 图片、第三方数据、10F 已抽取的 nav / benchmark 字段都不得作为 10G fallback。
+- 失败语义沿用现有 failure code：目标 title-family table 未找到、table citation 缺失、`过去一年` 行缺失、`①－③` 列缺失、目标值无法唯一抽取、share class 无法识别或全部 share class 缺失，均为 `not_found`；配置异常为 `schema_drift`；内部异常为 `unavailable`。
+- 10G 不新增 `calculation_error`、`formula_missing`、`partial_success` 或新的 failure taxonomy。
+- 10G 不改 CLI 默认输出；字段 DTO 先在 Service / tests 层验证。
+- 真实 PDF 验收应证明至少 A 类可从 2024 年度报告标准披露表抽取：`annual_excess_return = 2.87%`，`report_year=2024`，`source_period_label=过去一年`，`share_class_scope=A`，`source_column_label=①－③`，citation 为 table locator。
+- C 类是否返回取决于标准披露表是否存在完整 `过去一年` / `①－③` 行列，不得外推或 fallback。
+- 10G 不做 `annual_nav_growth_rate - annual_benchmark_return_rate` 计算，不做 `A=R-B` 计算，不做 `R=A+B-C`、换手率、成本计算、扣费后收益率、年化收益率、同类中位数、模板执行、自动报告或投资判断。
+- Slice 10G 已经 MiMo review `ACCEPTED`。
+- Service 层已实现 annual excess return disclosed-field extraction。
+- 10G 抽取 `annual_excess_return` 只消费标准披露表的 `①－③` 显式披露列；不通过 10F 的 `annual_nav_growth_rate` / `annual_benchmark_return_rate` 做差计算。
+- 真实 PDF / Service 测试已覆盖 A 类 DTO：`annual_excess_return = 2.87%`，`report_year=2024`，`source_period_label=过去一年`，`share_class_scope=A`，`source_column_label=①－③`，citation 为 table locator。
+- 测试已覆盖缺 `①－③` 列时 fail-closed 为 `not_found`，且不得使用管理人报告文字、年度图 / 图片或未 citation 指向的 sibling table fallback。
+- 10G remaining blocking risk: none reported。
+- 10G 没有依赖章节编号，没有改变 CLI 默认输出，没有新增 failure taxonomy，没有进入 `A=R-B` 计算、`R=A+B-C`、换手率、成本计算、扣费后收益率、年化收益率、同类中位数、模板执行、自动报告或投资判断。
 - Post-MVP 11A 裁决为 performance disclosure locator，插入 10D 之前；11A 只做业绩表现披露定位和 citation，不抽取结构化字段。
 - 11A profile 名称为 `performance_returns`；名称只表示业绩表现披露定位，不代表字段抽取。
 - acceptable title family 固定为：`基金份额净值增长率及其与同期业绩比较基准收益率的比较`、`基金净值表现`。
@@ -338,13 +362,14 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## Next Action
 
-当前无已裁决的下一实现 slice。若继续收益链路，下一步可裁决 annual excess return calculation：基于 10F 已抽取的 `annual_nav_growth_rate` 和 `annual_benchmark_return_rate` 计算年度超额收益；开启前必须先裁决公式、百分数精度、share class 口径、citation 指向、失败语义和 CLI 展示边界。
+当前无已裁决的下一实现 slice。若继续收益链路，建议先裁决 annual performance multi-year scope：基于同一标准披露表，是否从单一报告期年度扩展到近 3 年 / 近 5 年所需的年度序列 source、period 语义、share class 口径、citation、缺年失败语义和 CLI / Service 展示边界。
 
 禁止事项：
 
 - 禁止把 10D 扩成计算、报告或投资判断。
 - 禁止依赖章节编号 `3.2.1`；只能依赖 title family + table signature + citation。
 - 禁止把年度业绩表格抽取扩成计算或自动报告。
+- 禁止把 10G 的 `annual_excess_return` 表述为系统计算值；它只能来自年报显式披露列 `①－③`。
 - 禁止用管理人报告文字作为 10F fallback。
 - 禁止回到年度图 / 图片做 OCR / chart parsing，除非另开 chart/OCR gate。
 - 禁止扩大候选来源到第三方平台、净值数据库、季报 / 半年报、基金合同或招募说明书。
@@ -353,7 +378,7 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - 禁止新增披露对象定位能力。
 - 禁止把 `past_1_year` 命名为 `report_year` 或年度 2024。
 - 禁止抽取近 3 年、近 5 年、成立以来、年度序列表或图表数据。
-- 禁止输出 `excess_return`、`annualized_return`、`max_drawdown`、`volatility`、`sharpe`、`tracking_error`、`turnover_rate`。
+- 除 10G 已裁决的 `annual_excess_return` disclosed-field DTO 外，禁止输出其它 `excess_return`、`annualized_return`、`max_drawdown`、`volatility`、`sharpe`、`tracking_error`、`turnover_rate`。
 - 禁止抽取换手率；禁止新增 `turnover_rate` locator；禁止把股票买入 / 卖出金额包装成换手率 evidence。
 - 禁止计算显性成本小计、总成本、扣费后收益率或年化收益率。
 - 禁止实现 `R=A+B-C`、Alpha/Beta/Cost 综合评估、同类中位数或判断生成。
@@ -370,7 +395,7 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - 禁止执行 template-informed intent routing、chapter contract execution、calculation framework、report audit、自动报告或投资判断。
 - 禁止暴露 raw Docling JSON、本地 PDF path、cache path、repository/private loader 或 `local_import_id`。
 
-10D closeout 验证命令：
+10G closeout 验证命令：
 
 ```bash
 uv run pytest tests/fund/service/test_reading_service.py tests/fund/cli/test_cli.py
@@ -382,13 +407,13 @@ uv run pytest tests/fund/service/test_reading_service.py tests/fund/cli/test_cli
 uv run pytest tests/fund/agent/test_minimal_tool_loop.py tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_service.py
 ```
 
-10D 已保留 11A/11B 已完成真实 CLI smoke 行为：
+10G 保留 11A/11B 已完成真实 CLI smoke 行为；如实现触及 CLI 或 routing，需重跑：
 
 ```bash
 uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '净值增长率' --work-dir .fund_checklist_cli_smoke_11a
 ```
 
-10D 真实 CLI smoke：
+11B 既有真实 CLI smoke 回归命令：
 
 ```bash
 uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '前十大持仓' --work-dir .fund_checklist_cli_smoke_11b_holdings
@@ -397,7 +422,7 @@ uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值
 uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '净值增长率' --work-dir .fund_checklist_cli_smoke_11b_performance
 ```
 
-验收点：10D 真实 CLI smoke 对 `净值增长率` 保持既有 accepted 行为；answer 包含 `基金份额净值增长率及其与同期业绩比较基准收益率的比较`，包含 citation / trace / table citation，CLI 默认输出不包含 `routing_trace`，且不暴露 `nav_growth_rate` / `benchmark_return_rate` 字段 DTO。Service 层 fake multi-table cited case 可返回 A/C `past_1_year` DTO；真实 PDF Service extraction 在 cited table 不含 `过去一年` 时 fail-closed，不扫描 sibling tables。MiMo verdict: `ACCEPTED`；remaining blocking risk: none reported。
+验收点：10G Service / tests 层可从真实 2024 年度报告标准披露表抽取 A 类 `annual_excess_return = 2.87%`，并返回 `report_year=2024`、`source_period_label=过去一年`、`share_class_scope=A`、`source_column_label=①－③` 和 table locator citation。10G 不通过 `annual_nav_growth_rate - annual_benchmark_return_rate` 计算，不扫描管理人报告文字或年度图 / 图片 fallback，不改变 CLI 默认输出；既有 CLI 对 `净值增长率` 仍只展示阅读 answer / citation / trace，不暴露结构化 DTO。MiMo verdict: `ACCEPTED`；remaining blocking risk: none reported。
 
 ## Implementation Slices
 
@@ -424,6 +449,7 @@ uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值
 10D. performance return fields extraction contract：已 accepted；基于 11A 已定位的 performance disclosure table 抽取 `past_1_year` 的 `nav_growth_rate` / `benchmark_return_rate` 受控 DTO；不计算、不改 CLI 默认输出；不做 `turnover_rate` locator。
 10E. annual performance returns source decision：source-decided；年度业绩 deterministic source 选择 title-family matched performance comparison table，即 `基金份额净值增长率及其与同期业绩比较基准收益率的比较` 标准披露表；管理人报告文字仅为 secondary reference；年度图 / 图片不进入当前 deterministic extraction。
 10F. annual performance table extraction from title-family matched table：已 accepted；抽取 `report_year=request.year`、`source_period_label=过去一年` 的 `annual_nav_growth_rate` / `annual_benchmark_return_rate`；不依赖章节编号，不使用管理人报告文字 fallback，不计算。
+10G. annual excess return disclosed-field extraction：已 accepted；从 title-family matched performance comparison table 的显式披露列 `①－③` 抽取 `annual_excess_return`；不通过 10F 字段计算，不改 CLI 默认输出，不进入 `R=A+B-C`。
 11A. performance disclosure locator：已 accepted；定位 `基金份额净值增长率及其与同期业绩比较基准收益率的比较` / `基金净值表现` 披露，返回 section/table citation 和原始表格片段；不抽值、不计算。
 11B. disclosure locator contract registry：已 accepted；把既有 controlled disclosure profiles 收敛为 Service 内部 locator contract registry；不新增披露对象，不抽值、不计算、不改 public tool / CLI contract。
 

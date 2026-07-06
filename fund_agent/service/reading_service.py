@@ -64,6 +64,8 @@ _FIELD_NAV_GROWTH_RATE = "nav_growth_rate"
 _FIELD_BENCHMARK_RETURN_RATE = "benchmark_return_rate"
 _FIELD_ANNUAL_NAV_GROWTH_RATE = "annual_nav_growth_rate"
 _FIELD_ANNUAL_BENCHMARK_RETURN_RATE = "annual_benchmark_return_rate"
+_FIELD_ANNUAL_EXCESS_RETURN = "annual_excess_return"
+_ANNUAL_EXCESS_RETURN_COLUMN_LABEL = "①－③"
 _SHARE_SCOPE_ALL = "all_share_classes"
 _SHARE_SCOPE_A = "A"
 _SHARE_SCOPE_C = "C"
@@ -254,6 +256,58 @@ class ExtractAnnualPerformanceResult:
     failure: ToolFailure | None = None
 
 
+@dataclass(frozen=True)
+class AnnualExcessReturnExtraction:
+    """Service 层年度超额收益显式披露字段抽取 DTO。
+
+    参数:
+        field_name: 受控字段名，10G 固定为 annual_excess_return。
+        decimal_percent_text: 年报表格 ①－③ 列原文百分号值，不转小数、不计算。
+        report_year: 请求指定的报告自然年度。
+        source_period_label: 表格原文期间标签，10G 固定为 过去一年。
+        share_class_scope: 表格上下文可唯一识别的份额类别。
+        source_column_label: 年报显式披露列标签，10G 固定为 ①－③。
+        raw_text: 支撑该字段的安全表格行/单元格原文片段，必须保留 过去一年。
+        citation: 支撑该字段的实际 table citation。
+
+    返回:
+        不可变字段抽取结果。
+
+    异常:
+        本模型不执行 I/O，不抛出业务异常。
+    """
+
+    field_name: str
+    decimal_percent_text: str
+    report_year: int
+    source_period_label: str
+    share_class_scope: str
+    source_column_label: str
+    raw_text: str
+    citation: Citation
+
+
+@dataclass(frozen=True)
+class ExtractAnnualExcessReturnResult:
+    """年度超额收益字段抽取 use case 的安全结果。
+
+    参数:
+        document_id: public reading tools 使用的内容身份。
+        fields: 成功抽取的 annual_excess_return DTO；失败时为空。
+        failure: 稳定失败分类；成功时为 None。
+
+    返回:
+        可供 Service 调用方消费的结构化抽取结果。
+
+    异常:
+        本模型不抛出业务异常。
+    """
+
+    document_id: str
+    fields: tuple[AnnualExcessReturnExtraction, ...]
+    failure: ToolFailure | None = None
+
+
 DISCLOSURE_LOCATOR_CONTRACT_REGISTRY = (
     _DisclosureLocatorContract(
         profile_name="holdings_top10",
@@ -380,6 +434,13 @@ _ANNUAL_PERFORMANCE_EXTRACTION_SPECS = (
     ),
 )
 
+_ANNUAL_EXCESS_RETURN_EXTRACTION_SPECS = (
+    _PerformanceReturnExtractionSpec(
+        field_name=_FIELD_ANNUAL_EXCESS_RETURN,
+        column_keywords=(_ANNUAL_EXCESS_RETURN_COLUMN_LABEL,),
+    ),
+)
+
 
 @dataclass(frozen=True)
 class ImportLocalReportRequest:
@@ -448,6 +509,22 @@ class ExtractAnnualPerformanceRequest(ImportLocalReportRequest):
     参数:
         继承本地年报导入请求字段；Service 固定使用 performance_returns locator。
         year 同时作为 DTO 的 report_year；share_class 可显式限定 A/C。
+
+    返回:
+        不可变请求 DTO。
+
+    异常:
+        本模型不执行 I/O，不抛出业务异常。
+    """
+
+
+@dataclass(frozen=True)
+class ExtractAnnualExcessReturnRequest(ImportLocalReportRequest):
+    """抽取年度超额收益显式披露字段的 use case 请求。
+
+    参数:
+        继承本地年报导入请求字段；Service 固定使用 performance comparison
+        title-family locator。year 同时作为 DTO 的 report_year；share_class 可显式限定 A/C。
 
     返回:
         不可变请求 DTO。
@@ -818,6 +895,62 @@ class FundReadingService:
                 failure=ToolFailure(code=FailureCode.UNAVAILABLE, message="annual performance 字段抽取暂不可用"),
             )
         return ExtractAnnualPerformanceResult(document_id=document_id, fields=fields, failure=None)
+
+    def extract_annual_excess_return(
+        self,
+        request: ExtractAnnualExcessReturnRequest,
+    ) -> ExtractAnnualExcessReturnResult:
+        """从 title-family matched table 抽取年报显式披露的年度超额收益。
+
+        参数:
+            request: 本地年报年度超额收益抽取请求；Service 固定使用
+                基金份额净值增长率及其与同期业绩比较基准收益率的比较 title-family。
+
+        返回:
+            ExtractAnnualExcessReturnResult。成功时包含可唯一识别份额类别的
+            annual_excess_return DTO；失败时 fields 为空且 failure 为稳定分类。
+
+        异常:
+            DocumentToolError: 透传 PDF、repository、Docling conversion 或 parser health
+                的稳定失败分类；字段抽取失败写入 result.failure。
+        """
+
+        prepared = self._prepare_completed_report(request)
+        document_id = prepared.import_result.identity.document_id
+        tool_service = FundDocumentToolService({document_id: prepared.store})
+        host = self._host_factory(tool_service)
+        routed = self._run_with_query_candidates(
+            host=host,
+            document_id=document_id,
+            query=_ANNUAL_PERFORMANCE_TITLE_FAMILY,
+        )
+        if routed.agent_result.failure is not None:
+            return ExtractAnnualExcessReturnResult(
+                document_id=document_id,
+                fields=(),
+                failure=routed.agent_result.failure,
+            )
+        try:
+            fields = _extract_annual_excess_return_fields(
+                document_id=document_id,
+                result=routed.agent_result,
+                tool_service=tool_service,
+                report_year=request.year,
+                requested_share_class=request.share_class,
+            )
+        except DocumentToolError as exc:
+            return ExtractAnnualExcessReturnResult(
+                document_id=document_id,
+                fields=(),
+                failure=ToolFailure(code=exc.code, message=exc.message),
+            )
+        except Exception:
+            return ExtractAnnualExcessReturnResult(
+                document_id=document_id,
+                fields=(),
+                failure=ToolFailure(code=FailureCode.UNAVAILABLE, message="annual excess return 字段抽取暂不可用"),
+            )
+        return ExtractAnnualExcessReturnResult(document_id=document_id, fields=fields, failure=None)
 
     def list_reports(self, request: ListReportsRequest) -> ListReportsResult:
         """列出本地 completed reports 的安全摘要。
@@ -1431,6 +1564,97 @@ def _extract_annual_performance_fields(
     return tuple(fields)
 
 
+def _extract_annual_excess_return_fields(
+    *,
+    document_id: str,
+    result: AgentRunResult,
+    tool_service: FundDocumentToolService,
+    report_year: int,
+    requested_share_class: str | None,
+) -> tuple[AnnualExcessReturnExtraction, ...]:
+    """从 title-family matched table 的 ①－③ 列抽取年度超额收益披露值。"""
+
+    excess_specs = _validated_annual_excess_return_specs()
+    signature_specs = _annual_excess_return_signature_specs(excess_specs)
+    source_section_refs = _annual_performance_source_section_refs(result)
+    table_refs = _annual_performance_table_refs(
+        document_id=document_id,
+        result=result,
+        tool_service=tool_service,
+        source_section_refs=source_section_refs,
+        specs=signature_specs,
+    )
+
+    section_text_by_ref: dict[str, str] = {}
+    for section_ref in source_section_refs:
+        section = tool_service.read_section(document_id, section_ref)
+        if isinstance(section, ToolFailure):
+            raise DocumentToolError(section.code, section.message)
+        section_text_by_ref[section_ref] = section.text
+
+    tables: list[TableContent] = []
+    for table_ref in table_refs:
+        table = tool_service.read_table(document_id, table_ref, max_rows=_PERFORMANCE_TABLE_MAX_ROWS)
+        if isinstance(table, ToolFailure):
+            raise DocumentToolError(table.code, table.message)
+        if table.section_ref not in source_section_refs:
+            continue
+        tables.append(table)
+
+    header_tables = tuple(table for table in tables if _performance_column_indexes(table.rows, signature_specs))
+    if not header_tables:
+        raise DocumentToolError(FailureCode.NOT_FOUND, "annual excess return ①－③ 列缺失")
+
+    share_scopes = _annual_excess_return_table_share_scopes(
+        header_tables,
+        section_text_by_ref=section_text_by_ref,
+        requested_share_class=requested_share_class,
+    )
+    requested_scope = _normalize_share_class_scope(requested_share_class) if requested_share_class else None
+    if requested_share_class and requested_scope is None:
+        raise DocumentToolError(FailureCode.NOT_FOUND, "annual excess return 份额类别无法唯一识别")
+
+    fields: list[AnnualExcessReturnExtraction] = []
+    for table in header_tables:
+        share_scope = share_scopes.get(table.table_ref)
+        if share_scope is None:
+            continue
+        if requested_scope is not None and share_scope != requested_scope:
+            continue
+        row = _performance_past_year_row(table.rows)
+        if row is None:
+            continue
+        indexes = _performance_column_indexes(table.rows, signature_specs)
+        if indexes is None:
+            raise DocumentToolError(FailureCode.NOT_FOUND, "annual excess return ①－③ 列缺失")
+
+        try:
+            column_index = indexes[_FIELD_ANNUAL_EXCESS_RETURN]
+            value = _single_percent_text(row[column_index])
+        except DocumentToolError:
+            continue
+        fields.append(
+            AnnualExcessReturnExtraction(
+                field_name=_FIELD_ANNUAL_EXCESS_RETURN,
+                decimal_percent_text=value,
+                report_year=report_year,
+                source_period_label=_PERFORMANCE_RETURN_PERIOD_TEXT,
+                share_class_scope=share_scope,
+                source_column_label=_ANNUAL_EXCESS_RETURN_COLUMN_LABEL,
+                raw_text=_performance_raw_text(
+                    period_text=row[0],
+                    column_text=table.rows[0][column_index],
+                    value_text=value,
+                ),
+                citation=table.citation,
+            )
+        )
+
+    if not fields:
+        raise DocumentToolError(FailureCode.NOT_FOUND, "annual excess return 过去一年 ①－③ 字段缺失")
+    return tuple(fields)
+
+
 def _validated_performance_return_specs() -> tuple[_PerformanceReturnExtractionSpec, ...]:
     """校验 10D performance_returns 抽取配置，异常时映射为 schema_drift。"""
 
@@ -1493,6 +1717,51 @@ def _validated_annual_performance_specs() -> tuple[_PerformanceReturnExtractionS
         if not spec.column_keywords or any(not keyword for keyword in spec.column_keywords):
             raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "annual performance 抽取配置不完整")
     return specs
+
+
+def _validated_annual_excess_return_specs() -> tuple[_PerformanceReturnExtractionSpec, ...]:
+    """校验 10G annual excess return 抽取配置，异常时映射为 schema_drift。"""
+
+    specs = tuple(_ANNUAL_EXCESS_RETURN_EXTRACTION_SPECS)
+    expected = (_FIELD_ANNUAL_EXCESS_RETURN,)
+    actual = tuple(spec.field_name for spec in specs)
+    if actual != expected:
+        raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "annual excess return 抽取配置异常")
+    for spec in specs:
+        if not spec.column_keywords or any(not keyword for keyword in spec.column_keywords):
+            raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "annual excess return 抽取配置不完整")
+    return specs
+
+
+def _annual_excess_return_signature_specs(
+    excess_specs: tuple[_PerformanceReturnExtractionSpec, ...],
+) -> tuple[_PerformanceReturnExtractionSpec, ...]:
+    """返回 10G 表格 signature：10F 两列加显式披露 ①－③ 列。"""
+
+    return (*_validated_annual_performance_specs(), *excess_specs)
+
+
+def _annual_excess_return_table_share_scopes(
+    tables: tuple[TableContent, ...],
+    *,
+    section_text_by_ref: dict[str, str],
+    requested_share_class: str | None,
+) -> dict[str, str]:
+    """按 10G partial-by-share-class 口径绑定可唯一识别的份额类别。"""
+
+    try:
+        return _annual_performance_table_share_scopes(
+            tables,
+            section_text_by_ref=section_text_by_ref,
+            requested_share_class=requested_share_class,
+        )
+    except DocumentToolError:
+        inferred: dict[str, str] = {}
+        for table in tables:
+            scope = _annual_performance_share_scope_from_rows(table.rows)
+            if scope is not None:
+                inferred[table.table_ref] = scope
+        return inferred
 
 
 def _performance_table_citation_refs(result: AgentRunResult) -> tuple[tuple[str, str], ...]:
