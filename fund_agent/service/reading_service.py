@@ -66,6 +66,10 @@ _FIELD_ANNUAL_NAV_GROWTH_RATE = "annual_nav_growth_rate"
 _FIELD_ANNUAL_BENCHMARK_RETURN_RATE = "annual_benchmark_return_rate"
 _FIELD_ANNUAL_EXCESS_RETURN = "annual_excess_return"
 _ANNUAL_EXCESS_RETURN_COLUMN_LABEL = "①－③"
+_MULTI_YEAR_MINIMUM_COMPLETE_YEARS = 3
+_MULTI_YEAR_MAXIMUM_COMPLETE_YEARS = 5
+_COVERAGE_STATUS_COMPLETE = "complete"
+_COVERAGE_STATUS_PARTIAL = "partial"
 _SHARE_SCOPE_ALL = "all_share_classes"
 _SHARE_SCOPE_A = "A"
 _SHARE_SCOPE_C = "C"
@@ -305,6 +309,148 @@ class ExtractAnnualExcessReturnResult:
 
     document_id: str
     fields: tuple[AnnualExcessReturnExtraction, ...]
+    failure: ToolFailure | None = None
+
+
+@dataclass(frozen=True)
+class AnnualReportDocument:
+    """10I 多年度聚合的显式年报输入。
+
+    参数:
+        year: 调用方显式绑定的报告自然年度，不从 document_id 字符串推断。
+        document_id: 已导入 completed annual report 的 public document_id。
+
+    返回:
+        不可变输入 DTO。
+
+    异常:
+        本模型不执行 I/O，不抛出业务异常。
+    """
+
+    year: int
+    document_id: str
+
+
+@dataclass(frozen=True)
+class AnnualPerformanceFieldCitation:
+    """多年度年度业绩 row 中单字段 citation 绑定。
+
+    参数:
+        field_name: 受控字段名。
+        citation: 该字段来自原年度年报表格的 table locator citation。
+
+    返回:
+        不可变字段 citation DTO。
+
+    异常:
+        本模型不执行 I/O，不抛出业务异常。
+    """
+
+    field_name: str
+    citation: Citation
+
+
+@dataclass(frozen=True)
+class MultiYearAnnualPerformanceRow:
+    """10I 多年度年度业绩单年 row。
+
+    参数:
+        year: 自然年度。
+        annual_nav_growth_rate: 年报披露的年度份额净值增长率。
+        annual_benchmark_return_rate: 年报披露的同期业绩比较基准收益率。
+        annual_excess_return: 年报 ①－③ 显式披露的年度超额收益。
+        citations: 三个字段各自的 table locator citation。
+
+    返回:
+        不可变年度 row DTO。
+
+    异常:
+        本模型不执行 I/O，不抛出业务异常。
+    """
+
+    year: int
+    annual_nav_growth_rate: str
+    annual_benchmark_return_rate: str
+    annual_excess_return: str
+    citations: tuple[AnnualPerformanceFieldCitation, ...]
+
+
+@dataclass(frozen=True)
+class MultiYearAnnualPerformanceSeries:
+    """10I 多年度年度业绩 bounded coverage DTO。
+
+    参数:
+        fund_code: 基金代码。
+        requested_years: 规范化后的升序请求年度。
+        covered_years: 该 share class 字段完整的年度。
+        missing_years: 该 share class 缺失或字段不完整的年度。
+        coverage_status: complete 或 partial；partial 是成功 metadata。
+        coverage_count: 完整年度数量。
+        minimum_required_count: 最小成功覆盖年度数，10I 固定为 3。
+        share_class_scope: 本 series 对应的份额类别。
+        rows: 按年度升序排列的年度业绩 rows。
+        citations: 所有 row 的字段级 table locator citations。
+
+    返回:
+        不可变多年度 series DTO。
+
+    异常:
+        本模型不执行 I/O，不抛出业务异常。
+    """
+
+    fund_code: str
+    requested_years: tuple[int, ...]
+    covered_years: tuple[int, ...]
+    missing_years: tuple[int, ...]
+    coverage_status: str
+    coverage_count: int
+    minimum_required_count: int
+    share_class_scope: str
+    rows: tuple[MultiYearAnnualPerformanceRow, ...]
+    citations: tuple[AnnualPerformanceFieldCitation, ...]
+
+
+@dataclass(frozen=True)
+class AggregateMultiYearAnnualPerformanceRequest:
+    """10I 多年度年度业绩聚合请求。
+
+    参数:
+        fund_code: 请求基金代码，用于校验显式 document_id 指向的 report identity。
+        requested_years: 请求年度列表；Service 规范化为升序，长度必须为 3-5 且唯一。
+        annual_report_documents: 调用方显式提供的 year/document_id 映射。
+        work_dir: 现有受控 repository 工作目录，只按显式 document_id 加载。
+        share_class: 可选份额类别；指定时只评估该 share class。
+
+    返回:
+        不可变请求 DTO。
+
+    异常:
+        本模型不执行 I/O，不抛出业务异常。
+    """
+
+    fund_code: str
+    requested_years: tuple[int, ...] | list[int]
+    annual_report_documents: tuple[AnnualReportDocument, ...] | list[AnnualReportDocument]
+    work_dir: Path
+    share_class: str | None = None
+
+
+@dataclass(frozen=True)
+class AggregateMultiYearAnnualPerformanceResult:
+    """10I 多年度年度业绩聚合结果。
+
+    参数:
+        series: 成功覆盖 3-5 年的 share class series；失败时为空。
+        failure: 稳定失败分类；成功时为 None。
+
+    返回:
+        可供 Service 调用方消费的 bounded coverage 结果。
+
+    异常:
+        本模型不抛出业务异常。
+    """
+
+    series: tuple[MultiYearAnnualPerformanceSeries, ...]
     failure: ToolFailure | None = None
 
 
@@ -861,7 +1007,24 @@ class FundReadingService:
 
         prepared = self._prepare_completed_report(request)
         document_id = prepared.import_result.identity.document_id
-        tool_service = FundDocumentToolService({document_id: prepared.store})
+        return self._extract_annual_performance_from_store(
+            document_id=document_id,
+            store=prepared.store,
+            report_year=request.year,
+            share_class=request.share_class,
+        )
+
+    def _extract_annual_performance_from_store(
+        self,
+        *,
+        document_id: str,
+        store: DoclingDocumentStore,
+        report_year: int,
+        share_class: str | None,
+    ) -> ExtractAnnualPerformanceResult:
+        """基于已完成 store 执行 10F 年度业绩字段抽取。"""
+
+        tool_service = FundDocumentToolService({document_id: store})
         host = self._host_factory(tool_service)
         routed = self._run_with_query_candidates(
             host=host,
@@ -879,8 +1042,8 @@ class FundReadingService:
                 document_id=document_id,
                 result=routed.agent_result,
                 tool_service=tool_service,
-                report_year=request.year,
-                requested_share_class=request.share_class,
+                report_year=report_year,
+                requested_share_class=share_class,
             )
         except DocumentToolError as exc:
             return ExtractAnnualPerformanceResult(
@@ -917,7 +1080,24 @@ class FundReadingService:
 
         prepared = self._prepare_completed_report(request)
         document_id = prepared.import_result.identity.document_id
-        tool_service = FundDocumentToolService({document_id: prepared.store})
+        return self._extract_annual_excess_return_from_store(
+            document_id=document_id,
+            store=prepared.store,
+            report_year=request.year,
+            share_class=request.share_class,
+        )
+
+    def _extract_annual_excess_return_from_store(
+        self,
+        *,
+        document_id: str,
+        store: DoclingDocumentStore,
+        report_year: int,
+        share_class: str | None,
+    ) -> ExtractAnnualExcessReturnResult:
+        """基于已完成 store 执行 10G 年度超额收益显式字段抽取。"""
+
+        tool_service = FundDocumentToolService({document_id: store})
         host = self._host_factory(tool_service)
         routed = self._run_with_query_candidates(
             host=host,
@@ -935,8 +1115,8 @@ class FundReadingService:
                 document_id=document_id,
                 result=routed.agent_result,
                 tool_service=tool_service,
-                report_year=request.year,
-                requested_share_class=request.share_class,
+                report_year=report_year,
+                requested_share_class=share_class,
             )
         except DocumentToolError as exc:
             return ExtractAnnualExcessReturnResult(
@@ -951,6 +1131,113 @@ class FundReadingService:
                 failure=ToolFailure(code=FailureCode.UNAVAILABLE, message="annual excess return 字段抽取暂不可用"),
             )
         return ExtractAnnualExcessReturnResult(document_id=document_id, fields=fields, failure=None)
+
+    def aggregate_multi_year_annual_performance(
+        self,
+        request: AggregateMultiYearAnnualPerformanceRequest,
+    ) -> AggregateMultiYearAnnualPerformanceResult:
+        """按显式 document_id 编排 10F/10G，聚合多年度年度业绩 series。
+
+        参数:
+            request: 10I 显式输入；Service 只按 annual_report_documents 中给出的
+                document_id 加载 completed annual reports，不按 fund_code/year 自动查找。
+
+        返回:
+            AggregateMultiYearAnnualPerformanceResult。成功时返回达到 3-5 年 bounded
+            coverage 的 share class series；不足 3 年时 failure 为 not_found。
+
+        异常:
+            本方法捕获聚合内稳定失败并写入 result.failure。
+        """
+
+        try:
+            normalized_years = _normalized_multi_year_requested_years(request.requested_years)
+            documents_by_year = _multi_year_documents_by_year(request.annual_report_documents)
+            requested_scope = _normalize_multi_year_requested_share_class(request.share_class)
+            repository = _repository(Path(request.work_dir))
+            rows_by_share: dict[str, dict[int, MultiYearAnnualPerformanceRow]] = {}
+
+            for year in normalized_years:
+                document = documents_by_year.get(year)
+                if document is None:
+                    continue
+                try:
+                    store = repository.load_store(document.document_id)
+                    _validate_multi_year_report_identity(
+                        document_id=document.document_id,
+                        store=store,
+                        fund_code=request.fund_code,
+                        year=year,
+                    )
+                    annual_result = self._extract_annual_performance_from_store(
+                        document_id=document.document_id,
+                        store=store,
+                        report_year=year,
+                        share_class=request.share_class,
+                    )
+                    excess_result = self._extract_annual_excess_return_from_store(
+                        document_id=document.document_id,
+                        store=store,
+                        report_year=year,
+                        share_class=request.share_class,
+                    )
+                    row_by_share = _multi_year_complete_rows_for_year(
+                        year=year,
+                        annual_result=annual_result,
+                        excess_result=excess_result,
+                    )
+                except DocumentToolError as exc:
+                    if exc.code is FailureCode.IDENTITY_MISMATCH:
+                        return AggregateMultiYearAnnualPerformanceResult(
+                            series=(),
+                            failure=ToolFailure(code=exc.code, message=exc.message),
+                        )
+                    if exc.code is FailureCode.SCHEMA_DRIFT:
+                        return AggregateMultiYearAnnualPerformanceResult(
+                            series=(),
+                            failure=ToolFailure(code=exc.code, message=exc.message),
+                        )
+                    continue
+
+                if requested_scope is not None:
+                    row = row_by_share.get(requested_scope)
+                    if row is not None:
+                        rows_by_share.setdefault(requested_scope, {})[year] = row
+                    continue
+
+                if not row_by_share:
+                    continue
+                for share_scope, row in row_by_share.items():
+                    rows_by_share.setdefault(share_scope, {})[year] = row
+
+            candidate_scopes = (requested_scope,) if requested_scope is not None else tuple(sorted(rows_by_share))
+            series = tuple(
+                _multi_year_series_for_share(
+                    fund_code=request.fund_code,
+                    requested_years=normalized_years,
+                    share_class_scope=share_scope,
+                    rows_by_year=rows_by_share.get(share_scope, {}),
+                )
+                for share_scope in candidate_scopes
+                if _multi_year_complete_count(rows_by_share.get(share_scope, {}))
+                >= _MULTI_YEAR_MINIMUM_COMPLETE_YEARS
+            )
+            if not series:
+                return AggregateMultiYearAnnualPerformanceResult(
+                    series=(),
+                    failure=ToolFailure(code=FailureCode.NOT_FOUND, message="multi-year annual performance 覆盖不足 3 年"),
+                )
+            return AggregateMultiYearAnnualPerformanceResult(series=series, failure=None)
+        except DocumentToolError as exc:
+            return AggregateMultiYearAnnualPerformanceResult(
+                series=(),
+                failure=ToolFailure(code=exc.code, message=exc.message),
+            )
+        except Exception:
+            return AggregateMultiYearAnnualPerformanceResult(
+                series=(),
+                failure=ToolFailure(code=FailureCode.UNAVAILABLE, message="multi-year annual performance 聚合暂不可用"),
+            )
 
     def list_reports(self, request: ListReportsRequest) -> ListReportsResult:
         """列出本地 completed reports 的安全摘要。
@@ -1129,6 +1416,212 @@ def _default_host_factory(tool_service: FundDocumentToolService) -> MinimalHost:
     """按默认 deterministic Agent 装配最小 Host。"""
 
     return MinimalHost(MinimalFundDocumentAgent(tool_service))
+
+
+def _normalized_multi_year_requested_years(requested_years: tuple[int, ...] | list[int]) -> tuple[int, ...]:
+    """校验并返回 10I 升序 requested_years。"""
+
+    try:
+        years = tuple(int(year) for year in requested_years)
+    except (TypeError, ValueError) as exc:
+        raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "multi-year requested_years 不符合契约") from exc
+    if not (
+        _MULTI_YEAR_MINIMUM_COMPLETE_YEARS
+        <= len(years)
+        <= _MULTI_YEAR_MAXIMUM_COMPLETE_YEARS
+    ):
+        raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "multi-year requested_years 长度不符合契约")
+    if len(set(years)) != len(years):
+        raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "multi-year requested_years 年份重复")
+    return tuple(sorted(years))
+
+
+def _multi_year_documents_by_year(
+    annual_report_documents: tuple[AnnualReportDocument, ...] | list[AnnualReportDocument],
+) -> dict[int, AnnualReportDocument]:
+    """校验显式 year/document_id 映射并按 year 建索引。"""
+
+    documents: dict[int, AnnualReportDocument] = {}
+    for document in annual_report_documents:
+        try:
+            year = int(document.year)
+        except (TypeError, ValueError) as exc:
+            raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "annual_report_documents year 不符合契约") from exc
+        if not document.document_id:
+            raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "annual_report_documents document_id 为空")
+        if year in documents:
+            raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "annual_report_documents 年份重复")
+        documents[year] = AnnualReportDocument(year=year, document_id=document.document_id)
+    return documents
+
+
+def _normalize_multi_year_requested_share_class(share_class: str | None) -> str | None:
+    """校验 10I 显式 share_class 输入。"""
+
+    if share_class is None:
+        return None
+    normalized = _normalize_share_class_scope(share_class)
+    if normalized is None:
+        raise DocumentToolError(FailureCode.NOT_FOUND, "multi-year annual performance 份额类别无法唯一识别")
+    return normalized
+
+
+def _validate_multi_year_report_identity(
+    *,
+    document_id: str,
+    store: DoclingDocumentStore,
+    fund_code: str,
+    year: int,
+) -> None:
+    """校验显式 document_id 指向的 report identity 与请求绑定一致。"""
+
+    summary = _single_report_summary(document_id, store)
+    if (
+        summary.document_id != document_id
+        or summary.fund_code != fund_code
+        or summary.year != year
+        or summary.report_type != ReportType.ANNUAL_REPORT.value
+    ):
+        raise DocumentToolError(FailureCode.IDENTITY_MISMATCH, "multi-year annual report identity 不匹配")
+
+
+def _multi_year_complete_rows_for_year(
+    *,
+    year: int,
+    annual_result: ExtractAnnualPerformanceResult,
+    excess_result: ExtractAnnualExcessReturnResult,
+) -> dict[str, MultiYearAnnualPerformanceRow]:
+    """把 10F/10G 单年度结果收敛为该年度完整 share class rows。"""
+
+    _raise_for_multi_year_single_year_failure(annual_result.failure)
+    _raise_for_multi_year_single_year_failure(excess_result.failure)
+    annual_fields = _annual_performance_fields_by_share(year=year, fields=annual_result.fields)
+    excess_fields = _annual_excess_fields_by_share(year=year, fields=excess_result.fields)
+    rows: dict[str, MultiYearAnnualPerformanceRow] = {}
+    for share_scope in sorted(set(annual_fields) | set(excess_fields)):
+        nav_field = annual_fields.get(share_scope, {}).get(_FIELD_ANNUAL_NAV_GROWTH_RATE)
+        benchmark_field = annual_fields.get(share_scope, {}).get(_FIELD_ANNUAL_BENCHMARK_RETURN_RATE)
+        excess_field = excess_fields.get(share_scope)
+        if nav_field is None or benchmark_field is None or excess_field is None:
+            continue
+        citations = (
+            AnnualPerformanceFieldCitation(
+                field_name=_FIELD_ANNUAL_NAV_GROWTH_RATE,
+                citation=nav_field.citation,
+            ),
+            AnnualPerformanceFieldCitation(
+                field_name=_FIELD_ANNUAL_BENCHMARK_RETURN_RATE,
+                citation=benchmark_field.citation,
+            ),
+            AnnualPerformanceFieldCitation(
+                field_name=_FIELD_ANNUAL_EXCESS_RETURN,
+                citation=excess_field.citation,
+            ),
+        )
+        if not all(
+            field_citation.citation.locator.locator_kind is LocatorKind.TABLE
+            for field_citation in citations
+        ):
+            continue
+        rows[share_scope] = MultiYearAnnualPerformanceRow(
+            year=year,
+            annual_nav_growth_rate=nav_field.decimal_percent_text,
+            annual_benchmark_return_rate=benchmark_field.decimal_percent_text,
+            annual_excess_return=excess_field.decimal_percent_text,
+            citations=citations,
+        )
+    return rows
+
+
+def _raise_for_multi_year_single_year_failure(failure: ToolFailure | None) -> None:
+    """按 10I 语义处理单年度 extraction failure。"""
+
+    if failure is None:
+        return
+    if failure.code is FailureCode.NOT_FOUND:
+        raise DocumentToolError(FailureCode.NOT_FOUND, failure.message)
+    raise DocumentToolError(failure.code, failure.message)
+
+
+def _annual_performance_fields_by_share(
+    *,
+    year: int,
+    fields: tuple[AnnualPerformanceExtraction, ...],
+) -> dict[str, dict[str, AnnualPerformanceExtraction]]:
+    """按 share class 和 field_name 组织 10F 字段，并校验 report_year。"""
+
+    grouped: dict[str, dict[str, AnnualPerformanceExtraction]] = {}
+    for field in fields:
+        if field.report_year != year:
+            raise DocumentToolError(FailureCode.IDENTITY_MISMATCH, "annual performance report_year 不匹配")
+        if field.field_name not in {
+            _FIELD_ANNUAL_NAV_GROWTH_RATE,
+            _FIELD_ANNUAL_BENCHMARK_RETURN_RATE,
+        }:
+            raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "annual performance 字段名不符合契约")
+        share_fields = grouped.setdefault(field.share_class_scope, {})
+        if field.field_name in share_fields:
+            raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "annual performance 字段重复")
+        share_fields[field.field_name] = field
+    return grouped
+
+
+def _annual_excess_fields_by_share(
+    *,
+    year: int,
+    fields: tuple[AnnualExcessReturnExtraction, ...],
+) -> dict[str, AnnualExcessReturnExtraction]:
+    """按 share class 组织 10G 字段，并校验 report_year。"""
+
+    grouped: dict[str, AnnualExcessReturnExtraction] = {}
+    for field in fields:
+        if field.report_year != year:
+            raise DocumentToolError(FailureCode.IDENTITY_MISMATCH, "annual excess return report_year 不匹配")
+        if field.field_name != _FIELD_ANNUAL_EXCESS_RETURN:
+            raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "annual excess return 字段名不符合契约")
+        if field.share_class_scope in grouped:
+            raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "annual excess return 字段重复")
+        grouped[field.share_class_scope] = field
+    return grouped
+
+
+def _multi_year_complete_count(rows_by_year: dict[int, MultiYearAnnualPerformanceRow]) -> int:
+    """返回完整年度数量。"""
+
+    return len(rows_by_year)
+
+
+def _multi_year_series_for_share(
+    *,
+    fund_code: str,
+    requested_years: tuple[int, ...],
+    share_class_scope: str,
+    rows_by_year: dict[int, MultiYearAnnualPerformanceRow],
+) -> MultiYearAnnualPerformanceSeries:
+    """构造单一 share class 的 10I series DTO。"""
+
+    rows = tuple(rows_by_year[year] for year in requested_years if year in rows_by_year)
+    covered_years = tuple(row.year for row in rows)
+    missing_years = tuple(year for year in requested_years if year not in rows_by_year)
+    coverage_count = len(covered_years)
+    coverage_status = (
+        _COVERAGE_STATUS_COMPLETE
+        if coverage_count == _MULTI_YEAR_MAXIMUM_COMPLETE_YEARS
+        else _COVERAGE_STATUS_PARTIAL
+    )
+    citations = tuple(field_citation for row in rows for field_citation in row.citations)
+    return MultiYearAnnualPerformanceSeries(
+        fund_code=fund_code,
+        requested_years=requested_years,
+        covered_years=covered_years,
+        missing_years=missing_years,
+        coverage_status=coverage_status,
+        coverage_count=coverage_count,
+        minimum_required_count=_MULTI_YEAR_MINIMUM_COMPLETE_YEARS,
+        share_class_scope=share_class_scope,
+        rows=rows,
+        citations=citations,
+    )
 
 
 def _repository(work_dir: Path) -> FilesystemReportRepository:

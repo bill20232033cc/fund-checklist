@@ -1,7 +1,11 @@
 """基金阅读 Service 层入口。"""
 
 from fund_agent.service.reading_service import (
+    AggregateMultiYearAnnualPerformanceRequest,
+    AggregateMultiYearAnnualPerformanceResult,
     AnnualExcessReturnExtraction,
+    AnnualPerformanceFieldCitation,
+    AnnualReportDocument,
     ExtractFeeRatesRequest,
     ExtractFeeRatesResult,
     ExtractAnnualExcessReturnRequest,
@@ -12,13 +16,19 @@ from fund_agent.service.reading_service import (
     ImportLocalReportResult,
     ListReportsRequest,
     ListReportsResult,
+    MultiYearAnnualPerformanceRow,
+    MultiYearAnnualPerformanceSeries,
     QueryRouteAttempt,
     ReadLocalReportRequest,
     ReadLocalReportResult,
 )
 
 __all__ = [
+    "AggregateMultiYearAnnualPerformanceRequest",
+    "AggregateMultiYearAnnualPerformanceResult",
     "AnnualExcessReturnExtraction",
+    "AnnualPerformanceFieldCitation",
+    "AnnualReportDocument",
     "ExtractAnnualExcessReturnRequest",
     "ExtractAnnualExcessReturnResult",
     "ExtractFeeRatesRequest",
@@ -29,6 +39,8 @@ __all__ = [
     "ImportLocalReportResult",
     "ListReportsRequest",
     "ListReportsResult",
+    "MultiYearAnnualPerformanceRow",
+    "MultiYearAnnualPerformanceSeries",
     "QueryRouteAttempt",
     "ReadLocalReportRequest",
     "ReadLocalReportResult",

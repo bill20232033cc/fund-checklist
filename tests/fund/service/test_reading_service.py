@@ -15,6 +15,8 @@ from fund_agent.fund.document_tools.errors import DocumentToolError
 from fund_agent.fund.document_tools.models import Citation, Locator, ToolFailure
 from fund_agent.fund.document_tools.persistent_repository import CATALOG_FILENAME
 from fund_agent.service import (
+    AggregateMultiYearAnnualPerformanceRequest,
+    AnnualReportDocument,
     ExtractFeeRatesRequest,
     FundReadingService,
     ImportLocalReportRequest,
@@ -438,6 +440,132 @@ def _request(pdf_path: Path, work_dir: Path) -> ReadLocalReportRequest:
     )
 
 
+def _import_annual_documents(
+    service: FundReadingService,
+    tmp_path: Path,
+    years: tuple[int, ...],
+) -> tuple[Path, tuple[AnnualReportDocument, ...]]:
+    """导入多年度 completed annual reports，并返回显式 year/document_id 映射。"""
+
+    work_dir = tmp_path / "multi-year-work"
+    documents: list[AnnualReportDocument] = []
+    for year in years:
+        pdf_path = tmp_path / f"report-{year}.pdf"
+        pdf_path.write_bytes(f"%PDF-1.4\n% minimal service test pdf {year}\n".encode("ascii"))
+        imported = service.import_local_report(
+            ImportLocalReportRequest(
+                pdf_path=pdf_path,
+                fund_code=REAL_SMOKE_FUND_CODE,
+                fund_name=REAL_SMOKE_FUND_NAME,
+                year=year,
+                work_dir=work_dir,
+            )
+        )
+        documents.append(AnnualReportDocument(year=year, document_id=imported.document_id))
+    return work_dir, tuple(documents)
+
+
+def _install_multi_year_fake_extractors(
+    monkeypatch,
+    service: FundReadingService,
+    values_by_year: dict[int, dict[str, tuple[str, str, str]]],
+    *,
+    report_year_offset: int = 0,
+) -> list[tuple[str, int, str]]:
+    """替换 10F/10G helper，只让 10I 测试覆盖编排与 coverage。"""
+
+    calls: list[tuple[str, int, str]] = []
+
+    def _requested_scope(share_class: str | None) -> str | None:
+        return reading_service_module._normalize_share_class_scope(share_class) if share_class else None
+
+    def fake_annual(*, document_id, store, report_year, share_class):
+        calls.append(("annual", report_year, document_id))
+        fields = []
+        requested_scope = _requested_scope(share_class)
+        for scope, values in sorted(values_by_year.get(report_year, {}).items()):
+            if requested_scope is not None and scope != requested_scope:
+                continue
+            nav_value, benchmark_value, _excess_value = values
+            fields.extend(
+                (
+                    reading_service_module.AnnualPerformanceExtraction(
+                        field_name="annual_nav_growth_rate",
+                        decimal_percent_text=nav_value,
+                        report_year=report_year + report_year_offset,
+                        source_period_label="过去一年",
+                        share_class_scope=scope,
+                        raw_text=f"过去一年 | 份额净值增长率 | {nav_value}",
+                        citation=_citation(
+                            document_id,
+                            LocatorKind.TABLE,
+                            section_ref=f"section-{report_year}",
+                            table_ref=f"table-{report_year}-{scope}-nav",
+                            year=report_year,
+                        ),
+                    ),
+                    reading_service_module.AnnualPerformanceExtraction(
+                        field_name="annual_benchmark_return_rate",
+                        decimal_percent_text=benchmark_value,
+                        report_year=report_year + report_year_offset,
+                        source_period_label="过去一年",
+                        share_class_scope=scope,
+                        raw_text=f"过去一年 | 业绩比较基准收益率 | {benchmark_value}",
+                        citation=_citation(
+                            document_id,
+                            LocatorKind.TABLE,
+                            section_ref=f"section-{report_year}",
+                            table_ref=f"table-{report_year}-{scope}-benchmark",
+                            year=report_year,
+                        ),
+                    ),
+                )
+            )
+        failure = None if fields else ToolFailure(code=FailureCode.NOT_FOUND, message="missing annual fields")
+        return reading_service_module.ExtractAnnualPerformanceResult(
+            document_id=document_id,
+            fields=tuple(fields),
+            failure=failure,
+        )
+
+    def fake_excess(*, document_id, store, report_year, share_class):
+        calls.append(("excess", report_year, document_id))
+        fields = []
+        requested_scope = _requested_scope(share_class)
+        for scope, values in sorted(values_by_year.get(report_year, {}).items()):
+            if requested_scope is not None and scope != requested_scope:
+                continue
+            _nav_value, _benchmark_value, excess_value = values
+            fields.append(
+                reading_service_module.AnnualExcessReturnExtraction(
+                    field_name="annual_excess_return",
+                    decimal_percent_text=excess_value,
+                    report_year=report_year + report_year_offset,
+                    source_period_label="过去一年",
+                    share_class_scope=scope,
+                    source_column_label="①－③",
+                    raw_text=f"过去一年 | ①－③ | {excess_value}",
+                    citation=_citation(
+                        document_id,
+                        LocatorKind.TABLE,
+                        section_ref=f"section-{report_year}",
+                        table_ref=f"table-{report_year}-{scope}-excess",
+                        year=report_year,
+                    ),
+                )
+            )
+        failure = None if fields else ToolFailure(code=FailureCode.NOT_FOUND, message="missing excess field")
+        return reading_service_module.ExtractAnnualExcessReturnResult(
+            document_id=document_id,
+            fields=tuple(fields),
+            failure=failure,
+        )
+
+    monkeypatch.setattr(service, "_extract_annual_performance_from_store", fake_annual)
+    monkeypatch.setattr(service, "_extract_annual_excess_return_from_store", fake_excess)
+    return calls
+
+
 def _trace_search(
     document_id: str,
     query: str,
@@ -460,6 +588,7 @@ def _citation(
     *,
     section_ref: str = "section-1",
     table_ref: str | None = None,
+    year: int = 2024,
 ) -> Citation:
     """构造不含本地路径的最小 citation。"""
 
@@ -467,7 +596,7 @@ def _citation(
         document_id=document_id,
         fund_code="004393",
         fund_name="安信企业价值优选混合型证券投资基金",
-        year=2024,
+        year=year,
         report_type="annual_report",
         locator=Locator(
             document_id=document_id,
@@ -2082,6 +2211,371 @@ def test_extract_annual_excess_return_config_error_maps_to_schema_drift(monkeypa
     assert result.fields == ()
     assert result.failure is not None
     assert result.failure.code is FailureCode.SCHEMA_DRIFT
+
+
+def test_aggregate_multi_year_annual_performance_returns_complete_five_year_series(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """5 年完整时 10I 返回 coverage_status=complete。"""
+
+    years = (2020, 2021, 2022, 2023, 2024)
+    service = FundReadingService(converter_factory=_FakeConverter)
+    work_dir, documents = _import_annual_documents(service, tmp_path, years)
+    values = {
+        year: {"A": (f"{year - 2000}.10%", f"{year - 2000}.20%", f"{year - 2000}.30%")}
+        for year in years
+    }
+    _install_multi_year_fake_extractors(monkeypatch, service, values)
+
+    result = service.aggregate_multi_year_annual_performance(
+        AggregateMultiYearAnnualPerformanceRequest(
+            fund_code=REAL_SMOKE_FUND_CODE,
+            requested_years=(2024, 2020, 2022, 2021, 2023),
+            annual_report_documents=documents,
+            work_dir=work_dir,
+        )
+    )
+
+    assert result.failure is None
+    assert len(result.series) == 1
+    series = result.series[0]
+    assert series.fund_code == REAL_SMOKE_FUND_CODE
+    assert series.requested_years == years
+    assert series.covered_years == years
+    assert series.missing_years == ()
+    assert series.coverage_status == "complete"
+    assert series.coverage_count == 5
+    assert series.minimum_required_count == 3
+    assert series.share_class_scope == "A"
+    assert [row.year for row in series.rows] == list(years)
+
+
+def test_aggregate_multi_year_annual_performance_returns_partial_for_four_complete_years(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """4 年完整 / 缺 1 年时 10I 返回 partial，并列出 missing_years。"""
+
+    years = (2020, 2021, 2022, 2023, 2024)
+    service = FundReadingService(converter_factory=_FakeConverter)
+    work_dir, documents = _import_annual_documents(service, tmp_path, years)
+    provided_documents = tuple(document for document in documents if document.year != 2021)
+    values = {
+        year: {"A": (f"{year}.1%", f"{year}.2%", f"{year}.3%")}
+        for year in years
+    }
+    _install_multi_year_fake_extractors(monkeypatch, service, values)
+
+    result = service.aggregate_multi_year_annual_performance(
+        AggregateMultiYearAnnualPerformanceRequest(
+            fund_code=REAL_SMOKE_FUND_CODE,
+            requested_years=years,
+            annual_report_documents=provided_documents,
+            work_dir=work_dir,
+        )
+    )
+
+    assert result.failure is None
+    series = result.series[0]
+    assert series.coverage_status == "partial"
+    assert series.coverage_count == 4
+    assert series.covered_years == (2020, 2022, 2023, 2024)
+    assert series.missing_years == (2021,)
+
+
+def test_aggregate_multi_year_annual_performance_returns_partial_for_three_complete_years(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """3 年完整 / 缺 2 年时 10I 返回 partial。"""
+
+    years = (2020, 2021, 2022, 2023, 2024)
+    service = FundReadingService(converter_factory=_FakeConverter)
+    work_dir, documents = _import_annual_documents(service, tmp_path, years)
+    values = {
+        year: {"A": (f"{year}.1%", f"{year}.2%", f"{year}.3%")}
+        for year in (2020, 2022, 2024)
+    }
+    _install_multi_year_fake_extractors(monkeypatch, service, values)
+
+    result = service.aggregate_multi_year_annual_performance(
+        AggregateMultiYearAnnualPerformanceRequest(
+            fund_code=REAL_SMOKE_FUND_CODE,
+            requested_years=years,
+            annual_report_documents=documents,
+            work_dir=work_dir,
+        )
+    )
+
+    assert result.failure is None
+    series = result.series[0]
+    assert series.coverage_status == "partial"
+    assert series.coverage_count == 3
+    assert series.covered_years == (2020, 2022, 2024)
+    assert series.missing_years == (2021, 2023)
+
+
+def test_aggregate_multi_year_annual_performance_fails_not_found_below_three_complete_years(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """少于 3 个完整年度时 10I 整体 not_found。"""
+
+    years = (2020, 2021, 2022, 2023, 2024)
+    service = FundReadingService(converter_factory=_FakeConverter)
+    work_dir, documents = _import_annual_documents(service, tmp_path, years)
+    values = {
+        year: {"A": (f"{year}.1%", f"{year}.2%", f"{year}.3%")}
+        for year in (2020, 2024)
+    }
+    _install_multi_year_fake_extractors(monkeypatch, service, values)
+
+    result = service.aggregate_multi_year_annual_performance(
+        AggregateMultiYearAnnualPerformanceRequest(
+            fund_code=REAL_SMOKE_FUND_CODE,
+            requested_years=years,
+            annual_report_documents=documents,
+            work_dir=work_dir,
+        )
+    )
+
+    assert result.series == ()
+    assert result.failure is not None
+    assert result.failure.code is FailureCode.NOT_FOUND
+
+
+def test_aggregate_multi_year_annual_performance_omits_share_class_below_three_years(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """未指定 share_class 时，C 类不足 3 年不得返回 C 类 series。"""
+
+    years = (2020, 2021, 2022, 2023, 2024)
+    service = FundReadingService(converter_factory=_FakeConverter)
+    work_dir, documents = _import_annual_documents(service, tmp_path, years)
+    values = {
+        year: {"A": (f"{year}.1%", f"{year}.2%", f"{year}.3%")}
+        for year in years
+    }
+    values[2020]["C"] = ("1.10%", "1.20%", "1.30%")
+    values[2021]["C"] = ("2.10%", "2.20%", "2.30%")
+    _install_multi_year_fake_extractors(monkeypatch, service, values)
+
+    result = service.aggregate_multi_year_annual_performance(
+        AggregateMultiYearAnnualPerformanceRequest(
+            fund_code=REAL_SMOKE_FUND_CODE,
+            requested_years=years,
+            annual_report_documents=documents,
+            work_dir=work_dir,
+        )
+    )
+
+    assert result.failure is None
+    assert tuple(series.share_class_scope for series in result.series) == ("A",)
+
+
+def test_aggregate_multi_year_annual_performance_honors_requested_share_class(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """用户指定 share_class 时，10I 只返回该 share class series。"""
+
+    years = (2020, 2021, 2022, 2023, 2024)
+    service = FundReadingService(converter_factory=_FakeConverter)
+    work_dir, documents = _import_annual_documents(service, tmp_path, years)
+    values = {
+        year: {
+            "A": (f"{year}.1%", f"{year}.2%", f"{year}.3%"),
+            "C": (f"{year}.4%", f"{year}.5%", f"{year}.6%"),
+        }
+        for year in years
+    }
+    _install_multi_year_fake_extractors(monkeypatch, service, values)
+
+    result = service.aggregate_multi_year_annual_performance(
+        AggregateMultiYearAnnualPerformanceRequest(
+            fund_code=REAL_SMOKE_FUND_CODE,
+            requested_years=years,
+            annual_report_documents=documents,
+            work_dir=work_dir,
+            share_class="C类",
+        )
+    )
+
+    assert result.failure is None
+    assert len(result.series) == 1
+    assert result.series[0].share_class_scope == "C"
+    assert all(row.annual_nav_growth_rate.endswith(".4%") for row in result.series[0].rows)
+
+
+def test_aggregate_multi_year_annual_performance_preserves_field_level_table_citations(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """每个 year / field 必须保留对应年度 table locator citation。"""
+
+    years = (2020, 2021, 2022)
+    service = FundReadingService(converter_factory=_FakeConverter)
+    work_dir, documents = _import_annual_documents(service, tmp_path, years)
+    values = {
+        year: {"A": (f"{year}.1%", f"{year}.2%", f"{year}.3%")}
+        for year in years
+    }
+    _install_multi_year_fake_extractors(monkeypatch, service, values)
+
+    result = service.aggregate_multi_year_annual_performance(
+        AggregateMultiYearAnnualPerformanceRequest(
+            fund_code=REAL_SMOKE_FUND_CODE,
+            requested_years=years,
+            annual_report_documents=documents,
+            work_dir=work_dir,
+        )
+    )
+
+    assert result.failure is None
+    series = result.series[0]
+    assert len(series.citations) == 9
+    for row in series.rows:
+        assert tuple(citation.field_name for citation in row.citations) == (
+            "annual_nav_growth_rate",
+            "annual_benchmark_return_rate",
+            "annual_excess_return",
+        )
+        assert all(citation.citation.year == row.year for citation in row.citations)
+        assert all(citation.citation.locator.locator_kind is LocatorKind.TABLE for citation in row.citations)
+        assert {
+            citation.citation.locator.table_ref
+            for citation in row.citations
+        } == {
+            f"table-{row.year}-A-nav",
+            f"table-{row.year}-A-benchmark",
+            f"table-{row.year}-A-excess",
+        }
+
+
+def test_aggregate_multi_year_annual_performance_fails_on_document_year_identity_mismatch(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """显式绑定 year 与 loaded report identity 冲突时必须 identity_mismatch。"""
+
+    service = FundReadingService(converter_factory=_FakeConverter)
+    work_dir, documents = _import_annual_documents(service, tmp_path, (2022, 2023, 2024))
+    wrong_documents = (
+        documents[0],
+        AnnualReportDocument(year=2023, document_id=documents[2].document_id),
+        documents[2],
+    )
+    values = {
+        year: {"A": (f"{year}.1%", f"{year}.2%", f"{year}.3%")}
+        for year in (2022, 2023, 2024)
+    }
+    _install_multi_year_fake_extractors(monkeypatch, service, values)
+
+    result = service.aggregate_multi_year_annual_performance(
+        AggregateMultiYearAnnualPerformanceRequest(
+            fund_code=REAL_SMOKE_FUND_CODE,
+            requested_years=(2022, 2023, 2024),
+            annual_report_documents=wrong_documents,
+            work_dir=work_dir,
+        )
+    )
+
+    assert result.series == ()
+    assert result.failure is not None
+    assert result.failure.code is FailureCode.IDENTITY_MISMATCH
+
+
+def test_aggregate_multi_year_annual_performance_fails_on_extraction_report_year_mismatch(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """单年度 extraction result 的 report_year 与绑定 year 冲突时必须 identity_mismatch。"""
+
+    years = (2022, 2023, 2024)
+    service = FundReadingService(converter_factory=_FakeConverter)
+    work_dir, documents = _import_annual_documents(service, tmp_path, years)
+    values = {
+        year: {"A": (f"{year}.1%", f"{year}.2%", f"{year}.3%")}
+        for year in years
+    }
+    _install_multi_year_fake_extractors(monkeypatch, service, values, report_year_offset=1)
+
+    result = service.aggregate_multi_year_annual_performance(
+        AggregateMultiYearAnnualPerformanceRequest(
+            fund_code=REAL_SMOKE_FUND_CODE,
+            requested_years=years,
+            annual_report_documents=documents,
+            work_dir=work_dir,
+        )
+    )
+
+    assert result.series == ()
+    assert result.failure is not None
+    assert result.failure.code is FailureCode.IDENTITY_MISMATCH
+
+
+@pytest.mark.parametrize(
+    "requested_years",
+    [
+        (2022, 2023),
+        (2019, 2020, 2021, 2022, 2023, 2024),
+        (2022, 2023, 2023),
+    ],
+)
+def test_aggregate_multi_year_annual_performance_rejects_invalid_requested_years(
+    requested_years: tuple[int, ...],
+    tmp_path: Path,
+) -> None:
+    """requested_years 重复或长度不在 3-5 时使用既有 failure code fail-closed。"""
+
+    service = FundReadingService(converter_factory=_FakeConverter)
+
+    result = service.aggregate_multi_year_annual_performance(
+        AggregateMultiYearAnnualPerformanceRequest(
+            fund_code=REAL_SMOKE_FUND_CODE,
+            requested_years=requested_years,
+            annual_report_documents=(),
+            work_dir=tmp_path / "work",
+        )
+    )
+
+    assert result.series == ()
+    assert result.failure is not None
+    assert result.failure.code is FailureCode.SCHEMA_DRIFT
+
+
+def test_aggregate_multi_year_annual_performance_does_not_auto_fill_or_add_new_source_path(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """10I 只编排显式 document_id，不做 repository 自动补齐、OCR、chart 或外部来源。"""
+
+    years = (2020, 2021, 2022, 2023, 2024)
+    importing_service = FundReadingService(converter_factory=_FakeConverter)
+    work_dir, all_documents = _import_annual_documents(importing_service, tmp_path, years)
+    aggregating_service = FundReadingService(converter_factory=_ForbiddenConverter)
+    values = {
+        year: {"A": (f"{year}.1%", f"{year}.2%", f"{year}.3%")}
+        for year in years
+    }
+    calls = _install_multi_year_fake_extractors(monkeypatch, aggregating_service, values)
+
+    result = aggregating_service.aggregate_multi_year_annual_performance(
+        AggregateMultiYearAnnualPerformanceRequest(
+            fund_code=REAL_SMOKE_FUND_CODE,
+            requested_years=years,
+            annual_report_documents=all_documents[:3],
+            work_dir=work_dir,
+        )
+    )
+
+    assert result.failure is None
+    assert result.series[0].coverage_status == "partial"
+    assert result.series[0].covered_years == (2020, 2021, 2022)
+    assert result.series[0].missing_years == (2023, 2024)
+    assert [call[1] for call in calls] == [2020, 2020, 2021, 2021, 2022, 2022]
 
 
 def test_read_local_report_records_non_profile_query_only_once(tmp_path: Path) -> None:

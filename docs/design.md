@@ -898,6 +898,39 @@ Slice 10H 已经 MiMo review `ACCEPTED`：
 - 10H 已明确不做 single-report rolling period extraction，不使用 `过去三年` / `过去五年` 行，不做 OCR / chart parsing、外部数据源、管理人报告文字 fallback、自然语言 `近 5 年` 解析或 repository 自动补齐。
 - 10H remaining blocking risk: none reported。
 
+Post-MVP 10I 裁决为 multi-year annual performance aggregation service：
+
+- 10I 放在 Service 层，定位为 use case orchestration；不放到 Agent、CLI、Store 或 ToolService。
+- 10I 目标是显式接收多年度已导入年报，编排 10F / 10G 单年度 extraction result，返回 3-5 年 bounded coverage 的 `MultiYearAnnualPerformanceSeries`。
+- 10I 首批输入固定为：`fund_code`、`requested_years: list[int]`、`annual_report_documents: list[{year, document_id}]`、`share_class: optional`。
+- 10I 不做 `fund_code + years -> repository 自动查找`，不做自然语言 `近 5 年` 解析，不自动导入缺失 PDF，不改 CLI 默认输出。
+- `requested_years` 约束：长度必须为 3-5；年份必须唯一；Service 可 normalize 为升序，并在 DTO 中输出 normalized `requested_years`。
+- 每个 `document_id` 必须显式绑定 year；不得只从 `document_id` 字符串猜年份。
+- 绑定 year 与单年度 extraction result 的 `report_year` 不一致时，整体 fail-closed 为 `identity_mismatch`。
+- 10I 不重新解析表格，不新增第二套表格抽取规则；只能编排 10F / 10G 的单年度 extraction result。
+- 某 year / share class 同时具备 `annual_nav_growth_rate`、`annual_benchmark_return_rate`、`annual_excess_return` 三个字段及 table locator citation，才算 complete year。
+- 任一字段缺失时，该 year 对该 share class 计入 `missing_years`；若导致该 share class 完整年度少于 3 年，则不返回该 share class。
+- coverage 语义沿用 10H：`minimum_complete_years=3`，`maximum_complete_years=5`；5 年完整为 `coverage_status=complete`，3-4 年完整为 `coverage_status=partial`，少于 3 年整体 `not_found`。
+- `coverage_status=partial` 是成功结果的 coverage metadata，不是 failure code；不新增 `partial_success`。
+- share class 口径：按 share class 独立计算 coverage。用户指定 share class 时只评估该 share class；未指定时返回所有达到 3-5 年 coverage 的 share class series。所有 share class 都不足 3 年时整体 `not_found`。
+- `missing_years` 首批只返回年份列表，不新增 `missing_reasons`。
+- DTO 形态沿用 10H：`MultiYearAnnualPerformanceSeries` 包含 `fund_code`、`requested_years`、`covered_years`、`missing_years`、`coverage_status`、`coverage_count`、`minimum_required_count`、`share_class_scope`、`rows`、`citations`。
+- 每个 row 包含：`year`、`annual_nav_growth_rate`、`annual_benchmark_return_rate`、`annual_excess_return`、`citations`。
+- citation 口径：每个 year / field 保留原年度年报 table locator citation；禁止只给汇总 citation。
+- 失败语义沿用现有 failure code：document/year 与 extraction `report_year` 冲突为 `identity_mismatch`；少于 3 个完整年度为 `not_found`；单年度文档不可读、目标表缺失或字段缺失只计入 `missing_years`，若导致不足 3 年则 `not_found`；extractor 配置异常为 `schema_drift`；内部异常为 `unavailable`。
+- 10I 不新增 `missing_year`、`partial_success`、`coverage_error` 或新 failure taxonomy。
+- 10I 不做 repository 自动补齐、自然语言解析、OCR / chart parsing、外部数据源、年化收益率、扣费后收益率、收益复权、净值计算、`R=A+B-C`、换手率、成本计算、同类中位数、模板执行、自动报告或投资判断。
+- 10I 测试必须覆盖：5 年完整为 `complete`；4 年完整 / 缺 1 年为 `partial`；3 年完整 / 缺 2 年为 `partial`；少于 3 年为 `not_found`；C 类不足 3 年时不返回 C 类；每个字段保留对应年度 table citation；不重新解析表格、不走 OCR / chart / external source。
+
+Slice 10I 已经 MiMo review `ACCEPTED`：
+
+- Service 层已实现 multi-year annual performance aggregation service。
+- 10I 显式接收 `requested_years` 与 `annual_report_documents[{year, document_id}]`，编排 10F / 10G 单年度 extraction result；不做 repository 自动补齐、自然语言解析、自动导入 PDF、CLI 改造、OCR / chart parsing 或外部数据源。
+- 10I 已实现 3-5 年 bounded coverage：5 年完整为 `coverage_status=complete`；3-4 年完整为 `coverage_status=partial`；少于 3 年整体 `not_found`。
+- 10I 已实现 share class 独立 coverage；不足 3 年的 share class 不返回，所有 share class 都不足 3 年时整体 `not_found`。
+- 10I 已覆盖 document/year 与 extraction `report_year` 冲突时 `identity_mismatch`。
+- 10I remaining blocking risk: none reported。
+
 Post-MVP 11A 裁决为 performance disclosure locator，插入 10D 之前：
 
 - 11A 目标是定位业绩表现披露位置，不抽取结构化字段；10D performance return fields extraction 后置。
@@ -1079,12 +1112,12 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## 9. 已关闭裁决项
 
-MVP plan 已关闭。当前已完成到 Post-MVP Slice 10H；Slice 9F 因 keyword-level routing 无法证明 disclosure target success 被判定为 `BLOCKED_BY_DESIGN`；Slice 10A 已实现 Controlled disclosure target contract 并经 MiMo review `ACCEPTED`；Slice 10B 已实现 fee_rates reading locator 并经 MiMo review `ACCEPTED`；Slice 10C 已实现 fee_rates value extraction contract 并经 MiMo review `ACCEPTED`；Slice 11A 已实现 performance disclosure locator 并经 MiMo review `ACCEPTED`；Slice 11B 已实现 disclosure locator contract registry 并经 MiMo review `ACCEPTED`；Slice 10D 已实现 performance return fields extraction contract 并经 MiMo review `ACCEPTED`；Slice 10E 裁决年度业绩 deterministic source 选择 title-family matched performance comparison table；Slice 10F 已实现 annual performance table extraction 并经 MiMo review `ACCEPTED`；Slice 10G 已实现 annual excess return disclosed-field extraction 并经 MiMo review `ACCEPTED`；Slice 10H 已完成 multi-year annual performance source contract with bounded year coverage 并经 MiMo review `ACCEPTED`。
+MVP plan 已关闭。当前已完成到 Post-MVP Slice 10I；Slice 9F 因 keyword-level routing 无法证明 disclosure target success 被判定为 `BLOCKED_BY_DESIGN`；Slice 10A 已实现 Controlled disclosure target contract 并经 MiMo review `ACCEPTED`；Slice 10B 已实现 fee_rates reading locator 并经 MiMo review `ACCEPTED`；Slice 10C 已实现 fee_rates value extraction contract 并经 MiMo review `ACCEPTED`；Slice 11A 已实现 performance disclosure locator 并经 MiMo review `ACCEPTED`；Slice 11B 已实现 disclosure locator contract registry 并经 MiMo review `ACCEPTED`；Slice 10D 已实现 performance return fields extraction contract 并经 MiMo review `ACCEPTED`；Slice 10E 裁决年度业绩 deterministic source 选择 title-family matched performance comparison table；Slice 10F 已实现 annual performance table extraction 并经 MiMo review `ACCEPTED`；Slice 10G 已实现 annual excess return disclosed-field extraction 并经 MiMo review `ACCEPTED`；Slice 10H 已完成 multi-year annual performance source contract with bounded year coverage 并经 MiMo review `ACCEPTED`；Slice 10I 已实现 multi-year annual performance aggregation service 并经 MiMo review `ACCEPTED`。
 
 ## 10. 下一步最小可验证问题
 
 下一步只应验证一个问题：
 
 ```text
-下一步最小实现 slice 可裁决为 10I multi-year annual performance aggregation service：显式输入多个年度 document_id，编排 10F / 10G 单年度 extraction result，返回 3-5 年 bounded coverage series。不得做自然语言 `近 5 年` 解析、repository 自动补齐、OCR / chart parsing、外部数据源、年化收益率、扣费后收益率、`R=A+B-C`、模板执行、自动报告或投资判断。
+下一步尚未裁决。若继续收益链路，建议先裁决 10J multi-year performance service-to-agent exposure：是否允许 Agent / Host 消费 10I 的多年度 series DTO，以及如何保持 citation、coverage_status、missing_years 和 CLI 默认输出边界。不得直接进入报告生成、自然语言 `近 5 年` 解析、repository 自动补齐、年化收益率、扣费后收益率、`R=A+B-C` 或投资判断。
 ```
