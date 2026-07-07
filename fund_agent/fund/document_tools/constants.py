@@ -55,6 +55,7 @@ class ToolName(StrValueEnum):
     LIST_TABLES = "list_tables"
     READ_TABLE = "read_table"
     GET_EXCERPT = "get_excerpt"
+    AGGREGATE_MULTI_YEAR_ANNUAL_PERFORMANCE = "aggregate_multi_year_annual_performance"
 
 
 PDF_CONTENT_TYPE = "application/pdf"

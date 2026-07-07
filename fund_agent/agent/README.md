@@ -17,6 +17,19 @@
 - Agent 不读取 raw PDF、raw Docling JSON、本地路径或 Docling cache path。
 - persistent repository 已由 Fund document tools / CLI loader 路径承载；Agent 只消费 `FundDocumentToolService` public tools，不直接读取 catalog 或 private loader。
 
+Post-MVP Slice 10K 已实现 multi-year performance fake/injected Agent tool-loop：
+
+- `aggregate_multi_year_annual_performance` 是新增受控 Agent 工具，暴露 10I `AggregateMultiYearAnnualPerformanceResult`。
+- 工具输入沿用 10I/10J：`fund_code`、`requested_years`、`annual_report_documents[{year, document_id}]`、`share_class` optional，通过 `ToolCall.extra` 传入。
+- 工具输出只返回 10I 结构化 result：成功为 `series[]`，失败为 `failure`；tool 层不生成分析文本。
+- `LlmToolLoopRunner.__init__` 新增可选 `aggregate_handler` 参数，类型为 `Callable[..., AggregateMultiYearAnnualPerformanceResult]`。
+- runner 不直接调用 `FundReadingService.aggregate_multi_year_annual_performance()`，而是通过 `aggregate_handler` 回调注入，保持 Service 层与 Agent 层解耦。
+- `ToolResult.evidence_text` 包含 coverage_status、covered_years、missing_years 和逐行字段值（annual_nav_growth_rate / annual_benchmark_return_rate / annual_excess_return）。
+- `ToolResult.citations` 包含所有 series rows 的字段级 table locator citations。
+- failure 语义沿用 10I/10J：`identity_mismatch`、`not_found`、`schema_drift`、`unavailable`。
+- `ToolCall.extra` 字段可携带任意 tool-specific 参数，trace 只记录 `str | int` 类型值。
+- 10K 不接真实 LLM，不改 CLI 默认输出，不做自然语言解析、repository 自动补齐、报告生成或投资判断。
+
 Post-MVP Slice 8A 已实现 fake/injected LLM tool-loop contract：
 
 - `LlmClientProtocol` 是注入式 client 最小协议；当前不连接 OpenAI、Claude 或其它外部模型 API。

@@ -1,9 +1,9 @@
 # fund-checklist implementation-control
 
 更新时间：2026-07-07
-当前阶段：`POST_MVP_SLICE_10J_DOCS_ONLY_COMPLETED`
+当前阶段：`POST_MVP_SLICE_10K_ACCEPTED`
 当前角色：control / CIC-lite controller
-当前目标：Slice 10I multi-year annual performance aggregation service 已经 MiMo `ACCEPTED`；Slice 10J 已完成 docs-only multi-year performance service-to-agent exposure contract，定义受控工具 `aggregate_multi_year_annual_performance` 的输入输出和 Agent 行为边界，不实现 tool-loop。不得扩成 gateflow / phaseflow / release-readiness，不新增 plan artifact，不进入 batch benchmark、开放语义理解、自动分词、embedding、LLM intent、template contract execution、chapter contract execution、calculation framework、`fund-checklist ask`、UI、自动报告或投资判断。
+当前目标：Slice 10K multi-year performance fake/injected Agent tool-loop 已实现并经 ds review `ACCEPTED`。不得扩成 gateflow / phaseflow / release-readiness，不新增 plan artifact，不进入 batch benchmark、开放语义理解、自动分词、embedding、LLM intent、template contract execution、chapter contract execution、calculation framework、`fund-checklist ask`、UI、自动报告或投资判断。
 
 ## 当前事实
 
@@ -381,6 +381,21 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - failure 语义沿用 10I，只允许四个 failure code：`identity_mismatch`、`not_found`、`schema_drift`、`unavailable`；Agent 只把 failure 转为 fail-closed plain answer，不新增 failure code。
 - 后续实现测试建议放在 10K fake/injected Agent tool-loop：验证 Agent 调用 `aggregate_multi_year_annual_performance`，消费 `coverage_status=partial`，最终回答包含 covered/missing years 和 citations，且不泄漏 raw Docling JSON / local path / cache path，不输出年化收益、扣费后收益或投资判断。
 - 10J 不做 LLM 自然语言 query routing、repository 自动补齐、CLI 新入口、多 PDF 导入流程、报告生成、template chapter execution、`R=A+B-C`、年化收益率、扣费后收益率或投资判断。
+- Post-MVP 10K 裁决为 multi-year performance fake/injected Agent tool-loop。
+- 10K 是 implementation slice，目标是在 fake/injected Agent tool-loop 中暴露受控工具 `aggregate_multi_year_annual_performance`，验证 Agent 能消费 10I `MultiYearAnnualPerformanceSeries`。
+- 10K 不接真实 LLM，不改 CLI 默认输出，不新增 `fund-checklist ask`、multi-year CLI 子命令或 CLI 参数。
+- 10K 工具名称固定为 `aggregate_multi_year_annual_performance`，不得新增别名。
+- 工具输入沿用 10I / 10J：`fund_code`、`requested_years`、`annual_report_documents[{year, document_id}]`、`share_class optional`。
+- Agent 不得自己执行自然语言 `近 5 年` 解析、repository 自动查找、自动导入 PDF、文件名猜年份或 document_id 字符串猜年份。
+- 工具输出只返回 10I 结构化 result：成功为 `series[]`，失败为 `failure`；tool 层不生成分析文本。
+- Agent 允许行为只限：调用受控工具；转述 DTO 字段；展示 `coverage_status`、`covered_years`、`missing_years`；附带 per-year / per-field table locator citation。
+- `coverage_status=partial` 时，final answer 必须同时出现 `covered_years` 和 `missing_years`；不得写成“近 5 年完整表现”。
+- final answer citations 必须来自具体 year / field 的 table locator；禁止只给 series-level citation、汇总 citation 或无字段来源 citation。
+- tool failure 时 Agent 必须 fail-closed，返回 `AgentRunResult.failure`；不得生成部分答案。
+- failure 语义沿用 10I / 10J：`identity_mismatch`、`not_found`、`schema_drift`、`unavailable`；10K 不新增 failure code。
+- 10K 禁止计算年化收益率、扣费后收益率、排名、打分、收益来源解释、`R=A+B-C`、投资结论、报告生成或补齐缺失年份。
+- 10K 测试只使用 fake/injected tool-loop，不接真实 provider，不联网，不读取真实 API key。
+- 10K 必须测试：partial coverage final answer includes covered_years and missing_years；complete coverage final answer does not invent missing_years；tool failure `not_found` -> `AgentRunResult.failure`；`identity_mismatch` -> `AgentRunResult.failure`；final answer includes per-year / per-field citations；final answer does not include annualized_return / fee-adjusted return / investment judgment；no raw Docling JSON / local path / cache path leakage。
 - Post-MVP 11A 裁决为 performance disclosure locator，插入 10D 之前；11A 只做业绩表现披露定位和 citation，不抽取结构化字段。
 - 11A profile 名称为 `performance_returns`；名称只表示业绩表现披露定位，不代表字段抽取。
 - acceptable title family 固定为：`基金份额净值增长率及其与同期业绩比较基准收益率的比较`、`基金净值表现`。
@@ -436,7 +451,7 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## Next Action
 
-10J docs-only contract 已完成。下一步最小实现 slice 可裁决为 10K multi-year performance fake/injected Agent tool-loop：实现受控 tool `aggregate_multi_year_annual_performance` 的 fake/injected Agent 消费测试，验证 coverage metadata、missing years 和 per-year citations 在最终 plain answer 中保留。不得改 CLI 默认输出，不做自然语言 `近 5 年` 解析、repository 自动补齐、报告生成、年化收益率、扣费后收益率、`R=A+B-C` 或投资判断。
+10K 已完成并经 ds review `ACCEPTED`。下一步尚未裁决。若继续收益链路，可考虑 10L multi-year performance CLI integration 或其它后续 slice。不得改 CLI 默认输出，不接真实 LLM，不做自然语言 `近 5 年` 解析、repository 自动补齐、报告生成、年化收益率、扣费后收益率、`R=A+B-C` 或投资判断。
 
 禁止事项：
 
@@ -530,6 +545,7 @@ uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值
 10H. multi-year annual performance source contract with bounded year coverage：已 accepted；source 选择 multiple annual reports，后续聚合 10F / 10G 单年度 DTO；允许 3-5 年 bounded coverage，缺失年份必须结构化暴露，少于 3 年 fail-closed；10H 不实现 aggregation service。
 10I. multi-year annual performance aggregation service：已 accepted；Service 层显式接收 requested_years + year/document_id 映射，编排 10F / 10G 单年度 extraction result，返回 3-5 年 bounded coverage series；不改 CLI，不做 repository 自动补齐或自然语言解析。
 10J. multi-year performance service-to-agent exposure contract：docs-only completed；定义 Agent / Host 通过受控 tool `aggregate_multi_year_annual_performance` 消费 10I series DTO 的边界；受控工具输入固定为 `fund_code` / `requested_years` / `annual_report_documents[{year, document_id}]` / `share_class optional`，输出成功时 `series[]` 含 `coverage_status` / `covered_years` / `missing_years` / `rows` / per-year per-field citations，失败时 `failure`；failure code 只允许 `identity_mismatch` / `not_found` / `schema_drift` / `unavailable`；Agent 只允许调用受控工具并转述 DTO 字段，禁止年化收益 / 扣费后收益 / 排名 / 打分 / R=A+B-C / 投资结论 / 补齐缺失年份；不实现 tool-loop，不改 CLI / code / tests，不做 repo auto lookup / 自然语言解析 / missing-PDF auto import / filename year guessing。
+10K. multi-year performance fake/injected Agent tool-loop：已 accepted；在 fake/injected Agent tool-loop 中暴露 `aggregate_multi_year_annual_performance`，通过 `aggregate_handler` 注入回调调用 10I Service；`ToolCall.extra` 携带 tool-specific 参数；failure 时 `AgentRunResult.failure`；163 passed, 0 failures；不改 CLI，不接真实 LLM，不做自然语言解析或报告生成。
 11A. performance disclosure locator：已 accepted；定位 `基金份额净值增长率及其与同期业绩比较基准收益率的比较` / `基金净值表现` 披露，返回 section/table citation 和原始表格片段；不抽值、不计算。
 11B. disclosure locator contract registry：已 accepted；把既有 controlled disclosure profiles 收敛为 Service 内部 locator contract registry；不新增披露对象，不抽值、不计算、不改 public tool / CLI contract。
 

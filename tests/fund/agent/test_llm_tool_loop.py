@@ -8,10 +8,16 @@ from dataclasses import asdict
 from pathlib import Path
 
 from fund_agent.agent import FakeLlmClient, FinalAnswer, LlmToolLoopRunner, ToolCall, ToolResult
-from fund_agent.fund.document_tools.constants import FailureCode, ReportType, SourceKind, ToolName
+from fund_agent.fund.document_tools.constants import FailureCode, LocatorKind, ReportType, SourceKind, ToolName
 from fund_agent.fund.document_tools.docling_store import DoclingDocumentStore
-from fund_agent.fund.document_tools.models import ReportIdentity, SearchResult, TableSummary, ToolFailure
+from fund_agent.fund.document_tools.models import Citation, Locator, ReportIdentity, SearchResult, TableSummary, ToolFailure
 from fund_agent.fund.document_tools.service import FundDocumentToolService
+from fund_agent.service.reading_service import (
+    AggregateMultiYearAnnualPerformanceResult,
+    AnnualPerformanceFieldCitation,
+    MultiYearAnnualPerformanceRow,
+    MultiYearAnnualPerformanceSeries,
+)
 
 
 def _identity() -> ReportIdentity:
@@ -427,6 +433,346 @@ def test_llm_tool_loop_output_does_not_leak_private_payload_or_paths(tmp_path: P
     )
 
     result = runner.run(document_id=_identity().document_id, query="基金经理")
+    rendered = str(asdict(result))
+
+    assert result.failure is None
+    assert str(tmp_path) not in rendered
+    assert "private-cache" not in rendered
+    assert ".docling.json" not in rendered
+    assert "schema_name" not in rendered
+    assert "texts" not in rendered
+    assert "tables" not in rendered
+    assert _identity().local_import_id not in rendered
+
+
+def _fake_table_citation(year: int, table_ref: str) -> Citation:
+    """构造用于多年度业绩测试的 fake table citation。"""
+
+    return Citation(
+        document_id=_identity().document_id,
+        fund_code=_identity().fund_code,
+        fund_name=_identity().fund_name,
+        year=year,
+        report_type=ReportType.ANNUAL_REPORT.value,
+        locator=Locator(
+            document_id=_identity().document_id,
+            locator_kind=LocatorKind.TABLE,
+            section_ref="section-0000",
+            table_ref=table_ref,
+            page_no=2,
+            page_range=None,
+            internal_ref=None,
+            internal_ref_available=False,
+        ),
+    )
+
+
+def _citations_from_result(result: AggregateMultiYearAnnualPerformanceResult) -> tuple[Citation, ...]:
+    """从 AggregateMultiYearAnnualPerformanceResult 提取所有 Citation 对象。"""
+
+    return tuple(
+        field_citation.citation
+        for series in result.series
+        for field_citation in series.citations
+    )
+
+
+def _fake_multi_year_result(
+    *,
+    years: tuple[int, ...],
+    missing: tuple[int, ...] = (),
+) -> AggregateMultiYearAnnualPerformanceResult:
+    """构造用于测试的 fake AggregateMultiYearAnnualPerformanceResult。"""
+
+    covered = tuple(y for y in years if y not in missing)
+    rows = tuple(
+        MultiYearAnnualPerformanceRow(
+            year=y,
+            annual_nav_growth_rate="17.32%",
+            annual_benchmark_return_rate="12.50%",
+            annual_excess_return="4.82%",
+            citations=(
+                AnnualPerformanceFieldCitation(
+                    field_name="annual_nav_growth_rate",
+                    citation=_fake_table_citation(y, f"table-{y}-nav"),
+                ),
+                AnnualPerformanceFieldCitation(
+                    field_name="annual_benchmark_return_rate",
+                    citation=_fake_table_citation(y, f"table-{y}-bench"),
+                ),
+                AnnualPerformanceFieldCitation(
+                    field_name="annual_excess_return",
+                    citation=_fake_table_citation(y, f"table-{y}-excess"),
+                ),
+            ),
+        )
+        for y in covered
+    )
+    citations = tuple(field_citation for row in rows for field_citation in row.citations)
+    coverage_status = "complete" if not missing else "partial"
+    series = MultiYearAnnualPerformanceSeries(
+        fund_code=_identity().fund_code,
+        requested_years=years,
+        covered_years=covered,
+        missing_years=missing,
+        coverage_status=coverage_status,
+        coverage_count=len(covered),
+        minimum_required_count=3,
+        share_class_scope="A",
+        rows=rows,
+        citations=citations,
+    )
+    return AggregateMultiYearAnnualPerformanceResult(series=(series,), failure=None)
+
+
+def _aggregate_tool_call(extra: dict[str, object]) -> ToolCall:
+    """构造 aggregate_multi_year_annual_performance 的 ToolCall。"""
+
+    return ToolCall(
+        tool_name=ToolName.AGGREGATE_MULTI_YEAR_ANNUAL_PERFORMANCE,
+        document_id=_identity().document_id,
+        extra=extra,
+    )
+
+
+def _aggregate_extra() -> dict[str, object]:
+    """返回 5 年 partial coverage 的 fake aggregate 参数。"""
+
+    return {
+        "fund_code": _identity().fund_code,
+        "requested_years": (2020, 2021, 2022, 2023, 2024),
+        "annual_report_documents": [
+            {"year": 2020, "document_id": "doc-2020"},
+            {"year": 2021, "document_id": "doc-2021"},
+            {"year": 2022, "document_id": "doc-2022"},
+            {"year": 2023, "document_id": "doc-2023"},
+        ],
+        "share_class": "A",
+    }
+
+
+def test_fake_llm_aggregate_multi_year_partial_coverage_preserves_metadata(tmp_path: Path) -> None:
+    """partial coverage 时 final answer 必须包含 coverage_status、covered_years、missing_years。"""
+
+    fake_result = _fake_multi_year_result(
+        years=(2020, 2021, 2022, 2023, 2024),
+        missing=(2024,),
+    )
+
+    def fake_aggregate_handler(fund_code, requested_years, annual_report_documents, share_class):
+        return fake_result
+
+    final = FinalAnswer(
+        answer="多年度业绩: coverage_status=partial, covered_years=2020-2023, missing_years=2024, 年度净值增长率 17.32%。",
+        citations=_citations_from_result(fake_result),
+        key_facts=("17.32%",),
+    )
+
+    runner = LlmToolLoopRunner(
+        tool_service=_service(tmp_path),
+        llm_client=FakeLlmClient([
+            _aggregate_tool_call(_aggregate_extra()),
+            final,
+        ]),
+        aggregate_handler=fake_aggregate_handler,
+    )
+
+    result = runner.run(document_id=_identity().document_id, query="多年度业绩")
+
+    assert result.failure is None
+    assert "partial" in result.answer
+    assert "2020" in result.answer
+    assert "2023" in result.answer
+    assert "2024" in result.answer
+    assert len(result.citations) > 0
+    assert tuple(entry.tool_name for entry in result.tool_trace) == (
+        ToolName.AGGREGATE_MULTI_YEAR_ANNUAL_PERFORMANCE,
+    )
+
+
+def test_fake_llm_aggregate_multi_year_complete_coverage_no_invented_missing_years(tmp_path: Path) -> None:
+    """complete coverage 时 final answer 不得虚构 missing_years。"""
+
+    fake_result = _fake_multi_year_result(
+        years=(2020, 2021, 2022, 2023, 2024),
+        missing=(),
+    )
+
+    def fake_aggregate_handler(fund_code, requested_years, annual_report_documents, share_class):
+        return fake_result
+
+    final = FinalAnswer(
+        answer="多年度业绩: coverage_status=complete, covered_years=2020-2024, 年度净值增长率 17.32%。",
+        citations=_citations_from_result(fake_result),
+        key_facts=("17.32%",),
+    )
+
+    runner = LlmToolLoopRunner(
+        tool_service=_service(tmp_path),
+        llm_client=FakeLlmClient([
+            _aggregate_tool_call(_aggregate_extra()),
+            final,
+        ]),
+        aggregate_handler=fake_aggregate_handler,
+    )
+
+    result = runner.run(document_id=_identity().document_id, query="多年度业绩")
+
+    assert result.failure is None
+    assert "complete" in result.answer
+    assert "missing_years" not in result.answer
+
+
+def test_fake_llm_aggregate_multi_year_tool_failure_not_found_returns_agent_failure(tmp_path: Path) -> None:
+    """aggregate handler 返回 not_found failure 时 runner 必须返回 AgentRunResult.failure。"""
+
+    def fake_aggregate_handler(fund_code, requested_years, annual_report_documents, share_class):
+        return AggregateMultiYearAnnualPerformanceResult(
+            series=(),
+            failure=ToolFailure(code=FailureCode.NOT_FOUND, message="multi-year annual performance 覆盖不足 3 年"),
+        )
+
+    runner = LlmToolLoopRunner(
+        tool_service=_service(tmp_path),
+        llm_client=FakeLlmClient([
+            _aggregate_tool_call(_aggregate_extra()),
+            FinalAnswer(answer="不应到达", citations=(), key_facts=()),
+        ]),
+        aggregate_handler=fake_aggregate_handler,
+    )
+
+    result = runner.run(document_id=_identity().document_id, query="多年度业绩")
+
+    assert isinstance(result.failure, ToolFailure)
+    assert result.failure.code is FailureCode.NOT_FOUND
+    assert result.answer == ""
+
+
+def test_fake_llm_aggregate_multi_year_tool_failure_identity_mismatch_returns_agent_failure(
+    tmp_path: Path,
+) -> None:
+    """aggregate handler 返回 identity_mismatch failure 时 runner 必须返回 AgentRunResult.failure。"""
+
+    def fake_aggregate_handler(fund_code, requested_years, annual_report_documents, share_class):
+        return AggregateMultiYearAnnualPerformanceResult(
+            series=(),
+            failure=ToolFailure(code=FailureCode.IDENTITY_MISMATCH, message="multi-year annual report identity 不匹配"),
+        )
+
+    runner = LlmToolLoopRunner(
+        tool_service=_service(tmp_path),
+        llm_client=FakeLlmClient([
+            _aggregate_tool_call(_aggregate_extra()),
+            FinalAnswer(answer="不应到达", citations=(), key_facts=()),
+        ]),
+        aggregate_handler=fake_aggregate_handler,
+    )
+
+    result = runner.run(document_id=_identity().document_id, query="多年度业绩")
+
+    assert isinstance(result.failure, ToolFailure)
+    assert result.failure.code is FailureCode.IDENTITY_MISMATCH
+    assert result.answer == ""
+
+
+def test_fake_llm_aggregate_multi_year_final_answer_includes_per_year_citations(tmp_path: Path) -> None:
+    """final answer citations 必须包含 per-year per-field table locator citations。"""
+
+    fake_result = _fake_multi_year_result(
+        years=(2020, 2021, 2022, 2023, 2024),
+        missing=(2024,),
+    )
+
+    def fake_aggregate_handler(fund_code, requested_years, annual_report_documents, share_class):
+        return fake_result
+
+    final = FinalAnswer(
+        answer="多年度业绩: coverage_status=partial, 年度净值增长率 17.32%。",
+        citations=_citations_from_result(fake_result),
+        key_facts=("17.32%",),
+    )
+
+    runner = LlmToolLoopRunner(
+        tool_service=_service(tmp_path),
+        llm_client=FakeLlmClient([
+            _aggregate_tool_call(_aggregate_extra()),
+            final,
+        ]),
+        aggregate_handler=fake_aggregate_handler,
+    )
+
+    result = runner.run(document_id=_identity().document_id, query="多年度业绩")
+
+    assert result.failure is None
+    assert len(result.citations) == 12  # 4 years * 3 fields
+    for citation in result.citations:
+        assert citation.locator.locator_kind is LocatorKind.TABLE
+        assert citation.locator.table_ref is not None
+
+
+def test_fake_llm_aggregate_multi_year_final_answer_no_investment_judgment(tmp_path: Path) -> None:
+    """final answer 不得包含年化收益率、扣费后收益率或投资判断。"""
+
+    fake_result = _fake_multi_year_result(
+        years=(2020, 2021, 2022, 2023, 2024),
+        missing=(2024,),
+    )
+
+    def fake_aggregate_handler(fund_code, requested_years, annual_report_documents, share_class):
+        return fake_result
+
+    final = FinalAnswer(
+        answer="多年度业绩: coverage_status=partial, 年度净值增长率 17.32%, 超额收益 4.82%。",
+        citations=_citations_from_result(fake_result),
+        key_facts=("17.32%",),
+    )
+
+    runner = LlmToolLoopRunner(
+        tool_service=_service(tmp_path),
+        llm_client=FakeLlmClient([
+            _aggregate_tool_call(_aggregate_extra()),
+            final,
+        ]),
+        aggregate_handler=fake_aggregate_handler,
+    )
+
+    result = runner.run(document_id=_identity().document_id, query="多年度业绩")
+
+    assert result.failure is None
+    assert "年化收益率" not in result.answer
+    assert "扣费后收益率" not in result.answer
+    assert "R=A+B-C" not in result.answer
+    assert "annualized" not in result.answer
+    assert "fee-adjusted" not in result.answer
+
+
+def test_fake_llm_aggregate_multi_year_no_leakage(tmp_path: Path) -> None:
+    """输出不得泄漏 raw Docling JSON、本地路径、cache path 或 local_import_id。"""
+
+    fake_result = _fake_multi_year_result(
+        years=(2020, 2021, 2022, 2023, 2024),
+        missing=(2024,),
+    )
+
+    def fake_aggregate_handler(fund_code, requested_years, annual_report_documents, share_class):
+        return fake_result
+
+    final = FinalAnswer(
+        answer="多年度业绩聚合完成, 年度净值增长率 17.32%。",
+        citations=_citations_from_result(fake_result),
+        key_facts=("17.32%",),
+    )
+
+    runner = LlmToolLoopRunner(
+        tool_service=_service(tmp_path),
+        llm_client=FakeLlmClient([
+            _aggregate_tool_call(_aggregate_extra()),
+            final,
+        ]),
+        aggregate_handler=fake_aggregate_handler,
+    )
+
+    result = runner.run(document_id=_identity().document_id, query="多年度业绩")
     rendered = str(asdict(result))
 
     assert result.failure is None

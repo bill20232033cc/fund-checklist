@@ -950,6 +950,23 @@ Post-MVP 10J 裁决为 multi-year performance service-to-agent exposure contract
 - 后续实现测试建议放在 10K fake/injected Agent tool-loop：验证 Agent 调用 `aggregate_multi_year_annual_performance`，消费 `coverage_status=partial`，最终回答包含 covered/missing years 和 citations，且不泄漏 raw Docling JSON / local path / cache path，不输出年化收益、扣费后收益或投资判断。
 - 10J 不做 LLM 自然语言 query routing、repository 自动补齐、CLI 新入口、多 PDF 导入流程、报告生成、template chapter execution、`R=A+B-C`、年化收益率、扣费后收益率或投资判断。
 
+Post-MVP 10K 裁决为 multi-year performance fake/injected Agent tool-loop：
+
+- 10K 是 implementation slice，目标是在 fake/injected Agent tool-loop 中暴露受控工具 `aggregate_multi_year_annual_performance`，验证 Agent 能消费 10I `MultiYearAnnualPerformanceSeries`。
+- 10K 不接真实 LLM，不改 CLI 默认输出，不新增 `fund-checklist ask`、multi-year CLI 子命令或 CLI 参数。
+- 10K 工具名称固定为 `aggregate_multi_year_annual_performance`，不得新增别名。
+- 工具输入沿用 10I / 10J：`fund_code`、`requested_years`、`annual_report_documents[{year, document_id}]`、`share_class optional`。
+- Agent 不得自己执行自然语言 `近 5 年` 解析、repository 自动查找、自动导入 PDF、文件名猜年份或 document_id 字符串猜年份。
+- 工具输出只返回 10I 结构化 result：成功为 `series[]`，失败为 `failure`；tool 层不生成分析文本。
+- Agent 允许行为只限：调用受控工具；转述 DTO 字段；展示 `coverage_status`、`covered_years`、`missing_years`；附带 per-year / per-field table locator citation。
+- `coverage_status=partial` 时，final answer 必须同时出现 `covered_years` 和 `missing_years`；不得写成“近 5 年完整表现”。
+- final answer citations 必须来自具体 year / field 的 table locator；禁止只给 series-level citation、汇总 citation 或无字段来源 citation。
+- tool failure 时 Agent 必须 fail-closed，返回 `AgentRunResult.failure`；不得生成部分答案。
+- failure 语义沿用 10I / 10J：`identity_mismatch`、`not_found`、`schema_drift`、`unavailable`；10K 不新增 failure code。
+- 10K 禁止计算年化收益率、扣费后收益率、排名、打分、收益来源解释、`R=A+B-C`、投资结论、报告生成或补齐缺失年份。
+- 10K 测试只使用 fake/injected tool-loop，不接真实 provider，不联网，不读取真实 API key。
+- 10K 必须测试：partial coverage final answer includes covered_years and missing_years；complete coverage final answer does not invent missing_years；tool failure `not_found` -> `AgentRunResult.failure`；`identity_mismatch` -> `AgentRunResult.failure`；final answer includes per-year / per-field citations；final answer does not include annualized_return / fee-adjusted return / investment judgment；no raw Docling JSON / local path / cache path leakage。
+
 Post-MVP 11A 裁决为 performance disclosure locator，插入 10D 之前：
 
 - 11A 目标是定位业绩表现披露位置，不抽取结构化字段；10D performance return fields extraction 后置。
@@ -1131,12 +1148,12 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## 9. 已关闭裁决项
 
-MVP plan 已关闭。当前已完成到 Post-MVP Slice 10I；Slice 9F 因 keyword-level routing 无法证明 disclosure target success 被判定为 `BLOCKED_BY_DESIGN`；Slice 10A 已实现 Controlled disclosure target contract 并经 MiMo review `ACCEPTED`；Slice 10B 已实现 fee_rates reading locator 并经 MiMo review `ACCEPTED`；Slice 10C 已实现 fee_rates value extraction contract 并经 MiMo review `ACCEPTED`；Slice 11A 已实现 performance disclosure locator 并经 MiMo review `ACCEPTED`；Slice 11B 已实现 disclosure locator contract registry 并经 MiMo review `ACCEPTED`；Slice 10D 已实现 performance return fields extraction contract 并经 MiMo review `ACCEPTED`；Slice 10E 裁决年度业绩 deterministic source 选择 title-family matched performance comparison table；Slice 10F 已实现 annual performance table extraction 并经 MiMo review `ACCEPTED`；Slice 10G 已实现 annual excess return disclosed-field extraction 并经 MiMo review `ACCEPTED`；Slice 10H 已完成 multi-year annual performance source contract with bounded year coverage 并经 MiMo review `ACCEPTED`；Slice 10I 已实现 multi-year annual performance aggregation service 并经 MiMo review `ACCEPTED`；Slice 10J 已完成 docs-only multi-year performance service-to-agent exposure contract，不实现 tool-loop。
+MVP plan 已关闭。当前已完成到 Post-MVP Slice 10I；Slice 9F 因 keyword-level routing 无法证明 disclosure target success 被判定为 `BLOCKED_BY_DESIGN`；Slice 10A 已实现 Controlled disclosure target contract 并经 MiMo review `ACCEPTED`；Slice 10B 已实现 fee_rates reading locator 并经 MiMo review `ACCEPTED`；Slice 10C 已实现 fee_rates value extraction contract 并经 MiMo review `ACCEPTED`；Slice 11A 已实现 performance disclosure locator 并经 MiMo review `ACCEPTED`；Slice 11B 已实现 disclosure locator contract registry 并经 MiMo review `ACCEPTED`；Slice 10D 已实现 performance return fields extraction contract 并经 MiMo review `ACCEPTED`；Slice 10E 裁决年度业绩 deterministic source 选择 title-family matched performance comparison table；Slice 10F 已实现 annual performance table extraction 并经 MiMo review `ACCEPTED`；Slice 10G 已实现 annual excess return disclosed-field extraction 并经 MiMo review `ACCEPTED`；Slice 10H 已完成 multi-year annual performance source contract with bounded year coverage 并经 MiMo review `ACCEPTED`；Slice 10I 已实现 multi-year annual performance aggregation service 并经 MiMo review `ACCEPTED`；Slice 10J 已完成 docs-only multi-year performance service-to-agent exposure contract；Slice 10K 已实现 multi-year performance fake/injected Agent tool-loop 并经 ds review `ACCEPTED`。
 
 ## 10. 下一步最小可验证问题
 
 下一步只应验证一个问题：
 
 ```text
-10J docs-only contract 已完成。下一步最小实现 slice 可裁决为 10K multi-year performance fake/injected Agent tool-loop：实现受控 tool `aggregate_multi_year_annual_performance` 的 fake/injected Agent 消费测试，验证 coverage metadata、missing years 和 per-year citations 在最终 plain answer 中保留。不得改 CLI 默认输出，不做自然语言 `近 5 年` 解析、repository 自动补齐、报告生成、年化收益率、扣费后收益率、`R=A+B-C` 或投资判断。
+10K 已完成。下一步尚未裁决。若继续收益链路，可考虑 10L multi-year performance CLI integration 或其它后续 slice。不得改 CLI 默认输出，不接真实 LLM，不做自然语言 `近 5 年` 解析、repository 自动补齐、报告生成、年化收益率、扣费后收益率、`R=A+B-C` 或投资判断。
 ```

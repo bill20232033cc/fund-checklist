@@ -26,7 +26,7 @@ from fund_agent.fund.document_tools.models import (
 from fund_agent.fund.document_tools.service import FundDocumentToolService
 
 ControlledToolOutput: TypeAlias = (
-    tuple[SearchResult, ...] | SectionContent | tuple[TableSummary, ...] | TableContent | ExcerptContent
+    "tuple[SearchResult, ...] | SectionContent | tuple[TableSummary, ...] | TableContent | ExcerptContent | AggregateMultiYearAnnualPerformanceResult"
 )
 LlmStep: TypeAlias = "ToolCall | FinalAnswer"
 FakeStepFactory: TypeAlias = Callable[[tuple["ToolResult", ...]], LlmStep]
@@ -38,6 +38,7 @@ ALLOWED_LLM_TOOL_NAMES: frozenset[ToolName] = frozenset(
         ToolName.LIST_TABLES,
         ToolName.READ_TABLE,
         ToolName.GET_EXCERPT,
+        ToolName.AGGREGATE_MULTI_YEAR_ANNUAL_PERFORMANCE,
     }
 )
 _MAX_LLM_STEPS = 8
@@ -104,6 +105,7 @@ class ToolCall:
     max_results: int | None = None
     max_chars: int | None = None
     max_rows: int | None = None
+    extra: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -235,12 +237,14 @@ class LlmToolLoopRunner:
         tool_service: FundDocumentToolService,
         llm_client: LlmClientProtocol,
         max_steps: int = _MAX_LLM_STEPS,
+        aggregate_handler: Callable[..., AggregateMultiYearAnnualPerformanceResult] | None = None,
     ) -> None:
         """初始化受控 LLM tool loop runner。"""
 
         self._tool_service = tool_service
         self._llm_client = llm_client
         self._max_steps = max_steps
+        self._aggregate_handler = aggregate_handler
 
     def run(self, *, document_id: str, query: str) -> AgentRunResult:
         """运行 injected LLM 工具调用循环。
@@ -291,26 +295,55 @@ class LlmToolLoopRunner:
     ) -> ToolResult | ToolFailure:
         """校验并执行单次 LLM 工具请求。"""
 
+        from fund_agent.service.reading_service import AggregateMultiYearAnnualPerformanceResult
+
         tool_name = _coerce_tool_name(call.tool_name)
         trace_arguments = _trace_arguments(call)
         if tool_name is None or tool_name not in ALLOWED_LLM_TOOL_NAMES:
             trace.append(_trace_entry(call.tool_name, trace_arguments, "failure", FailureCode.UNAVAILABLE))
             return ToolFailure(code=FailureCode.UNAVAILABLE, message=_TOOL_NOT_ALLOWED_MESSAGE)
-        if call.document_id != expected_document_id:
+        if (
+            tool_name is not ToolName.AGGREGATE_MULTI_YEAR_ANNUAL_PERFORMANCE
+            and call.document_id != expected_document_id
+        ):
             trace.append(_trace_entry(tool_name, trace_arguments, "failure", FailureCode.UNAVAILABLE))
             return ToolFailure(code=FailureCode.UNAVAILABLE, message=_TOOL_NOT_ALLOWED_MESSAGE)
 
-        result = self._call_allowed_tool(tool_name, call)
+        result = self._call_allowed_tool(tool_name, call, aggregate_handler=self._aggregate_handler)
         if isinstance(result, ToolFailure):
             trace.append(_trace_entry(tool_name, trace_arguments, "failure", result.code))
             return result
+        if isinstance(result, AggregateMultiYearAnnualPerformanceResult) and result.failure is not None:
+            trace.append(_trace_entry(tool_name, trace_arguments, "failure", result.failure.code))
+            return ToolFailure(code=result.failure.code, message=result.failure.message)
 
         trace.append(_trace_entry(tool_name, trace_arguments, "success", None))
         return _tool_result_from_output(tool_name, result)
 
-    def _call_allowed_tool(self, tool_name: ToolName, call: ToolCall) -> ControlledToolOutput | ToolFailure:
+    def _call_allowed_tool(
+        self,
+        tool_name: ToolName,
+        call: ToolCall,
+        *,
+        aggregate_handler: Callable[..., AggregateMultiYearAnnualPerformanceResult] | None = None,
+    ) -> ControlledToolOutput | ToolFailure:
         """按允许工具名分发到 FundDocumentToolService。"""
 
+        if tool_name is ToolName.AGGREGATE_MULTI_YEAR_ANNUAL_PERFORMANCE:
+            if aggregate_handler is None:
+                return ToolFailure(code=FailureCode.UNAVAILABLE, message=_UNAVAILABLE_MESSAGE)
+            extra = call.extra or {}
+            fund_code = extra.get("fund_code")
+            requested_years = extra.get("requested_years")
+            annual_report_documents = extra.get("annual_report_documents")
+            if fund_code is None or requested_years is None or annual_report_documents is None:
+                return ToolFailure(code=FailureCode.UNAVAILABLE, message=_TOOL_ARGUMENT_MESSAGE)
+            return aggregate_handler(
+                fund_code,
+                requested_years,
+                annual_report_documents,
+                extra.get("share_class"),
+            )
         if tool_name is ToolName.SEARCH_DOCUMENT:
             if call.query is None:
                 return ToolFailure(code=FailureCode.UNAVAILABLE, message=_TOOL_ARGUMENT_MESSAGE)
@@ -390,6 +423,15 @@ def _final_result(
 def _tool_result_from_output(tool_name: ToolName, result: ControlledToolOutput) -> ToolResult:
     """从 public tool result 中提取 citations 和 evidence_text。"""
 
+    from fund_agent.service.reading_service import AggregateMultiYearAnnualPerformanceResult
+
+    if isinstance(result, AggregateMultiYearAnnualPerformanceResult):
+        return ToolResult(
+            tool_name=tool_name,
+            result=result,
+            citations=_aggregate_citations(result),
+            evidence_text=_aggregate_evidence_text(result),
+        )
     if isinstance(result, tuple):
         if result and isinstance(result[0], SearchResult):
             search_results = tuple(item for item in result if isinstance(item, SearchResult))
@@ -469,6 +511,10 @@ def _trace_arguments(call: ToolCall) -> dict[str, ToolArgumentValue]:
             arguments["locator_section_ref"] = call.locator.section_ref
         if call.locator.table_ref is not None:
             arguments["locator_table_ref"] = call.locator.table_ref
+    if call.extra is not None:
+        for key, value in call.extra.items():
+            if isinstance(value, (str, int)):
+                arguments[key] = value
     return arguments
 
 
@@ -525,3 +571,37 @@ def _public_citation(citation: Citation) -> Citation:
         bbox=None,
     )
     return replace(citation, locator=public_locator)
+
+
+def _aggregate_citations(
+    result: AggregateMultiYearAnnualPerformanceResult,  # noqa: F821
+) -> tuple[Citation, ...]:
+    """从 AggregateMultiYearAnnualPerformanceResult 提取所有字段级 table citations。"""
+
+    return tuple(
+        field_citation.citation
+        for series in result.series
+        for field_citation in series.citations
+    )
+
+
+def _aggregate_evidence_text(
+    result: AggregateMultiYearAnnualPerformanceResult,  # noqa: F821
+) -> str:
+    """把 AggregateMultiYearAnnualPerformanceResult 转换为有界证据文本。"""
+
+    lines: list[str] = []
+    for series in result.series:
+        lines.append(f"fund_code={series.fund_code}")
+        lines.append(f"coverage_status={series.coverage_status}")
+        lines.append(f"covered_years={','.join(str(y) for y in series.covered_years)}")
+        if series.missing_years:
+            lines.append(f"missing_years={','.join(str(y) for y in series.missing_years)}")
+        for row in series.rows:
+            lines.append(
+                f"year={row.year} | "
+                f"annual_nav_growth_rate={row.annual_nav_growth_rate} | "
+                f"annual_benchmark_return_rate={row.annual_benchmark_return_rate} | "
+                f"annual_excess_return={row.annual_excess_return}"
+            )
+    return "\n".join(lines)
