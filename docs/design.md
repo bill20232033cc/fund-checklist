@@ -1148,12 +1148,21 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## 9. 已关闭裁决项
 
-MVP plan 已关闭。当前已完成到 Post-MVP Slice 10I；Slice 9F 因 keyword-level routing 无法证明 disclosure target success 被判定为 `BLOCKED_BY_DESIGN`；Slice 10A 已实现 Controlled disclosure target contract 并经 MiMo review `ACCEPTED`；Slice 10B 已实现 fee_rates reading locator 并经 MiMo review `ACCEPTED`；Slice 10C 已实现 fee_rates value extraction contract 并经 MiMo review `ACCEPTED`；Slice 11A 已实现 performance disclosure locator 并经 MiMo review `ACCEPTED`；Slice 11B 已实现 disclosure locator contract registry 并经 MiMo review `ACCEPTED`；Slice 10D 已实现 performance return fields extraction contract 并经 MiMo review `ACCEPTED`；Slice 10E 裁决年度业绩 deterministic source 选择 title-family matched performance comparison table；Slice 10F 已实现 annual performance table extraction 并经 MiMo review `ACCEPTED`；Slice 10G 已实现 annual excess return disclosed-field extraction 并经 MiMo review `ACCEPTED`；Slice 10H 已完成 multi-year annual performance source contract with bounded year coverage 并经 MiMo review `ACCEPTED`；Slice 10I 已实现 multi-year annual performance aggregation service 并经 MiMo review `ACCEPTED`；Slice 10J 已完成 docs-only multi-year performance service-to-agent exposure contract；Slice 10K 已实现 multi-year performance fake/injected Agent tool-loop 并经 ds review `ACCEPTED`。
+MVP plan 已关闭。当前已完成到 Post-MVP Slice 10L；Slice 9F 因 keyword-level routing 无法证明 disclosure target success 被判定为 `BLOCKED_BY_DESIGN`；Slice 10A 已实现 Controlled disclosure target contract 并经 MiMo review `ACCEPTED`；Slice 10B 已实现 fee_rates reading locator 并经 MiMo review `ACCEPTED`；Slice 10C 已实现 fee_rates value extraction contract 并经 MiMo review `ACCEPTED`；Slice 11A 已实现 performance disclosure locator 并经 MiMo review `ACCEPTED`；Slice 11B 已实现 disclosure locator contract registry 并经 MiMo review `ACCEPTED`；Slice 10D 已实现 performance return fields extraction contract 并经 MiMo review `ACCEPTED`；Slice 10E 裁决年度业绩 deterministic source 选择 title-family matched performance comparison table；Slice 10F 已实现 annual performance table extraction 并经 MiMo review `ACCEPTED`；Slice 10G 已实现 annual excess return disclosed-field extraction 并经 MiMo review `ACCEPTED`；Slice 10H 已完成 multi-year annual performance source contract with bounded year coverage 并经 MiMo review `ACCEPTED`；Slice 10I 已实现 multi-year annual performance aggregation service 并经 MiMo review `ACCEPTED`；Slice 10J 已完成 docs-only multi-year performance service-to-agent exposure contract；Slice 10K 已实现 multi-year performance fake/injected Agent tool-loop 并经 ds review `ACCEPTED`；Slice 10L 已实现 multi-year performance CLI integration 并经 MiMo review `ACCEPTED`。
+
+Post-MVP 10L 裁决为 multi-year performance CLI integration：
+- 新增独立子命令 `fund-checklist multi-year`，不扩展现有 `read` 子命令。
+- catalog 模式：CLI 按 `fund_code` + `requested_years` 从已有 catalog 中查找已导入年报的 `document_id`；不做目录扫描、不做自动导入。
+- 给 `FilesystemReportRepository` 新增 `list_reports()` 方法，返回 catalog 中所有 completed report 的安全摘要。
+- 输出格式为 JSON：完整 `MultiYearAnnualPerformanceSeries` DTO dump。
+- `coverage_status=partial` exit code 为 0；少于 3 年匹配 exit code 为 2。
+- 暂不新增 `--share-class` CLI 参数；批量 PDF 导入另开 10M slice。
+- allowed write set：`fund_agent/cli/main.py`、`fund_agent/fund/document_tools/persistent_repository.py`、测试文件、`docs/implementation-control.md`、`docs/design.md`。
 
 ## 10. 下一步最小可验证问题
 
 下一步只应验证一个问题：
 
 ```text
-10K 已完成。下一步尚未裁决。若继续收益链路，可考虑 10L multi-year performance CLI integration 或其它后续 slice。不得改 CLI 默认输出，不接真实 LLM，不做自然语言 `近 5 年` 解析、repository 自动补齐、报告生成、年化收益率、扣费后收益率、`R=A+B-C` 或投资判断。
+10L 已完成。下一步尚未裁决。若继续收益链路，可考虑 10M 批量 PDF 导入或其它后续 slice。不得改 CLI 默认输出，不接真实 LLM，不做自然语言 `近 5 年` 解析、repository 自动补齐、报告生成、年化收益率、扣费后收益率、`R=A+B-C` 或投资判断。
 ```

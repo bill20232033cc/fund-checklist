@@ -3,13 +3,25 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from dataclasses import asdict
 from pathlib import Path
 from typing import Sequence, TextIO
 
+from fund_agent.fund.document_tools.constants import FailureCode
 from fund_agent.fund.document_tools.errors import DocumentToolError
 from fund_agent.fund.document_tools.models import ToolFailure
-from fund_agent.service import FundReadingService, ReadLocalReportRequest
+from fund_agent.fund.document_tools.persistent_repository import (
+    CATALOG_FILENAME,
+    FilesystemReportRepository,
+)
+from fund_agent.service import (
+    AggregateMultiYearAnnualPerformanceRequest,
+    AnnualReportDocument,
+    FundReadingService,
+    ReadLocalReportRequest,
+)
 
 SUCCESS_EXIT_CODE = 0
 UNEXPECTED_FAILURE_EXIT_CODE = 1
@@ -60,6 +72,8 @@ def run_cli(
     try:
         if args.command == "read":
             return _run_read_command(args, stdout=stdout, stderr=stderr)
+        if args.command == "multi-year":
+            return _run_multi_year_command(args, stdout=stdout, stderr=stderr)
     except DocumentToolError as exc:
         _write_classified_failure(ToolFailure(code=exc.code, message=exc.message), stderr)
         return CLASSIFIED_FAILURE_EXIT_CODE
@@ -72,7 +86,7 @@ def run_cli(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """构造只包含 read 子命令的 argparse parser。
+    """构造包含 read 和 multi-year 子命令的 argparse parser。
 
     参数:
         无。
@@ -95,6 +109,11 @@ def build_parser() -> argparse.ArgumentParser:
     read_parser.add_argument("--query", default=DEFAULT_QUERY)
     read_parser.add_argument("--share-class")
     read_parser.add_argument("--work-dir", default=Path(DEFAULT_WORK_DIR), type=Path)
+
+    multi_year_parser = subparsers.add_parser("multi-year")
+    multi_year_parser.add_argument("--fund-code", required=True)
+    multi_year_parser.add_argument("--years", required=True)
+    multi_year_parser.add_argument("--work-dir", default=Path(DEFAULT_WORK_DIR), type=Path)
     return parser
 
 
@@ -131,6 +150,81 @@ def _run_read_command(args: argparse.Namespace, *, stdout: TextIO, stderr: TextI
         return CLASSIFIED_FAILURE_EXIT_CODE
 
     _write_success_output(agent_result, stdout)
+    return SUCCESS_EXIT_CODE
+
+
+def _parse_years(years_str: str) -> tuple[int, ...]:
+    """解析逗号分隔的年度字符串为升序元组。
+
+    参数:
+        years_str: 逗号分隔的年度字符串，如 "2020,2021,2022,2023,2024"。
+
+    返回:
+        升序排列的年度元组。
+
+    异常:
+        ValueError: 年度格式不合法时抛出。
+    """
+
+    years = tuple(int(y.strip()) for y in years_str.split(","))
+    return tuple(sorted(years))
+
+
+def _run_multi_year_command(args: argparse.Namespace, *, stdout: TextIO, stderr: TextIO) -> int:
+    """从 catalog 查找已导入年报并聚合多年度业绩。
+
+    参数:
+        args: argparse 解析出的 multi-year 参数。
+        stdout: 成功输出流（JSON）。
+        stderr: 失败输出流。
+
+    返回:
+        成功返回 0（含 partial coverage）；not_found 返回 2。
+
+    异常:
+        DocumentToolError: catalog 不可用时抛出已分类失败。
+    """
+
+    work_dir = Path(args.work_dir)
+    requested_years = _parse_years(args.years)
+
+    repository = FilesystemReportRepository(
+        catalog_path=work_dir / CATALOG_FILENAME,
+        blob_root=work_dir / "pdf_blobs",
+        docling_json_root=work_dir / "docling_json",
+    )
+    catalog_reports = repository.list_reports()
+
+    matching_docs: list[AnnualReportDocument] = []
+    for report in catalog_reports:
+        if report.get("fund_code") == args.fund_code and report.get("year") in requested_years:
+            matching_docs.append(AnnualReportDocument(
+                year=int(report["year"]),
+                document_id=str(report["document_id"]),
+            ))
+
+    if len(matching_docs) < 3:
+        failure = ToolFailure(code=FailureCode.NOT_FOUND, message=f"catalog 中匹配 {args.fund_code} 的年报不足 3 年")
+        _write_classified_failure(failure, stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+    service = FundReadingService()
+    result = service.aggregate_multi_year_annual_performance(
+        AggregateMultiYearAnnualPerformanceRequest(
+            fund_code=args.fund_code,
+            requested_years=requested_years,
+            annual_report_documents=tuple(matching_docs),
+            work_dir=work_dir,
+        )
+    )
+    if result.failure is not None:
+        _write_classified_failure(result.failure, stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+    output = {
+        "series": [asdict(s) for s in result.series],
+    }
+    print(json.dumps(output, ensure_ascii=False, indent=2), file=stdout)
     return SUCCESS_EXIT_CODE
 
 

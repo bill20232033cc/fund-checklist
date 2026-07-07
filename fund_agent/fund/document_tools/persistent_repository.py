@@ -121,6 +121,42 @@ class FilesystemReportRepository:
             raise DocumentToolError(FailureCode.UNAVAILABLE, "Docling JSON 暂不可用")
         return DoclingDocumentStore(identity=identity, json_path=json_path)
 
+    def list_reports(self) -> tuple[dict[str, object], ...]:
+        """返回 catalog 中所有 completed report 的安全摘要，不加载 Docling store。
+
+        参数:
+            无。
+
+        返回:
+            每个元素包含 document_id、fund_code、fund_name、year、report_type、
+            share_class；不含本地路径、local_import_id 或 raw payload。catalog
+            不存在时返回空元组。
+
+        异常:
+            DocumentToolError: catalog 不可读或 schema 不兼容时抛出稳定失败。
+        """
+
+        if not self._catalog_path.exists():
+            return ()
+        catalog = self._read_catalog()
+        reports = _reports_from_catalog(catalog)
+        summaries: list[dict[str, object]] = []
+        for document_id, record in reports.items():
+            if not isinstance(record, dict):
+                continue
+            identity_payload = record.get("identity")
+            if not isinstance(identity_payload, dict):
+                continue
+            summaries.append({
+                "document_id": str(document_id),
+                "fund_code": str(identity_payload.get("fund_code", "")),
+                "fund_name": str(identity_payload.get("fund_name", "")),
+                "year": identity_payload.get("year"),
+                "report_type": str(identity_payload.get("report_type", "")),
+                "share_class": identity_payload.get("share_class"),
+            })
+        return tuple(summaries)
+
     def _read_catalog(self) -> dict[str, object]:
         """读取并校验 catalog 顶层结构。"""
 

@@ -47,3 +47,7 @@ Slice 6 failure mapping：
 - blob fingerprint mismatch -> `integrity_error`
 
 Slice 6 不做 SQLite、schema migration、concurrent write locking、repair/rebuild/reconvert、downloader、batch queue、delete/update lifecycle、true LLM 或 release readiness。
+
+## Post-MVP Slice 10L Repository list_reports
+
+`FilesystemReportRepository.list_reports()` 返回 catalog 中所有 completed report 的安全摘要（`document_id`、`fund_code`、`fund_name`、`year`、`report_type`、`share_class`），不加载 Docling store。catalog 不存在时返回空元组。CLI `multi-year` 子命令使用此方法按 fund_code + year 查找已导入年报。

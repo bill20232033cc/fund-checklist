@@ -262,3 +262,80 @@ def test_public_outputs_do_not_leak_raw_payload_paths_or_local_import_id(tmp_pat
     assert str(tmp_path) not in public_output
     assert "local_import_id" not in public_output
     assert "repository-restored" not in public_output
+
+
+def test_list_reports_returns_catalog_summaries_without_loading_stores(tmp_path: Path) -> None:
+    """list_reports 必须返回 catalog 中所有 completed report 的安全摘要，不加载 Docling store。"""
+
+    repository, document_id = _import_and_record(tmp_path)
+    summaries = repository.list_reports()
+
+    assert len(summaries) == 1
+    summary = summaries[0]
+    assert summary["document_id"] == document_id
+    assert summary["fund_code"] == "004393"
+    assert summary["year"] == 2024
+    assert summary["report_type"] == "annual_report"
+    assert "fund_name" in summary
+    assert str(tmp_path) not in repr(summary)
+    assert "local_import_id" not in repr(summary)
+    assert ".docling.json" not in repr(summary)
+
+
+def test_list_reports_returns_empty_tuple_when_catalog_missing(tmp_path: Path) -> None:
+    """catalog 不存在时 list_reports 必须返回空元组。"""
+
+    repository = _repository(tmp_path)
+    summaries = repository.list_reports()
+
+    assert summaries == ()
+
+
+def test_list_reports_returns_all_entries(tmp_path: Path) -> None:
+    """list_reports 必须返回 catalog 中所有条目。"""
+
+    work_dir = tmp_path / "work"
+    catalog_path = work_dir / CATALOG_FILENAME
+    catalog_path.parent.mkdir(parents=True, exist_ok=True)
+    catalog_path.write_text(json.dumps({
+        "schema_version": 1,
+        "reports": {
+            "doc-2023": {
+                "schema_version": 1,
+                "document_id": "doc-2023",
+                "identity": {
+                    "fund_code": "004393",
+                    "fund_name": "安信企业价值优选",
+                    "year": 2023,
+                    "report_type": "annual_report",
+                    "source_kind": "local_pdf",
+                    "content_fingerprint": "abc123",
+                    "document_id": "doc-2023",
+                },
+                "stored_blob_ref": "blob",
+                "docling_json_ref": "docling_json:doc-2023",
+            },
+            "doc-2024": {
+                "schema_version": 1,
+                "document_id": "doc-2024",
+                "identity": {
+                    "fund_code": "004393",
+                    "fund_name": "安信企业价值优选",
+                    "year": 2024,
+                    "report_type": "annual_report",
+                    "source_kind": "local_pdf",
+                    "content_fingerprint": "def456",
+                    "document_id": "doc-2024",
+                },
+                "stored_blob_ref": "blob",
+                "docling_json_ref": "docling_json:doc-2024",
+            },
+        },
+    }, ensure_ascii=False), encoding="utf-8")
+
+    repository = _repository(tmp_path)
+    summaries = repository.list_reports()
+
+    assert len(summaries) == 2
+    years = {s["year"] for s in summaries}
+    assert years == {2023, 2024}

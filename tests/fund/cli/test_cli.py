@@ -615,3 +615,196 @@ def test_cli_maps_service_document_error_to_exit_2(monkeypatch, tmp_path: Path) 
     assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
     assert stdout == ""
     assert "failure_code=unavailable" in stderr
+
+
+def _write_catalog(work_dir: Path, entries: list[dict[str, object]]) -> None:
+    """写入包含指定 entries 的测试 catalog。"""
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    reports = {}
+    for entry in entries:
+        doc_id = entry["document_id"]
+        reports[doc_id] = {
+            "schema_version": 1,
+            "document_id": doc_id,
+            "identity": {
+                "fund_code": entry.get("fund_code", "004393"),
+                "fund_name": entry.get("fund_name", "安信企业价值优选"),
+                "year": entry["year"],
+                "report_type": entry.get("report_type", "annual_report"),
+                "source_kind": "local_pdf",
+                "content_fingerprint": f"fp-{doc_id}",
+                "document_id": doc_id,
+            },
+            "stored_blob_ref": f"blob-{doc_id}",
+            "docling_json_ref": f"docling_json:{doc_id}",
+        }
+    catalog_path = work_dir / CATALOG_FILENAME
+    catalog_path.write_text(json.dumps({
+        "schema_version": 1,
+        "reports": reports,
+    }, ensure_ascii=False), encoding="utf-8")
+
+
+def test_multi_year_parser_accepts_valid_args() -> None:
+    """multi-year 子命令 parser 必须接受合法参数。"""
+
+    parser = build_parser()
+    args = parser.parse_args(["multi-year", "--fund-code", "004393", "--years", "2022,2023,2024"])
+
+    assert args.command == "multi-year"
+    assert args.fund_code == "004393"
+    assert args.years == "2022,2023,2024"
+
+
+def test_multi_year_exits_2_when_fewer_than_3_matching_years(tmp_path: Path) -> None:
+    """catalog 中匹配年报不足 3 年时必须返回 exit 2。"""
+
+    work_dir = tmp_path / "work"
+    _write_catalog(work_dir, [
+        {"document_id": "doc-2024", "year": 2024, "fund_code": "004393"},
+    ])
+
+    exit_code, stdout, stderr = _run([
+        "multi-year",
+        "--fund-code", "004393",
+        "--years", "2022,2023,2024",
+        "--work-dir", str(work_dir),
+    ])
+
+    assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
+    assert stdout == ""
+    assert "not_found" in stderr
+
+
+def test_multi_year_exits_2_when_catalog_empty(tmp_path: Path) -> None:
+    """空 catalog 时 multi-year 必须返回 exit 2。"""
+
+    work_dir = tmp_path / "work"
+    _write_catalog(work_dir, [])
+
+    exit_code, stdout, stderr = _run([
+        "multi-year",
+        "--fund-code", "004393",
+        "--years", "2022,2023,2024",
+        "--work-dir", str(work_dir),
+    ])
+
+    assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
+    assert stdout == ""
+    assert "not_found" in stderr
+
+
+def test_multi_year_exits_2_when_fund_code_mismatch(tmp_path: Path) -> None:
+    """fund_code 不匹配时必须返回 exit 2。"""
+
+    work_dir = tmp_path / "work"
+    _write_catalog(work_dir, [
+        {"document_id": "doc-2022", "year": 2022, "fund_code": "999999"},
+        {"document_id": "doc-2023", "year": 2023, "fund_code": "999999"},
+        {"document_id": "doc-2024", "year": 2024, "fund_code": "999999"},
+    ])
+
+    exit_code, stdout, stderr = _run([
+        "multi-year",
+        "--fund-code", "004393",
+        "--years", "2022,2023,2024",
+        "--work-dir", str(work_dir),
+    ])
+
+    assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
+    assert stdout == ""
+    assert "not_found" in stderr
+
+
+def test_multi_year_json_output_on_success(monkeypatch, tmp_path: Path) -> None:
+    """multi-year 成功时必须输出 JSON 格式的 series。"""
+
+    from fund_agent.fund.document_tools.models import Citation, Locator
+    from fund_agent.service import (
+        AggregateMultiYearAnnualPerformanceResult,
+        MultiYearAnnualPerformanceSeries,
+        MultiYearAnnualPerformanceRow,
+        AnnualPerformanceFieldCitation,
+    )
+
+    _table_locator = Locator(
+        document_id="doc-2024",
+        locator_kind=LocatorKind.TABLE,
+        section_ref=None,
+        table_ref="table-0010",
+        page_no=6,
+        page_range=None,
+        internal_ref=None,
+        internal_ref_available=False,
+    )
+    _table_citation = Citation(
+        document_id="doc-2024",
+        fund_code="004393",
+        fund_name="安信企业价值优选",
+        year=2024,
+        report_type="annual_report",
+        locator=_table_locator,
+    )
+
+    fake_series = MultiYearAnnualPerformanceSeries(
+        fund_code="004393",
+        requested_years=(2022, 2023, 2024),
+        covered_years=(2022, 2023, 2024),
+        missing_years=(),
+        coverage_status="complete",
+        coverage_count=3,
+        minimum_required_count=3,
+        share_class_scope="A",
+        rows=(
+            MultiYearAnnualPerformanceRow(
+                year=2024,
+                annual_nav_growth_rate="17.32%",
+                annual_benchmark_return_rate="14.45%",
+                annual_excess_return="2.87%",
+                citations=(
+                    AnnualPerformanceFieldCitation(
+                        field_name="annual_nav_growth_rate",
+                        citation=_table_citation,
+                    ),
+                ),
+            ),
+        ),
+        citations=(
+            AnnualPerformanceFieldCitation(
+                field_name="annual_nav_growth_rate",
+                citation=_table_citation,
+            ),
+        ),
+    )
+
+    class _FakeService:
+        def aggregate_multi_year_annual_performance(self, request):
+            return AggregateMultiYearAnnualPerformanceResult(
+                series=(fake_series,),
+                failure=None,
+            )
+
+    monkeypatch.setattr(cli_module, "FundReadingService", _FakeService)
+
+    work_dir = tmp_path / "work"
+    _write_catalog(work_dir, [
+        {"document_id": "doc-2022", "year": 2022, "fund_code": "004393"},
+        {"document_id": "doc-2023", "year": 2023, "fund_code": "004393"},
+        {"document_id": "doc-2024", "year": 2024, "fund_code": "004393"},
+    ])
+
+    exit_code, stdout, stderr = _run([
+        "multi-year",
+        "--fund-code", "004393",
+        "--years", "2022,2023,2024",
+        "--work-dir", str(work_dir),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE
+    assert stderr == ""
+    output = json.loads(stdout)
+    assert "series" in output
+    assert len(output["series"]) == 1
+    assert output["series"][0]["fund_code"] == "004393"
+    assert output["series"][0]["coverage_status"] == "complete"

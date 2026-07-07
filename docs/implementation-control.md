@@ -1,9 +1,9 @@
 # fund-checklist implementation-control
 
 更新时间：2026-07-07
-当前阶段：`POST_MVP_SLICE_10K_ACCEPTED`
+当前阶段：`POST_MVP_SLICE_10L_ACCEPTED`
 当前角色：control / CIC-lite controller
-当前目标：Slice 10K multi-year performance fake/injected Agent tool-loop 已实现并经 ds review `ACCEPTED`。不得扩成 gateflow / phaseflow / release-readiness，不新增 plan artifact，不进入 batch benchmark、开放语义理解、自动分词、embedding、LLM intent、template contract execution、chapter contract execution、calculation framework、`fund-checklist ask`、UI、自动报告或投资判断。
+当前目标：Slice 10L multi-year performance CLI integration 已实现并经 MiMo review `ACCEPTED`。不得扩成 gateflow / phaseflow / release-readiness，不新增 plan artifact，不进入 batch benchmark、开放语义理解、自动分词、embedding、LLM intent、template contract execution、chapter contract execution、calculation framework、`fund-checklist ask`、UI、自动报告或投资判断。
 
 ## 当前事实
 
@@ -435,6 +435,18 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
   - `费用`: exit code `0`；命中 `基金管理费`、`基金托管费`、`销售服务费`；Citations / Trace 存在；CLI 默认输出不包含 `routing_trace`。
   - `净值增长率`: exit code `0`；命中 `基金份额净值增长率及其与同期业绩比较基准收益率的比较`；Citations / Trace / table citation 存在；未输出结构化字段 DTO。
 - 11B remaining blocking risk: none reported。
+- Post-MVP 10L 裁决为 multi-year performance CLI integration。
+- 10L 新增独立子命令 `fund-checklist multi-year`，不扩展现有 `read` 子命令。
+- 10L 输入方式为 catalog 模式：CLI 按 `fund_code` + `requested_years` 从已有 catalog 中查找已导入年报的 `document_id`；不做目录扫描、不做自动导入、不做文件名猜年份。
+- 10L 批量 PDF 导入另开 10M slice；10L 只查询已有 catalog。
+- 10L 给 `FilesystemReportRepository` 新增 `list_reports()` 方法，返回 catalog 中所有 completed report 的安全摘要（含 `fund_code`、`year`、`document_id`）；CLI 用此方法做 fund_code + year 匹配。
+- 10L 输出格式为 JSON：完整 `MultiYearAnnualPerformanceSeries` DTO dump，含 `coverage_status`、`covered_years`、`missing_years`、`rows`、per-year per-field citations。
+- `coverage_status=partial`（3-4 年）exit code 为 0；少于 3 年匹配或 `not_found` exit code 为 2。
+- 10L 暂不新增 `--share-class` CLI 参数；默认返回所有可识别 share class。
+- 10L 最低年度要求为 3 年（沿用 10H/10I `minimum_complete_years=3`）。
+- 10L allowed write set：`fund_agent/cli/main.py`、`fund_agent/fund/document_tools/persistent_repository.py`、测试文件、`docs/implementation-control.md`、`docs/design.md`。
+- 10L 不改 `read` 子命令默认输出格式，不接真实 LLM，不做自然语言 `近 5 年` 解析，不做 repository 自动补齐，不改 Service / Host / Agent 层核心逻辑。
+- 10L smoke 测试使用 fake catalog entries 构造多年度场景；真实 CLI smoke 需要至少 3 份年报样本。
 
 ## CIC-lite Rules
 
@@ -451,7 +463,7 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## Next Action
 
-10K 已完成并经 ds review `ACCEPTED`。下一步尚未裁决。若继续收益链路，可考虑 10L multi-year performance CLI integration 或其它后续 slice。不得改 CLI 默认输出，不接真实 LLM，不做自然语言 `近 5 年` 解析、repository 自动补齐、报告生成、年化收益率、扣费后收益率、`R=A+B-C` 或投资判断。
+10L 已完成并经 MiMo review `ACCEPTED`。下一步尚未裁决。若继续收益链路，可考虑 10M 批量 PDF 导入或其它后续 slice。不得改 CLI 默认输出，不接真实 LLM，不做自然语言 `近 5 年` 解析、repository 自动补齐、报告生成、年化收益率、扣费后收益率、`R=A+B-C` 或投资判断。
 
 禁止事项：
 
@@ -548,6 +560,7 @@ uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值
 10K. multi-year performance fake/injected Agent tool-loop：已 accepted；在 fake/injected Agent tool-loop 中暴露 `aggregate_multi_year_annual_performance`，通过 `aggregate_handler` 注入回调调用 10I Service；`ToolCall.extra` 携带 tool-specific 参数；failure 时 `AgentRunResult.failure`；163 passed, 0 failures；不改 CLI，不接真实 LLM，不做自然语言解析或报告生成。
 11A. performance disclosure locator：已 accepted；定位 `基金份额净值增长率及其与同期业绩比较基准收益率的比较` / `基金净值表现` 披露，返回 section/table citation 和原始表格片段；不抽值、不计算。
 11B. disclosure locator contract registry：已 accepted；把既有 controlled disclosure profiles 收敛为 Service 内部 locator contract registry；不新增披露对象，不抽值、不计算、不改 public tool / CLI contract。
+10L. multi-year performance CLI integration：已 accepted；新增独立子命令 `fund-checklist multi-year`，给 Repository 新增 `list_reports()` 方法，从 catalog 按 fund_code + year 查找已导入年报，调用 10I Service 聚合多年度收益，JSON 格式输出；批量导入另开 10M；不改 Service / Host / Agent 核心逻辑。
 
 ## MVP Acceptance Matrix
 
@@ -901,4 +914,7 @@ Slice 8B git diff --check: passed
 Slice 8C default targeted: 43 passed, 1 skipped
 Slice 8C review: MiMo ACCEPTED
 Slice 8C git diff --check: passed
+Slice 10L targeted: 8 passed
+Slice 10L review: MiMo ACCEPTED
+Slice 10L git diff --check: passed
 ```
