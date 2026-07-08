@@ -1,6 +1,6 @@
 # fund-checklist
 
-基金年报阅读工具层 MVP。
+基金年报阅读工具层。
 
 当前成功路径：
 
@@ -26,7 +26,8 @@ local PDF
 - locator、citation、bounded output 和 safe redaction。
 - Host / Agent loop：先执行 `search_document -> read_section`，再按 query 与章节/页码邻近性读取相关表格，最终回答只使用 section/table tool result。
 - 本地 persistent repository：completed report 写入 filesystem JSON catalog，后续同 `document_id` 可恢复并复用。
-- 最小 CLI 用户入口：`fund-checklist read`。
+- 受控 query profile routing：`holdings_top10`、`asset_allocation`、`fee_rates`、`performance_returns`。
+- 多年度业绩聚合与持仓追踪。
 
 安装命令：
 
@@ -37,8 +38,35 @@ uv sync
 CLI 使用：
 
 ```bash
-uv run fund-checklist read --pdf path/to/report.pdf --fund-code 004393 --fund-name 安信企业价值优选混合型证券投资基金 --year 2024
+# 批量导入 PDF 到 catalog
+uv run fund-checklist import \
+  --pdf-dir ./基金年报/ \
+  --fund-code 004393 \
+  --fund-name '安信企业价值优选混合型证券投资基金' \
+  --year-range 2022-2025
+
+# 单份年报阅读问答
+uv run fund-checklist read \
+  --pdf path/to/report.pdf \
+  --fund-code 004393 \
+  --fund-name '安信企业价值优选混合型证券投资基金' \
+  --year 2024 \
+  --query '前十大持仓'
+
+# 多年度业绩聚合
+uv run fund-checklist multi-year \
+  --fund-code 004393 \
+  --years 2022,2023,2024,2025
+
+# 多年度持仓追踪
+uv run fund-checklist holdings \
+  --fund-code 004393 \
+  --years 2022,2023,2024,2025
 ```
+
+样本 PDF：
+
+本项目不包含真实基金年报 PDF。如需测试，请从基金公司官网或公开信息披露平台下载年报 PDF，放入 `基金年报/` 目录。文件名需包含基金名称和年份（如 `安信企业价值优选混合型证券投资基金2024年年度报告.pdf`），以便 `import` 命令自动匹配。
 
 测试命令：
 
