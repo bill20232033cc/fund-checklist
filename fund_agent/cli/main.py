@@ -221,6 +221,39 @@ def _extract_year_from_filename(filename: str) -> int | None:
     return None
 
 
+_FUND_NAME_STOP_WORDS = frozenset({"混合型", "债券型", "股票型", "指数型", "灵活配置", "证券投资基金", "发起式", "交易型开放式", "联接基金"})
+
+
+def _extract_fund_name_keyword(fund_name: str) -> str:
+    """从基金全称中提取关键词用于文件名匹配。
+
+    参数:
+        fund_name: 基金全称，如 "安信企业价值优选混合型证券投资基金"。
+
+    返回:
+        去除通用后缀后的关键词，如 "安信企业价值优选"。
+    """
+
+    keyword = fund_name
+    for stop in _FUND_NAME_STOP_WORDS:
+        keyword = keyword.replace(stop, "")
+    return keyword.strip()
+
+
+def _matches_fund_name(filename: str, fund_name_keyword: str) -> bool:
+    """检查 PDF 文件名是否包含基金名称关键词。
+
+    参数:
+        filename: PDF 文件名。
+        fund_name_keyword: 从 _extract_fund_name_keyword 提取的关键词。
+
+    返回:
+        文件名包含关键词时返回 True。
+    """
+
+    return fund_name_keyword in filename
+
+
 def _run_import_command(args: argparse.Namespace, *, stdout: TextIO, stderr: TextIO) -> int:
     """从目录批量导入 PDF 到 catalog。
 
@@ -252,9 +285,10 @@ def _run_import_command(args: argparse.Namespace, *, stdout: TextIO, stderr: Tex
         return CLASSIFIED_FAILURE_EXIT_CODE
 
     matching_files: list[tuple[Path, int]] = []
+    fund_name_keyword = _extract_fund_name_keyword(args.fund_name)
     for pdf_path in pdf_files:
         year = _extract_year_from_filename(pdf_path.name)
-        if year is not None and year in year_range_set:
+        if year is not None and year in year_range_set and _matches_fund_name(pdf_path.name, fund_name_keyword):
             matching_files.append((pdf_path, year))
 
     if not matching_files:

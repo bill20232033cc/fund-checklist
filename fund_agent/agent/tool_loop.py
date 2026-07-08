@@ -23,7 +23,7 @@ ToolArgumentValue = str | int | None
 _NO_SEARCH_HIT_MESSAGE = "未找到可读取的匹配章节"
 _TABLE_PAGE_WINDOW = 1
 _MAX_TABLE_CANDIDATES = 3
-_MAX_TABLE_ROWS = 8
+_MAX_TABLE_ROWS = 15
 
 
 @dataclass(frozen=True)

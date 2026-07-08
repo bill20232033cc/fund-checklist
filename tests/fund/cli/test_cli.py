@@ -909,10 +909,10 @@ def test_import_imports_matching_pdfs(monkeypatch, tmp_path: Path) -> None:
 
     pdf_dir = tmp_path / "pdfs"
     pdf_dir.mkdir()
-    (pdf_dir / "安信2022年年度报告.pdf").write_bytes(b"%PDF-1.4\n")
-    (pdf_dir / "安信2023年年度报告.pdf").write_bytes(b"%PDF-1.4\n")
-    (pdf_dir / "安信2024年年度报告.pdf").write_bytes(b"%PDF-1.4\n")
-    (pdf_dir / "安信2019年年度报告.pdf").write_bytes(b"%PDF-1.4\n")
+    (pdf_dir / "安信企业价值优选混合型证券投资基金2022年年度报告.pdf").write_bytes(b"%PDF-1.4\n")
+    (pdf_dir / "安信企业价值优选混合型证券投资基金2023年年度报告.pdf").write_bytes(b"%PDF-1.4\n")
+    (pdf_dir / "安信企业价值优选混合型证券投资基金2024年年度报告.pdf").write_bytes(b"%PDF-1.4\n")
+    (pdf_dir / "安信企业价值优选混合型证券投资基金2019年年度报告.pdf").write_bytes(b"%PDF-1.4\n")
 
     exit_code, stdout, stderr = _run([
         "import",
@@ -964,9 +964,9 @@ def test_import_skips_failed_files_and_continues(monkeypatch, tmp_path: Path) ->
 
     pdf_dir = tmp_path / "pdfs"
     pdf_dir.mkdir()
-    (pdf_dir / "安信2022年年度报告.pdf").write_bytes(b"%PDF-1.4\n")
-    (pdf_dir / "安信2023年年度报告.pdf").write_bytes(b"%PDF-1.4\n")
-    (pdf_dir / "安信2024年年度报告.pdf").write_bytes(b"%PDF-1.4\n")
+    (pdf_dir / "安信企业价值优选混合型证券投资基金2022年年度报告.pdf").write_bytes(b"%PDF-1.4\n")
+    (pdf_dir / "安信企业价值优选混合型证券投资基金2023年年度报告.pdf").write_bytes(b"%PDF-1.4\n")
+    (pdf_dir / "安信企业价值优选混合型证券投资基金2024年年度报告.pdf").write_bytes(b"%PDF-1.4\n")
 
     exit_code, stdout, stderr = _run([
         "import",
@@ -996,7 +996,7 @@ def test_import_exits_2_when_all_files_fail(monkeypatch, tmp_path: Path) -> None
 
     pdf_dir = tmp_path / "pdfs"
     pdf_dir.mkdir()
-    (pdf_dir / "安信2024年年度报告.pdf").write_bytes(b"%PDF-1.4\n")
+    (pdf_dir / "安信企业价值优选混合型证券投资基金2024年年度报告.pdf").write_bytes(b"%PDF-1.4\n")
 
     exit_code, stdout, stderr = _run([
         "import",
@@ -1038,8 +1038,8 @@ def test_import_year_range_with_comma_format(monkeypatch, tmp_path: Path) -> Non
 
     pdf_dir = tmp_path / "pdfs"
     pdf_dir.mkdir()
-    (pdf_dir / "安信2022年年度报告.pdf").write_bytes(b"%PDF-1.4\n")
-    (pdf_dir / "安信2024年年度报告.pdf").write_bytes(b"%PDF-1.4\n")
+    (pdf_dir / "安信企业价值优选混合型证券投资基金2022年年度报告.pdf").write_bytes(b"%PDF-1.4\n")
+    (pdf_dir / "安信企业价值优选混合型证券投资基金2024年年度报告.pdf").write_bytes(b"%PDF-1.4\n")
 
     exit_code, stdout, stderr = _run([
         "import",
