@@ -1417,7 +1417,7 @@ class FundReadingService:
 
         table_citation = None
         for citation in routed.agent_result.citations:
-            if citation.locator.locator_kind.value == "table":
+            if citation.locator.locator_kind is LocatorKind.TABLE:
                 table_citation = citation
                 break
 
@@ -2832,12 +2832,20 @@ def _extract_holdings_from_agent_result(
         break
 
     if primary_table_ref and primary_section_ref and len(holdings) < _HOLDINGS_TOP_N:
+        primary_column_indexes = None
+        for citation in table_citation_refs:
+            table = tool_service.read_table(document_id, citation.locator.table_ref, max_rows=1)
+            if not isinstance(table, ToolFailure):
+                primary_column_indexes = _holdings_column_indexes(table.rows)
+                break
+
         continuation_holdings = _extract_holdings_continuations(
             document_id=document_id,
             tool_service=tool_service,
             primary_section_ref=primary_section_ref,
             primary_page=primary_page,
             primary_table_ref=primary_table_ref,
+            primary_column_indexes=primary_column_indexes,
             existing_count=len(holdings),
         )
         holdings.extend(continuation_holdings)
@@ -2852,6 +2860,7 @@ def _extract_holdings_continuations(
     primary_section_ref: str,
     primary_page: int | None,
     primary_table_ref: str,
+    primary_column_indexes: dict[str, int] | None,
     existing_count: int,
 ) -> list[HoldingExtraction]:
     """查找并提取持仓表的跨页续表。"""
@@ -2892,9 +2901,17 @@ def _extract_holdings_continuations(
                     continue
                 stock_code = row[column_indexes["stock_code"]].strip()
                 stock_name = row[column_indexes["stock_name"]].strip()
-                quantity = row[column_indexes.get("quantity", 0)].strip() if "quantity" in column_indexes else ""
-                fair_value = row[column_indexes.get("fair_value", 0)].strip() if "fair_value" in column_indexes else ""
+                quantity = row[column_indexes["quantity"]].strip() if "quantity" in column_indexes else ""
+                fair_value = row[column_indexes["fair_value"]].strip() if "fair_value" in column_indexes else ""
                 percentage = row[column_indexes["percentage"]].strip()
+            elif primary_column_indexes:
+                if len(row) <= max(primary_column_indexes.values()):
+                    continue
+                stock_code = row[primary_column_indexes["stock_code"]].strip()
+                stock_name = row[primary_column_indexes["stock_name"]].strip()
+                quantity = row[primary_column_indexes["quantity"]].strip() if "quantity" in primary_column_indexes else ""
+                fair_value = row[primary_column_indexes["fair_value"]].strip() if "fair_value" in primary_column_indexes else ""
+                percentage = row[primary_column_indexes["percentage"]].strip()
             else:
                 if len(row) < 4:
                     continue

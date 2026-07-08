@@ -476,7 +476,9 @@ def _run_holdings_command(args: argparse.Namespace, *, stdout: TextIO, stderr: T
         _write_classified_failure(result.failure, stderr)
         return CLASSIFIED_FAILURE_EXIT_CODE
 
-    output = asdict(result.series)
+    output = {
+        "series": [asdict(result.series)],
+    }
     print(json.dumps(output, ensure_ascii=False, indent=2), file=stdout)
     return SUCCESS_EXIT_CODE
 

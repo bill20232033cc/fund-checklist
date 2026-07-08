@@ -1293,10 +1293,12 @@ def test_holdings_json_output_on_success(monkeypatch, tmp_path: Path) -> None:
     assert exit_code == SUCCESS_EXIT_CODE
     assert stderr == ""
     output = json.loads(stdout)
-    assert output["fund_code"] == "004393"
-    assert len(output["annual_holdings"]) == 1
-    assert output["annual_holdings"][0]["holdings"][0]["stock_name"] == "建设银行"
-    assert output["annual_holdings"][0]["holdings"][0]["percentage"] == "6.08"
+    assert "series" in output
+    assert len(output["series"]) == 1
+    assert output["series"][0]["fund_code"] == "004393"
+    assert len(output["series"][0]["annual_holdings"]) == 1
+    assert output["series"][0]["annual_holdings"][0]["holdings"][0]["stock_name"] == "建设银行"
+    assert output["series"][0]["annual_holdings"][0]["holdings"][0]["percentage"] == "6.08"
 
 
 def test_holdings_exits_2_when_service_failure(monkeypatch, tmp_path: Path) -> None:
