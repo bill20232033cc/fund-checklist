@@ -1,9 +1,9 @@
 # fund-checklist implementation-control
 
-更新时间：2026-07-07
-当前阶段：`POST_MVP_SLICE_10L_ACCEPTED`
+更新时间：2026-07-08
+当前阶段：`POST_MVP_SLICE_10M_IN_PROGRESS`
 当前角色：control / CIC-lite controller
-当前目标：Slice 10L multi-year performance CLI integration 已实现并经 MiMo review `ACCEPTED`。不得扩成 gateflow / phaseflow / release-readiness，不新增 plan artifact，不进入 batch benchmark、开放语义理解、自动分词、embedding、LLM intent、template contract execution、chapter contract execution、calculation framework、`fund-checklist ask`、UI、自动报告或投资判断。
+当前目标：Slice 10M batch PDF import。新增独立子命令 `fund-checklist import`，从目录批量导入 PDF 到 catalog，用户指定 fund_code + fund_name + year-range，从文件名提取年份并过滤匹配的 PDF；覆盖已存在条目；单文件失败跳过继续。不得扩成 gateflow / phaseflow / release-readiness，不新增 plan artifact，不进入 batch benchmark、开放语义理解、自动分词、embedding、LLM intent、template contract execution、chapter contract execution、calculation framework、`fund-checklist ask`、UI、自动报告或投资判断。
 
 ## 当前事实
 
@@ -447,6 +447,17 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - 10L allowed write set：`fund_agent/cli/main.py`、`fund_agent/fund/document_tools/persistent_repository.py`、测试文件、`docs/implementation-control.md`、`docs/design.md`。
 - 10L 不改 `read` 子命令默认输出格式，不接真实 LLM，不做自然语言 `近 5 年` 解析，不做 repository 自动补齐，不改 Service / Host / Agent 层核心逻辑。
 - 10L smoke 测试使用 fake catalog entries 构造多年度场景；真实 CLI smoke 需要至少 3 份年报样本。
+- Post-MVP 10M 裁决为 batch PDF import。
+- 10M 新增独立子命令 `fund-checklist import`，不扩展 `read` 子命令。
+- 10M 输入方式为目录扫描：`--pdf-dir` 指定 PDF 目录，`--fund-code` 和 `--fund-name` 用户指定（目录内所有 PDF 共用），`--year-range 2020-2024` 指定年份范围。
+- 年份识别方式：从 PDF 文件名提取年份并过滤匹配 year-range 的文件；不使用 LLM 内容提取。
+- 重复 PDF 处理：覆盖已有 catalog 条目，重新执行 Docling conversion。
+- 单文件失败处理：跳过失败文件继续处理其余，最终报告失败列表。
+- 输出格式：逐条导入进度 + 最终汇总（成功 N 份，跳过 N 份，失败 N 份）。
+- 10M allowed write set：`fund_agent/cli/main.py`、测试文件、`docs/implementation-control.md`、`docs/design.md`。
+- 10M 复用现有 `FundReadingService.import_local_report()`，不新增 Service 方法。
+- 10M 不改 `read` / `multi-year` 子命令行为，不改 Service / Host / Agent 核心逻辑。
+- 10M smoke 测试用 fake PDF 测试边界；真实 smoke 可选。
 
 ## CIC-lite Rules
 
@@ -463,7 +474,7 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## Next Action
 
-10L 已完成并经 MiMo review `ACCEPTED`。下一步尚未裁决。若继续收益链路，可考虑 10M 批量 PDF 导入或其它后续 slice。不得改 CLI 默认输出，不接真实 LLM，不做自然语言 `近 5 年` 解析、repository 自动补齐、报告生成、年化收益率、扣费后收益率、`R=A+B-C` 或投资判断。
+10M 裁决已写入。下一步进入 10M 代码实现：新增 `fund-checklist import` 子命令，从目录批量导入 PDF 到 catalog，用户指定 fund_code + fund_name + year-range，从文件名提取年份并过滤匹配的 PDF；覆盖已存在条目；单文件失败跳过继续。不得改 read / multi-year 子命令输出，不接真实 LLM，不做自然语言解析、报告生成、年化收益率、扣费后收益率、`R=A+B-C` 或投资判断。
 
 禁止事项：
 
@@ -561,6 +572,7 @@ uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值
 11A. performance disclosure locator：已 accepted；定位 `基金份额净值增长率及其与同期业绩比较基准收益率的比较` / `基金净值表现` 披露，返回 section/table citation 和原始表格片段；不抽值、不计算。
 11B. disclosure locator contract registry：已 accepted；把既有 controlled disclosure profiles 收敛为 Service 内部 locator contract registry；不新增披露对象，不抽值、不计算、不改 public tool / CLI contract。
 10L. multi-year performance CLI integration：已 accepted；新增独立子命令 `fund-checklist multi-year`，给 Repository 新增 `list_reports()` 方法，从 catalog 按 fund_code + year 查找已导入年报，调用 10I Service 聚合多年度收益，JSON 格式输出；批量导入另开 10M；不改 Service / Host / Agent 核心逻辑。
+10M. batch PDF import：实现中；新增独立子命令 `fund-checklist import`，从目录批量导入 PDF 到 catalog，用户指定 fund_code + fund_name + year-range，从文件名提取年份并过滤匹配的 PDF；覆盖已存在条目；单文件失败跳过继续；逐条进度 + 最终汇总输出；复用现有 `import_local_report()`，不新增 Service 方法。
 
 ## MVP Acceptance Matrix
 

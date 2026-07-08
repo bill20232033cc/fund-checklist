@@ -808,3 +808,247 @@ def test_multi_year_json_output_on_success(monkeypatch, tmp_path: Path) -> None:
     assert len(output["series"]) == 1
     assert output["series"][0]["fund_code"] == "004393"
     assert output["series"][0]["coverage_status"] == "complete"
+
+
+def test_import_parser_accepts_valid_args() -> None:
+    """import 子命令 parser 必须接受合法参数。"""
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "import",
+        "--pdf-dir", "/tmp/pdfs",
+        "--fund-code", "004393",
+        "--fund-name", "安信企业价值优选混合型证券投资基金",
+        "--year-range", "2020-2024",
+    ])
+
+    assert args.command == "import"
+    assert args.pdf_dir == Path("/tmp/pdfs")
+    assert args.fund_code == "004393"
+    assert args.year_range == "2020-2024"
+
+
+def test_import_exits_2_when_directory_not_found(tmp_path: Path) -> None:
+    """目录不存在时 import 必须返回 exit 2。"""
+
+    exit_code, stdout, stderr = _run([
+        "import",
+        "--pdf-dir", str(tmp_path / "nonexistent"),
+        "--fund-code", "004393",
+        "--fund-name", "安信企业价值优选混合型证券投资基金",
+        "--year-range", "2020-2024",
+        "--work-dir", str(tmp_path / "work"),
+    ])
+
+    assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
+    assert "not_found" in stderr
+
+
+def test_import_exits_2_when_no_pdf_files(tmp_path: Path) -> None:
+    """目录中无 PDF 文件时 import 必须返回 exit 2。"""
+
+    pdf_dir = tmp_path / "pdfs"
+    pdf_dir.mkdir()
+
+    exit_code, stdout, stderr = _run([
+        "import",
+        "--pdf-dir", str(pdf_dir),
+        "--fund-code", "004393",
+        "--fund-name", "安信企业价值优选混合型证券投资基金",
+        "--year-range", "2020-2024",
+        "--work-dir", str(tmp_path / "work"),
+    ])
+
+    assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
+    assert "not_found" in stderr
+
+
+def test_import_exits_2_when_no_matching_years(tmp_path: Path) -> None:
+    """目录中 PDF 年份不在范围内时 import 必须返回 exit 2。"""
+
+    pdf_dir = tmp_path / "pdfs"
+    pdf_dir.mkdir()
+    (pdf_dir / "基金2019年年度报告.pdf").write_bytes(b"%PDF-1.4\n")
+
+    exit_code, stdout, stderr = _run([
+        "import",
+        "--pdf-dir", str(pdf_dir),
+        "--fund-code", "004393",
+        "--fund-name", "安信企业价值优选混合型证券投资基金",
+        "--year-range", "2020-2024",
+        "--work-dir", str(tmp_path / "work"),
+    ])
+
+    assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
+    assert "not_found" in stderr
+
+
+def test_import_imports_matching_pdfs(monkeypatch, tmp_path: Path) -> None:
+    """import 必须导入年份匹配的 PDF 并输出进度。"""
+
+    from fund_agent.service import ImportLocalReportResult
+    from fund_agent.fund.document_tools.models import ReportSummary
+
+    class _FakeService:
+        def import_local_report(self, request):
+            return ImportLocalReportResult(
+                document_id=f"{request.fund_code}-{request.year}-annual_report-fake",
+                report=ReportSummary(
+                    document_id=f"{request.fund_code}-{request.year}-annual_report-fake",
+                    fund_code=request.fund_code,
+                    fund_name=request.fund_name,
+                    year=request.year,
+                    report_type="annual_report",
+                    source_kind="local_pdf",
+                    source_summary="fake",
+                    content_fingerprint="fake",
+                ),
+            )
+
+    monkeypatch.setattr(cli_module, "FundReadingService", _FakeService)
+
+    pdf_dir = tmp_path / "pdfs"
+    pdf_dir.mkdir()
+    (pdf_dir / "安信2022年年度报告.pdf").write_bytes(b"%PDF-1.4\n")
+    (pdf_dir / "安信2023年年度报告.pdf").write_bytes(b"%PDF-1.4\n")
+    (pdf_dir / "安信2024年年度报告.pdf").write_bytes(b"%PDF-1.4\n")
+    (pdf_dir / "安信2019年年度报告.pdf").write_bytes(b"%PDF-1.4\n")
+
+    exit_code, stdout, stderr = _run([
+        "import",
+        "--pdf-dir", str(pdf_dir),
+        "--fund-code", "004393",
+        "--fund-name", "安信企业价值优选混合型证券投资基金",
+        "--year-range", "2022-2024",
+        "--work-dir", str(tmp_path / "work"),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE
+    assert "3 imported" in stdout
+    assert "0 failed" in stdout
+    assert "2022" in stdout
+    assert "2023" in stdout
+    assert "2024" in stdout
+    assert "2019" not in stdout
+
+
+def test_import_skips_failed_files_and_continues(monkeypatch, tmp_path: Path) -> None:
+    """单文件失败时 import 必须跳过继续处理其余文件。"""
+
+    from fund_agent.service import ImportLocalReportResult
+    from fund_agent.fund.document_tools.models import ReportSummary
+
+    call_count = 0
+
+    class _FakeService:
+        def import_local_report(self, request):
+            nonlocal call_count
+            call_count += 1
+            if request.year == 2023:
+                raise DocumentToolError(FailureCode.DOCLING_CONVERT_FAILED, "Docling conversion 失败")
+            return ImportLocalReportResult(
+                document_id=f"{request.fund_code}-{request.year}-annual_report-fake",
+                report=ReportSummary(
+                    document_id=f"{request.fund_code}-{request.year}-annual_report-fake",
+                    fund_code=request.fund_code,
+                    fund_name=request.fund_name,
+                    year=request.year,
+                    report_type="annual_report",
+                    source_kind="local_pdf",
+                    source_summary="fake",
+                    content_fingerprint="fake",
+                ),
+            )
+
+    monkeypatch.setattr(cli_module, "FundReadingService", _FakeService)
+
+    pdf_dir = tmp_path / "pdfs"
+    pdf_dir.mkdir()
+    (pdf_dir / "安信2022年年度报告.pdf").write_bytes(b"%PDF-1.4\n")
+    (pdf_dir / "安信2023年年度报告.pdf").write_bytes(b"%PDF-1.4\n")
+    (pdf_dir / "安信2024年年度报告.pdf").write_bytes(b"%PDF-1.4\n")
+
+    exit_code, stdout, stderr = _run([
+        "import",
+        "--pdf-dir", str(pdf_dir),
+        "--fund-code", "004393",
+        "--fund-name", "安信企业价值优选混合型证券投资基金",
+        "--year-range", "2022-2024",
+        "--work-dir", str(tmp_path / "work"),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE
+    assert call_count == 3
+    assert "2 imported" in stdout
+    assert "1 failed" in stdout
+    assert "2023" in stdout
+    assert "failed" in stdout
+
+
+def test_import_exits_2_when_all_files_fail(monkeypatch, tmp_path: Path) -> None:
+    """所有文件都失败时 import 必须返回 exit 2。"""
+
+    class _FakeService:
+        def import_local_report(self, request):
+            raise DocumentToolError(FailureCode.DOCLING_CONVERT_FAILED, "Docling conversion 失败")
+
+    monkeypatch.setattr(cli_module, "FundReadingService", _FakeService)
+
+    pdf_dir = tmp_path / "pdfs"
+    pdf_dir.mkdir()
+    (pdf_dir / "安信2024年年度报告.pdf").write_bytes(b"%PDF-1.4\n")
+
+    exit_code, stdout, stderr = _run([
+        "import",
+        "--pdf-dir", str(pdf_dir),
+        "--fund-code", "004393",
+        "--fund-name", "安信企业价值优选混合型证券投资基金",
+        "--year-range", "2024-2024",
+        "--work-dir", str(tmp_path / "work"),
+    ])
+
+    assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
+    assert "0 imported" in stdout
+    assert "1 failed" in stdout
+
+
+def test_import_year_range_with_comma_format(monkeypatch, tmp_path: Path) -> None:
+    """import 必须支持逗号分隔的年份列表格式。"""
+
+    from fund_agent.service import ImportLocalReportResult
+    from fund_agent.fund.document_tools.models import ReportSummary
+
+    class _FakeService:
+        def import_local_report(self, request):
+            return ImportLocalReportResult(
+                document_id=f"{request.fund_code}-{request.year}-annual_report-fake",
+                report=ReportSummary(
+                    document_id=f"{request.fund_code}-{request.year}-annual_report-fake",
+                    fund_code=request.fund_code,
+                    fund_name=request.fund_name,
+                    year=request.year,
+                    report_type="annual_report",
+                    source_kind="local_pdf",
+                    source_summary="fake",
+                    content_fingerprint="fake",
+                ),
+            )
+
+    monkeypatch.setattr(cli_module, "FundReadingService", _FakeService)
+
+    pdf_dir = tmp_path / "pdfs"
+    pdf_dir.mkdir()
+    (pdf_dir / "安信2022年年度报告.pdf").write_bytes(b"%PDF-1.4\n")
+    (pdf_dir / "安信2024年年度报告.pdf").write_bytes(b"%PDF-1.4\n")
+
+    exit_code, stdout, stderr = _run([
+        "import",
+        "--pdf-dir", str(pdf_dir),
+        "--fund-code", "004393",
+        "--fund-name", "安信企业价值优选混合型证券投资基金",
+        "--year-range", "2022,2024",
+        "--work-dir", str(tmp_path / "work"),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE
+    assert "2 imported" in stdout

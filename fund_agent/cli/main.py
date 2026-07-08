@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from dataclasses import asdict
 from pathlib import Path
 from typing import Sequence, TextIO
 
-from fund_agent.fund.document_tools.constants import FailureCode
+from fund_agent.fund.document_tools.constants import FailureCode, ReportType
 from fund_agent.fund.document_tools.errors import DocumentToolError
 from fund_agent.fund.document_tools.models import ToolFailure
 from fund_agent.fund.document_tools.persistent_repository import (
@@ -20,6 +21,7 @@ from fund_agent.service import (
     AggregateMultiYearAnnualPerformanceRequest,
     AnnualReportDocument,
     FundReadingService,
+    ImportLocalReportRequest,
     ReadLocalReportRequest,
 )
 
@@ -74,6 +76,8 @@ def run_cli(
             return _run_read_command(args, stdout=stdout, stderr=stderr)
         if args.command == "multi-year":
             return _run_multi_year_command(args, stdout=stdout, stderr=stderr)
+        if args.command == "import":
+            return _run_import_command(args, stdout=stdout, stderr=stderr)
     except DocumentToolError as exc:
         _write_classified_failure(ToolFailure(code=exc.code, message=exc.message), stderr)
         return CLASSIFIED_FAILURE_EXIT_CODE
@@ -114,6 +118,13 @@ def build_parser() -> argparse.ArgumentParser:
     multi_year_parser.add_argument("--fund-code", required=True)
     multi_year_parser.add_argument("--years", required=True)
     multi_year_parser.add_argument("--work-dir", default=Path(DEFAULT_WORK_DIR), type=Path)
+
+    import_parser = subparsers.add_parser("import")
+    import_parser.add_argument("--pdf-dir", required=True, type=Path)
+    import_parser.add_argument("--fund-code", required=True)
+    import_parser.add_argument("--fund-name", required=True)
+    import_parser.add_argument("--year-range", required=True)
+    import_parser.add_argument("--work-dir", default=Path(DEFAULT_WORK_DIR), type=Path)
     return parser
 
 
@@ -168,6 +179,131 @@ def _parse_years(years_str: str) -> tuple[int, ...]:
 
     years = tuple(int(y.strip()) for y in years_str.split(","))
     return tuple(sorted(years))
+
+
+def _parse_year_range(range_str: str) -> tuple[int, ...]:
+    """解析年度范围字符串为升序元组。
+
+    参数:
+        range_str: 范围字符串，支持 "2020-2024" 或 "2020,2021,2022,2023,2024"。
+
+    返回:
+        升序排列的年度元组。
+
+    异常:
+        ValueError: 格式不合法时抛出。
+    """
+
+    if "-" in range_str:
+        parts = range_str.split("-", 1)
+        start = int(parts[0].strip())
+        end = int(parts[1].strip())
+        return tuple(range(start, end + 1))
+    return _parse_years(range_str)
+
+
+_YEAR_PATTERN = re.compile(r"(20\d{2})")
+
+
+def _extract_year_from_filename(filename: str) -> int | None:
+    """从 PDF 文件名中提取年份。
+
+    参数:
+        filename: PDF 文件名，如 "安信企业价值优选混合型证券投资基金2024年年度报告.pdf"。
+
+    返回:
+        提取到的年份；无法提取时返回 None。
+    """
+
+    match = _YEAR_PATTERN.search(filename)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def _run_import_command(args: argparse.Namespace, *, stdout: TextIO, stderr: TextIO) -> int:
+    """从目录批量导入 PDF 到 catalog。
+
+    参数:
+        args: argparse 解析出的 import 参数。
+        stdout: 进度输出流。
+        stderr: 失败输出流。
+
+    返回:
+        成功返回 0（至少 1 份导入成功）；全部失败返回 2。
+
+    异常:
+        DocumentToolError: 目录不存在或不可读时抛出已分类失败。
+    """
+
+    pdf_dir = Path(args.pdf_dir)
+    if not pdf_dir.is_dir():
+        failure = ToolFailure(code=FailureCode.NOT_FOUND, message=f"目录不存在: {pdf_dir.name}")
+        _write_classified_failure(failure, stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+    year_range = _parse_year_range(args.year_range)
+    year_range_set = set(year_range)
+
+    pdf_files = sorted(pdf_dir.glob("*.pdf"))
+    if not pdf_files:
+        failure = ToolFailure(code=FailureCode.NOT_FOUND, message="目录中未找到 PDF 文件")
+        _write_classified_failure(failure, stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+    matching_files: list[tuple[Path, int]] = []
+    for pdf_path in pdf_files:
+        year = _extract_year_from_filename(pdf_path.name)
+        if year is not None and year in year_range_set:
+            matching_files.append((pdf_path, year))
+
+    if not matching_files:
+        failure = ToolFailure(
+            code=FailureCode.NOT_FOUND,
+            message=f"目录中未找到年份在 {year_range[0]}-{year_range[-1]} 范围内的 PDF 文件",
+        )
+        _write_classified_failure(failure, stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+    service = FundReadingService()
+    work_dir = Path(args.work_dir)
+    imported = 0
+    skipped = 0
+    failed = 0
+    total = len(matching_files)
+
+    for idx, (pdf_path, year) in enumerate(matching_files, 1):
+        label = f"[{idx}/{total}] {pdf_path.name}"
+        try:
+            result = service.import_local_report(
+                ImportLocalReportRequest(
+                    pdf_path=pdf_path,
+                    fund_code=args.fund_code,
+                    fund_name=args.fund_name,
+                    year=year,
+                    work_dir=work_dir,
+                    report_type=ReportType.ANNUAL_REPORT,
+                )
+            )
+            imported += 1
+            print(f"{label} -> imported (document_id={result.document_id})", file=stdout)
+        except DocumentToolError as exc:
+            if exc.code is FailureCode.INTEGRITY_ERROR:
+                skipped += 1
+                print(f"{label} -> skipped ({exc.message})", file=stdout)
+            else:
+                failed += 1
+                print(f"{label} -> failed ({exc.code.value}: {exc.message})", file=stdout)
+        except Exception:
+            failed += 1
+            print(f"{label} -> failed (unexpected error)", file=stdout)
+
+    print("", file=stdout)
+    print(f"Summary: {imported} imported, {skipped} skipped, {failed} failed", file=stdout)
+
+    if imported == 0 and failed > 0:
+        return CLASSIFIED_FAILURE_EXIT_CODE
+    return SUCCESS_EXIT_CODE
 
 
 def _run_multi_year_command(args: argparse.Namespace, *, stdout: TextIO, stderr: TextIO) -> int:

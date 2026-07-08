@@ -1159,10 +1159,20 @@ Post-MVP 10L 裁决为 multi-year performance CLI integration：
 - 暂不新增 `--share-class` CLI 参数；批量 PDF 导入另开 10M slice。
 - allowed write set：`fund_agent/cli/main.py`、`fund_agent/fund/document_tools/persistent_repository.py`、测试文件、`docs/implementation-control.md`、`docs/design.md`。
 
+Post-MVP 10M 裁决为 batch PDF import：
+- 新增独立子命令 `fund-checklist import`，不扩展 `read` 子命令。
+- 目录扫描：`--pdf-dir` 指定 PDF 目录，`--fund-code` 和 `--fund-name` 用户指定（共用），`--year-range 2020-2024` 指定年份范围。
+- 年份识别：从 PDF 文件名提取年份并过滤匹配 year-range 的文件；不使用 LLM 内容提取。
+- 重复处理：覆盖已有 catalog 条目，重新执行 Docling conversion。
+- 单文件失败：跳过继续，最终报告失败列表。
+- 输出：逐条进度 + 最终汇总（成功/跳过/失败）。
+- 复用现有 `FundReadingService.import_local_report()`，不新增 Service 方法。
+- allowed write set：`fund_agent/cli/main.py`、测试文件、`docs/implementation-control.md`、`docs/design.md`。
+
 ## 10. 下一步最小可验证问题
 
 下一步只应验证一个问题：
 
 ```text
-10L 已完成。下一步尚未裁决。若继续收益链路，可考虑 10M 批量 PDF 导入或其它后续 slice。不得改 CLI 默认输出，不接真实 LLM，不做自然语言 `近 5 年` 解析、repository 自动补齐、报告生成、年化收益率、扣费后收益率、`R=A+B-C` 或投资判断。
+10M 裁决已写入。下一步进入 10M 代码实现：新增 fund-checklist import 子命令，从目录批量导入 PDF 到 catalog，用户指定 fund_code + fund_name + year-range，从文件名提取年份并过滤匹配的 PDF；覆盖已存在条目；单文件失败跳过继续。
 ```
