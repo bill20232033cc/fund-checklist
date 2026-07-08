@@ -2780,7 +2780,7 @@ def _extract_holdings_from_agent_result(
     result: AgentRunResult,
     tool_service: FundDocumentToolService,
 ) -> tuple[HoldingExtraction, ...]:
-    """从 Agent 结果中抽取前十大持仓数据。"""
+    """从 Agent 结果中抽取前十大持仓数据，支持跨页表格合并。"""
 
     table_citation_refs = [
         citation for citation in result.citations
@@ -2790,6 +2790,10 @@ def _extract_holdings_from_agent_result(
         raise DocumentToolError(FailureCode.NOT_FOUND, "持仓表格 citation 缺失")
 
     holdings: list[HoldingExtraction] = []
+    primary_table_ref = None
+    primary_section_ref = None
+    primary_page = None
+
     for citation in table_citation_refs:
         table_ref = citation.locator.table_ref
         if not table_ref:
@@ -2802,29 +2806,131 @@ def _extract_holdings_from_agent_result(
         if column_indexes is None:
             continue
 
+        primary_table_ref = table_ref
+        primary_section_ref = table.section_ref
+        primary_page = table.locator.page_no
+
         data_rows = table.rows[1:]
-        for rank, row in enumerate(data_rows[:_HOLDINGS_TOP_N], 1):
+        for row in data_rows:
             if len(row) <= max(column_indexes.values()):
                 continue
             stock_code = row[column_indexes["stock_code"]].strip()
             stock_name = row[column_indexes["stock_name"]].strip()
-            quantity = row[column_indexes["quantity"]].strip()
-            fair_value = row[column_indexes["fair_value"]].strip()
+            quantity = row[column_indexes.get("quantity", 0)].strip() if "quantity" in column_indexes else ""
+            fair_value = row[column_indexes.get("fair_value", 0)].strip() if "fair_value" in column_indexes else ""
             percentage = row[column_indexes["percentage"]].strip()
             if not stock_code and not stock_name:
                 continue
             holdings.append(HoldingExtraction(
-                rank=rank,
+                rank=len(holdings) + 1,
                 stock_code=stock_code,
                 stock_name=stock_name,
                 quantity=quantity,
                 fair_value=fair_value,
                 percentage=percentage,
             ))
-        if holdings:
-            break
+        break
 
-    return tuple(holdings)
+    if primary_table_ref and primary_section_ref and len(holdings) < _HOLDINGS_TOP_N:
+        continuation_holdings = _extract_holdings_continuations(
+            document_id=document_id,
+            tool_service=tool_service,
+            primary_section_ref=primary_section_ref,
+            primary_page=primary_page,
+            primary_table_ref=primary_table_ref,
+            existing_count=len(holdings),
+        )
+        holdings.extend(continuation_holdings)
+
+    return tuple(holdings[:_HOLDINGS_TOP_N])
+
+
+def _extract_holdings_continuations(
+    *,
+    document_id: str,
+    tool_service: FundDocumentToolService,
+    primary_section_ref: str,
+    primary_page: int | None,
+    primary_table_ref: str,
+    existing_count: int,
+) -> list[HoldingExtraction]:
+    """查找并提取持仓表的跨页续表。"""
+
+    all_tables = tool_service.list_tables(document_id)
+    continuation_tables: list[TableContent] = []
+
+    for t in all_tables:
+        if t.table_ref == primary_table_ref:
+            continue
+        table = tool_service.read_table(document_id, t.table_ref, max_rows=_HOLDINGS_TABLE_MAX_ROWS)
+        if isinstance(table, ToolFailure):
+            continue
+        if table.section_ref != primary_section_ref:
+            continue
+        if primary_page and table.locator.page_no and table.locator.page_no <= primary_page:
+            continue
+        column_indexes = _holdings_column_indexes(table.rows)
+        if column_indexes is None:
+            if _is_continuation_row(table.rows):
+                continuation_tables.append(table)
+            continue
+        continuation_tables.append(table)
+
+    holdings: list[HoldingExtraction] = []
+    for table in continuation_tables:
+        column_indexes = _holdings_column_indexes(table.rows)
+        if column_indexes:
+            data_rows = table.rows[1:]
+        else:
+            data_rows = table.rows
+
+        for row in data_rows:
+            if len(holdings) + existing_count >= _HOLDINGS_TOP_N:
+                break
+            if column_indexes:
+                if len(row) <= max(column_indexes.values()):
+                    continue
+                stock_code = row[column_indexes["stock_code"]].strip()
+                stock_name = row[column_indexes["stock_name"]].strip()
+                quantity = row[column_indexes.get("quantity", 0)].strip() if "quantity" in column_indexes else ""
+                fair_value = row[column_indexes.get("fair_value", 0)].strip() if "fair_value" in column_indexes else ""
+                percentage = row[column_indexes["percentage"]].strip()
+            else:
+                if len(row) < 4:
+                    continue
+                stock_code = row[1].strip() if len(row) > 1 else ""
+                stock_name = row[2].strip() if len(row) > 2 else ""
+                quantity = row[3].strip() if len(row) > 3 else ""
+                fair_value = row[4].strip() if len(row) > 4 else ""
+                percentage = row[5].strip() if len(row) > 5 else ""
+
+            if not stock_code and not stock_name:
+                continue
+            holdings.append(HoldingExtraction(
+                rank=existing_count + len(holdings) + 1,
+                stock_code=stock_code,
+                stock_name=stock_name,
+                quantity=quantity,
+                fair_value=fair_value,
+                percentage=percentage,
+            ))
+
+    return holdings
+
+
+def _is_continuation_row(rows: tuple[tuple[str, ...], ...]) -> bool:
+    """检查是否为持仓表续表（无表头，第一列是序号）。"""
+
+    if not rows:
+        return False
+    first_row = rows[0]
+    if len(first_row) < 3:
+        return False
+    try:
+        int(first_row[0].strip())
+        return True
+    except (ValueError, IndexError):
+        return False
 
 
 def _holdings_column_indexes(rows: tuple[tuple[str, ...], ...]) -> dict[str, int] | None:
