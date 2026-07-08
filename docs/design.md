@@ -1169,10 +1169,20 @@ Post-MVP 10M 裁决为 batch PDF import：
 - 复用现有 `FundReadingService.import_local_report()`，不新增 Service 方法。
 - allowed write set：`fund_agent/cli/main.py`、测试文件、`docs/implementation-control.md`、`docs/design.md`。
 
+Post-MVP 11C 裁决为 holdings multi-year tracking：
+- 新增独立子命令 `fund-checklist holdings`，不扩展 `read` 或 `multi-year` 子命令。
+- 目标披露表固定为前十大持仓表：`期末按公允价值占基金资产净值比例大小排序的所有股票投资明细`。
+- 抽取字段为完整字段：股票代码、股票名称、数量（股）、公允价值（元）、占基金资产净值比例（%）。
+- 多年度对比形态为年度列表：每年返回 Top 10 持仓，用户自行对比；不做股票追踪。
+- Top N 固定为 10；输出格式为 JSON；暂不新增 `--share-class` 参数。
+- 实现路径为新增 Service 方法，内部复用 Host/Agent 查询持仓表。
+- 失败语义：某年持仓表未找到时跳过继续，最终报告 missing_years。
+- allowed write set：`fund_agent/cli/main.py`、`fund_agent/service/reading_service.py`、测试文件、`docs/implementation-control.md`、`docs/design.md`。
+
 ## 10. 下一步最小可验证问题
 
 下一步只应验证一个问题：
 
 ```text
-10M 已完成并经 DeepSeek review `ACCEPTED`。下一步尚未裁决。若继续收益链路，可考虑持仓/资产配置多年度追踪、Disclosure completeness audit 或 Host lifecycle basics。
+11C 裁决已写入。下一步进入 11C 代码实现：新增 fund-checklist holdings 子命令，从已导入年报中抽取前十大持仓表（完整字段），按年度列表返回 Top 10 持仓，JSON 格式输出。
 ```

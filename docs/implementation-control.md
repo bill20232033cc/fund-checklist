@@ -1,9 +1,9 @@
 # fund-checklist implementation-control
 
 更新时间：2026-07-08
-当前阶段：`POST_MVP_SLICE_10M_ACCEPTED`
+当前阶段：`POST_MVP_SLICE_11C_IN_PROGRESS`
 当前角色：control / CIC-lite controller
-当前目标：Slice 10M batch PDF import 已实现并经 DeepSeek review `ACCEPTED`。不得扩成 gateflow / phaseflow / release-readiness，不新增 plan artifact，不进入 batch benchmark、开放语义理解、自动分词、embedding、LLM intent、template contract execution、chapter contract execution、calculation framework、`fund-checklist ask`、UI、自动报告或投资判断。
+当前目标：Slice 11C holdings multi-year tracking。新增独立子命令 `fund-checklist holdings`，从已导入年报中抽取前十大持仓表（完整字段：股票代码、股票名称、数量、公允价值、占净值比），按年度列表返回 Top 10 持仓，JSON 格式输出。不得扩成 gateflow / phaseflow / release-readiness，不新增 plan artifact，不进入 batch benchmark、开放语义理解、自动分词、embedding、LLM intent、template contract execution、chapter contract execution、calculation framework、`fund-checklist ask`、UI、自动报告或投资判断。
 
 ## 当前事实
 
@@ -458,6 +458,19 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - 10M 复用现有 `FundReadingService.import_local_report()`，不新增 Service 方法。
 - 10M 不改 `read` / `multi-year` 子命令行为，不改 Service / Host / Agent 核心逻辑。
 - 10M smoke 测试用 fake PDF 测试边界；真实 smoke 可选。
+- Post-MVP 11C 裁决为 holdings multi-year tracking。
+- 11C 新增独立子命令 `fund-checklist holdings`，不扩展 `read` 或 `multi-year` 子命令。
+- 11C 目标披露表固定为前十大持仓表：`期末按公允价值占基金资产净值比例大小排序的所有股票投资明细`。
+- 11C 抽取字段为完整字段：股票代码、股票名称、数量（股）、公允价值（元）、占基金资产净值比例（%）。
+- 11C 多年度对比形态为年度列表：每年返回 Top 10 持仓，用户自行对比；不做股票追踪（识别相同股票）。
+- 11C Top N 固定为 10。
+- 11C 输出格式为 JSON。
+- 11C 暂不新增 `--share-class` CLI 参数。
+- 11C 实现路径为新增 Service 方法，内部复用 Host/Agent 查询持仓表。
+- 11C 失败语义：某年持仓表未找到时跳过继续，最终报告 missing_years。
+- 11C allowed write set：`fund_agent/cli/main.py`、`fund_agent/service/reading_service.py`、测试文件、`docs/implementation-control.md`、`docs/design.md`。
+- 11C smoke 测试使用真实 PDF。
+- 11C 不做股票追踪、行业分析、持仓变化计算、投资判断或自动报告。
 
 ## CIC-lite Rules
 
@@ -474,7 +487,7 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## Next Action
 
-10M 已完成并经 DeepSeek review `ACCEPTED`。下一步尚未裁决。若继续收益链路，可考虑持仓/资产配置多年度追踪、Disclosure completeness audit 或 Host lifecycle basics。不得改 read / multi-year / import 子命令输出，不接真实 LLM，不做自然语言解析、报告生成、年化收益率、扣费后收益率、`R=A+B-C` 或投资判断。
+11C 裁决已写入。下一步进入 11C 代码实现：新增 `fund-checklist holdings` 子命令，从已导入年报中抽取前十大持仓表（完整字段），按年度列表返回 Top 10 持仓，JSON 格式输出。不得改 read / multi-year / import 子命令输出，不接真实 LLM，不做自然语言解析、股票追踪、行业分析、持仓变化计算、投资判断或自动报告。
 
 禁止事项：
 
@@ -573,6 +586,7 @@ uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值
 11B. disclosure locator contract registry：已 accepted；把既有 controlled disclosure profiles 收敛为 Service 内部 locator contract registry；不新增披露对象，不抽值、不计算、不改 public tool / CLI contract。
 10L. multi-year performance CLI integration：已 accepted；新增独立子命令 `fund-checklist multi-year`，给 Repository 新增 `list_reports()` 方法，从 catalog 按 fund_code + year 查找已导入年报，调用 10I Service 聚合多年度收益，JSON 格式输出；批量导入另开 10M；不改 Service / Host / Agent 核心逻辑。
 10M. batch PDF import：已 accepted；新增独立子命令 `fund-checklist import`，从目录批量导入 PDF 到 catalog，用户指定 fund_code + fund_name + year-range，从文件名提取年份并过滤匹配的 PDF；覆盖已存在条目；单文件失败跳过继续；逐条进度 + 最终汇总输出；复用现有 `import_local_report()`，不新增 Service 方法；24 passed。
+11C. holdings multi-year tracking：实现中；新增独立子命令 `fund-checklist holdings`，从已导入年报中抽取前十大持仓表（完整字段：股票代码、股票名称、数量、公允价值、占净值比），按年度列表返回 Top 10 持仓，JSON 格式输出；新增 Service 方法，内部复用 Host/Agent 查询持仓表；某年持仓表未找到时跳过继续。
 
 ## MVP Acceptance Matrix
 

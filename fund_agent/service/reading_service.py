@@ -454,6 +454,129 @@ class AggregateMultiYearAnnualPerformanceResult:
     failure: ToolFailure | None = None
 
 
+@dataclass(frozen=True)
+class HoldingExtraction:
+    """单条持仓记录。
+
+    参数:
+        rank: 排名（从 1 开始）。
+        stock_code: 股票代码。
+        stock_name: 股票名称。
+        quantity: 持有数量（股）。
+        fair_value: 公允价值（元）。
+        percentage: 占基金资产净值比例（%）。
+
+    返回:
+        不可变持仓 DTO。
+
+    异常:
+        本模型不执行 I/O，不抛出业务异常。
+    """
+
+    rank: int
+    stock_code: str
+    stock_name: str
+    quantity: str
+    fair_value: str
+    percentage: str
+
+
+@dataclass(frozen=True)
+class AnnualHoldingsResult:
+    """单年度持仓抽取结果。
+
+    参数:
+        document_id: 来源文档 ID。
+        year: 报告年份。
+        holdings: Top 10 持仓记录。
+        citation: 表格 citation。
+
+    返回:
+        不可变年度持仓结果。
+
+    异常:
+        本模型不执行 I/O，不抛出业务异常。
+    """
+
+    document_id: str
+    year: int
+    holdings: tuple[HoldingExtraction, ...]
+    citation: Citation | None = None
+    failure: ToolFailure | None = None
+
+
+@dataclass(frozen=True)
+class MultiYearHoldingsSeries:
+    """多年度持仓 series DTO。
+
+    参数:
+        fund_code: 基金代码。
+        requested_years: 请求年度列表。
+        covered_years: 成功抽取的年度。
+        missing_years: 未找到或抽取失败的年度。
+        annual_holdings: 按年度升序排列的年度持仓结果。
+
+    返回:
+        不可变多年度持仓 series。
+
+    异常:
+        本模型不执行 I/O，不抛出业务异常。
+    """
+
+    fund_code: str
+    requested_years: tuple[int, ...]
+    covered_years: tuple[int, ...]
+    missing_years: tuple[int, ...]
+    annual_holdings: tuple[AnnualHoldingsResult, ...]
+
+
+@dataclass(frozen=True)
+class ExtractHoldingsRequest:
+    """持仓多年度聚合请求。
+
+    参数:
+        fund_code: 基金代码。
+        requested_years: 请求年度列表。
+        annual_report_documents: 显式提供的 year/document_id 映射。
+        work_dir: 受控工作目录。
+
+    返回:
+        不可变请求 DTO。
+
+    异常:
+        本模型不执行 I/O，不抛出业务异常。
+    """
+
+    fund_code: str
+    requested_years: tuple[int, ...] | list[int]
+    annual_report_documents: tuple[AnnualReportDocument, ...] | list[AnnualReportDocument]
+    work_dir: Path
+
+
+@dataclass(frozen=True)
+class ExtractHoldingsResult:
+    """持仓多年度聚合结果。
+
+    参数:
+        series: 成功抽取的多年度持仓 series；失败时为 None。
+        failure: 稳定失败分类；成功时为 None。
+
+    返回:
+        可供 CLI 消费的结果。
+
+    异常:
+        本模型不执行 I/O，不抛出业务异常。
+    """
+
+    series: MultiYearHoldingsSeries | None = None
+    failure: ToolFailure | None = None
+
+
+_HOLDINGS_TOP_N = 10
+_HOLDINGS_QUERY = "股票投资明细"
+_HOLDINGS_TABLE_MAX_ROWS = 15
+
+
 DISCLOSURE_LOCATOR_CONTRACT_REGISTRY = (
     _DisclosureLocatorContract(
         profile_name="holdings_top10",
@@ -1239,6 +1362,146 @@ class FundReadingService:
                 failure=ToolFailure(code=FailureCode.UNAVAILABLE, message="multi-year annual performance 聚合暂不可用"),
             )
 
+    def _extract_holdings_from_store(
+        self,
+        *,
+        document_id: str,
+        store: DoclingDocumentStore,
+        report_year: int,
+    ) -> AnnualHoldingsResult:
+        """从单年度年报中抽取前十大持仓表。
+
+        参数:
+            document_id: 文档 ID。
+            store: 已加载的 DoclingDocumentStore。
+            report_year: 报告年份。
+
+        返回:
+            AnnualHoldingsResult；失败时 failure 非空。
+        """
+
+        tool_service = FundDocumentToolService({document_id: store})
+        host = self._host_factory(tool_service)
+        routed = self._run_with_query_candidates(
+            host=host,
+            document_id=document_id,
+            query=_HOLDINGS_QUERY,
+        )
+        if routed.agent_result.failure is not None:
+            return AnnualHoldingsResult(
+                document_id=document_id,
+                year=report_year,
+                holdings=(),
+                failure=routed.agent_result.failure,
+            )
+        try:
+            holdings = _extract_holdings_from_agent_result(
+                document_id=document_id,
+                result=routed.agent_result,
+                tool_service=tool_service,
+            )
+        except DocumentToolError as exc:
+            return AnnualHoldingsResult(
+                document_id=document_id,
+                year=report_year,
+                holdings=(),
+                failure=ToolFailure(code=exc.code, message=exc.message),
+            )
+        except Exception:
+            return AnnualHoldingsResult(
+                document_id=document_id,
+                year=report_year,
+                holdings=(),
+                failure=ToolFailure(code=FailureCode.UNAVAILABLE, message="持仓字段抽取暂不可用"),
+            )
+
+        table_citation = None
+        for citation in routed.agent_result.citations:
+            if citation.locator.locator_kind.value == "table":
+                table_citation = citation
+                break
+
+        return AnnualHoldingsResult(
+            document_id=document_id,
+            year=report_year,
+            holdings=holdings,
+            citation=table_citation,
+        )
+
+    def extract_multi_year_holdings(
+        self,
+        request: ExtractHoldingsRequest,
+    ) -> ExtractHoldingsResult:
+        """聚合多年度持仓数据。
+
+        参数:
+            request: 持仓多年度聚合请求。
+
+        返回:
+            ExtractHoldingsResult；成功时包含 MultiYearHoldingsSeries。
+        """
+
+        try:
+            normalized_years = _normalized_holdings_requested_years(request.requested_years)
+            documents_by_year = _multi_year_documents_by_year(request.annual_report_documents)
+            repository = _repository(Path(request.work_dir))
+
+            annual_results: list[AnnualHoldingsResult] = []
+            covered_years: list[int] = []
+            missing_years: list[int] = []
+
+            for year in normalized_years:
+                document = documents_by_year.get(year)
+                if document is None:
+                    missing_years.append(year)
+                    continue
+                try:
+                    store = repository.load_store(document.document_id)
+                    _validate_multi_year_report_identity(
+                        document_id=document.document_id,
+                        store=store,
+                        fund_code=request.fund_code,
+                        year=year,
+                    )
+                    result = self._extract_holdings_from_store(
+                        document_id=document.document_id,
+                        store=store,
+                        report_year=year,
+                    )
+                    if result.failure is not None:
+                        missing_years.append(year)
+                        continue
+                    annual_results.append(result)
+                    covered_years.append(year)
+                except DocumentToolError:
+                    missing_years.append(year)
+                    continue
+
+            if not covered_years:
+                return ExtractHoldingsResult(
+                    series=None,
+                    failure=ToolFailure(code=FailureCode.NOT_FOUND, message="未找到任何年度的持仓数据"),
+                )
+
+            series = MultiYearHoldingsSeries(
+                fund_code=request.fund_code,
+                requested_years=normalized_years,
+                covered_years=tuple(sorted(covered_years)),
+                missing_years=tuple(sorted(missing_years)),
+                annual_holdings=tuple(annual_results),
+            )
+            return ExtractHoldingsResult(series=series, failure=None)
+        except DocumentToolError as exc:
+            return ExtractHoldingsResult(
+                series=None,
+                failure=ToolFailure(code=exc.code, message=exc.message),
+            )
+        except Exception:
+            return ExtractHoldingsResult(
+                series=None,
+                failure=ToolFailure(code=FailureCode.UNAVAILABLE, message="多年度持仓聚合暂不可用"),
+            )
+
     def list_reports(self, request: ListReportsRequest) -> ListReportsResult:
         """列出本地 completed reports 的安全摘要。
 
@@ -1433,6 +1696,20 @@ def _normalized_multi_year_requested_years(requested_years: tuple[int, ...] | li
         raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "multi-year requested_years 长度不符合契约")
     if len(set(years)) != len(years):
         raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "multi-year requested_years 年份重复")
+    return tuple(sorted(years))
+
+
+def _normalized_holdings_requested_years(requested_years: tuple[int, ...] | list[int]) -> tuple[int, ...]:
+    """校验并返回持仓查询的升序 requested_years，允许 1-5 年。"""
+
+    try:
+        years = tuple(int(year) for year in requested_years)
+    except (TypeError, ValueError) as exc:
+        raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "holdings requested_years 不符合契约") from exc
+    if not (1 <= len(years) <= _MULTI_YEAR_MAXIMUM_COMPLETE_YEARS):
+        raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "holdings requested_years 长度不符合契约")
+    if len(set(years)) != len(years):
+        raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "holdings requested_years 年份重复")
     return tuple(sorted(years))
 
 
@@ -2492,3 +2769,85 @@ def _catalog_document_ids(catalog_path: Path) -> tuple[str, ...]:
     if not isinstance(reports, dict):
         raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "catalog reports 结构不符合契约")
     return tuple(sorted(str(document_id) for document_id in reports))
+
+
+_HOLDINGS_COLUMN_NAMES = ("序号", "股票代码", "股票名称", "数量", "公允价值", "占基金资产净值比例")
+
+
+def _extract_holdings_from_agent_result(
+    *,
+    document_id: str,
+    result: AgentRunResult,
+    tool_service: FundDocumentToolService,
+) -> tuple[HoldingExtraction, ...]:
+    """从 Agent 结果中抽取前十大持仓数据。"""
+
+    table_citation_refs = [
+        citation for citation in result.citations
+        if citation.locator.locator_kind is LocatorKind.TABLE and citation.locator.table_ref
+    ]
+    if not table_citation_refs:
+        raise DocumentToolError(FailureCode.NOT_FOUND, "持仓表格 citation 缺失")
+
+    holdings: list[HoldingExtraction] = []
+    for citation in table_citation_refs:
+        table_ref = citation.locator.table_ref
+        if not table_ref:
+            continue
+        table = tool_service.read_table(document_id, table_ref, max_rows=_HOLDINGS_TABLE_MAX_ROWS)
+        if isinstance(table, ToolFailure):
+            raise DocumentToolError(table.code, table.message)
+
+        column_indexes = _holdings_column_indexes(table.rows)
+        if column_indexes is None:
+            continue
+
+        data_rows = table.rows[1:]
+        for rank, row in enumerate(data_rows[:_HOLDINGS_TOP_N], 1):
+            if len(row) <= max(column_indexes.values()):
+                continue
+            stock_code = row[column_indexes["stock_code"]].strip()
+            stock_name = row[column_indexes["stock_name"]].strip()
+            quantity = row[column_indexes["quantity"]].strip()
+            fair_value = row[column_indexes["fair_value"]].strip()
+            percentage = row[column_indexes["percentage"]].strip()
+            if not stock_code and not stock_name:
+                continue
+            holdings.append(HoldingExtraction(
+                rank=rank,
+                stock_code=stock_code,
+                stock_name=stock_name,
+                quantity=quantity,
+                fair_value=fair_value,
+                percentage=percentage,
+            ))
+        if holdings:
+            break
+
+    return tuple(holdings)
+
+
+def _holdings_column_indexes(rows: tuple[tuple[str, ...], ...]) -> dict[str, int] | None:
+    """识别持仓表的列索引映射。"""
+
+    if not rows:
+        return None
+    header = rows[0]
+    mapping: dict[str, int] = {}
+    for idx, cell in enumerate(header):
+        cell_clean = cell.strip()
+        if "股票代码" in cell_clean:
+            mapping["stock_code"] = idx
+        elif "股票名称" in cell_clean:
+            mapping["stock_name"] = idx
+        elif "数量" in cell_clean:
+            mapping["quantity"] = idx
+        elif "公允价值" in cell_clean:
+            mapping["fair_value"] = idx
+        elif "占基金资产净值比例" in cell_clean or "占比" in cell_clean:
+            mapping["percentage"] = idx
+
+    required = ("stock_code", "stock_name", "percentage")
+    if all(k in mapping for k in required):
+        return mapping
+    return None

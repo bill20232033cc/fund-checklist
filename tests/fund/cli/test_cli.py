@@ -1168,3 +1168,207 @@ def test_extract_keyword_empty_fund_name_raises() -> None:
 
     with pytest.raises(ValueError, match="无法提取关键词"):
         _extract_fund_name_keyword("灵活配置混合型证券投资基金")
+
+
+def test_holdings_parser_accepts_valid_args() -> None:
+    """holdings 子命令 parser 必须接受合法参数。"""
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "holdings",
+        "--fund-code", "004393",
+        "--years", "2022,2023,2024",
+    ])
+
+    assert args.command == "holdings"
+    assert args.fund_code == "004393"
+    assert args.years == "2022,2023,2024"
+
+
+def test_holdings_exits_2_when_no_matching_reports(tmp_path: Path) -> None:
+    """catalog 中无匹配年报时 holdings 必须返回 exit 2。"""
+
+    work_dir = tmp_path / "work"
+    _write_catalog(work_dir, [])
+
+    exit_code, stdout, stderr = _run([
+        "holdings",
+        "--fund-code", "004393",
+        "--years", "2022,2023,2024",
+        "--work-dir", str(work_dir),
+    ])
+
+    assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
+    assert "not_found" in stderr
+
+
+def test_holdings_exits_2_when_fund_code_mismatch(tmp_path: Path) -> None:
+    """fund_code 不匹配时 holdings 必须返回 exit 2。"""
+
+    work_dir = tmp_path / "work"
+    _write_catalog(work_dir, [
+        {"document_id": "doc-2024", "year": 2024, "fund_code": "999999"},
+    ])
+
+    exit_code, stdout, stderr = _run([
+        "holdings",
+        "--fund-code", "004393",
+        "--years", "2024",
+        "--work-dir", str(work_dir),
+    ])
+
+    assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
+    assert "not_found" in stderr
+
+
+def test_holdings_json_output_on_success(monkeypatch, tmp_path: Path) -> None:
+    """holdings 成功时必须输出 JSON 格式的持仓数据。"""
+
+    from fund_agent.service import (
+        ExtractHoldingsResult,
+        MultiYearHoldingsSeries,
+        AnnualHoldingsResult,
+        HoldingExtraction,
+    )
+    from fund_agent.fund.document_tools.models import Citation, Locator
+
+    fake_series = MultiYearHoldingsSeries(
+        fund_code="004393",
+        requested_years=(2024,),
+        covered_years=(2024,),
+        missing_years=(),
+        annual_holdings=(
+            AnnualHoldingsResult(
+                document_id="doc-2024",
+                year=2024,
+                holdings=(
+                    HoldingExtraction(
+                        rank=1,
+                        stock_code="00939",
+                        stock_name="建设银行",
+                        quantity="3030000",
+                        fair_value="18182239.78",
+                        percentage="6.08",
+                    ),
+                ),
+                citation=Citation(
+                    document_id="doc-2024",
+                    fund_code="004393",
+                    fund_name="安信企业价值优选",
+                    year=2024,
+                    report_type="annual_report",
+                    locator=Locator(
+                        document_id="doc-2024",
+                        locator_kind="table",
+                        section_ref=None,
+                        table_ref="table-0010",
+                        page_no=55,
+                        page_range=None,
+                        internal_ref=None,
+                        internal_ref_available=False,
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    class _FakeService:
+        def extract_multi_year_holdings(self, request):
+            return ExtractHoldingsResult(series=fake_series, failure=None)
+
+    monkeypatch.setattr(cli_module, "FundReadingService", _FakeService)
+
+    work_dir = tmp_path / "work"
+    _write_catalog(work_dir, [
+        {"document_id": "doc-2024", "year": 2024, "fund_code": "004393"},
+    ])
+
+    exit_code, stdout, stderr = _run([
+        "holdings",
+        "--fund-code", "004393",
+        "--years", "2024",
+        "--work-dir", str(work_dir),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE
+    assert stderr == ""
+    output = json.loads(stdout)
+    assert output["fund_code"] == "004393"
+    assert len(output["annual_holdings"]) == 1
+    assert output["annual_holdings"][0]["holdings"][0]["stock_name"] == "建设银行"
+    assert output["annual_holdings"][0]["holdings"][0]["percentage"] == "6.08"
+
+
+def test_holdings_exits_2_when_service_failure(monkeypatch, tmp_path: Path) -> None:
+    """Service 返回 failure 时 holdings 必须返回 exit 2。"""
+
+    from fund_agent.service import ExtractHoldingsResult
+
+    class _FakeService:
+        def extract_multi_year_holdings(self, request):
+            return ExtractHoldingsResult(
+                series=None,
+                failure=ToolFailure(code=FailureCode.NOT_FOUND, message="未找到持仓数据"),
+            )
+
+    monkeypatch.setattr(cli_module, "FundReadingService", _FakeService)
+
+    work_dir = tmp_path / "work"
+    _write_catalog(work_dir, [
+        {"document_id": "doc-2024", "year": 2024, "fund_code": "004393"},
+    ])
+
+    exit_code, stdout, stderr = _run([
+        "holdings",
+        "--fund-code", "004393",
+        "--years", "2024",
+        "--work-dir", str(work_dir),
+    ])
+
+    assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
+    assert "not_found" in stderr
+
+
+def test_holdings_deduplicates_same_year_entries(monkeypatch, tmp_path: Path) -> None:
+    """holdings 必须对同一年份的多条 catalog 记录去重。"""
+
+    from fund_agent.service import (
+        ExtractHoldingsResult,
+        MultiYearHoldingsSeries,
+        AnnualHoldingsResult,
+    )
+
+    class _FakeService:
+        def extract_multi_year_holdings(self, request):
+            years = [d.year for d in request.annual_report_documents]
+            assert len(years) == len(set(years)), f"发现重复年份: {years}"
+            return ExtractHoldingsResult(
+                series=MultiYearHoldingsSeries(
+                    fund_code="004393",
+                    requested_years=tuple(years),
+                    covered_years=tuple(years),
+                    missing_years=(),
+                    annual_holdings=tuple(
+                        AnnualHoldingsResult(document_id=f"doc-{y}", year=y, holdings=())
+                        for y in years
+                    ),
+                ),
+                failure=None,
+            )
+
+    monkeypatch.setattr(cli_module, "FundReadingService", _FakeService)
+
+    work_dir = tmp_path / "work"
+    _write_catalog(work_dir, [
+        {"document_id": "doc-2024a", "year": 2024, "fund_code": "004393"},
+        {"document_id": "doc-2024b", "year": 2024, "fund_code": "004393"},
+    ])
+
+    exit_code, stdout, stderr = _run([
+        "holdings",
+        "--fund-code", "004393",
+        "--years", "2024",
+        "--work-dir", str(work_dir),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE
