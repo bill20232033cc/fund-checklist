@@ -1184,5 +1184,5 @@ Post-MVP 11C 裁决为 holdings multi-year tracking：
 下一步只应验证一个问题：
 
 ```text
-12A 裁决已写入。下一步进入 12A 代码实现：引入 HostRunResult、HostRunEvent 和简单 timeout。
+12B 裁决已写入。下一步进入 12B 代码实现：新增 fund-checklist audit 子命令，检查年报披露完整性。
 ```

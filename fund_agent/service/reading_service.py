@@ -740,6 +740,72 @@ class ExtractFeeRatesMultiYearResult:
     failure: ToolFailure | None = None
 
 
+@dataclass(frozen=True)
+class DisclosureAuditItem:
+    """单个披露项审计结果。
+
+    参数:
+        name: 披露项名称（如 holdings、fee_rates 等）。
+        status: 状态（complete / partial / missing）。
+        chapter: 章节是否存在。
+        table: 表格是否存在（无表格的披露项为 None）。
+        fields: 存在的字段列表。
+        message: 补充说明（如缺失原因）。
+
+    返回:
+        不可变审计结果 DTO。
+    """
+
+    name: str
+    status: str
+    chapter: bool
+    table: bool | None = None
+    fields: tuple[str, ...] = ()
+    message: str = ""
+
+
+@dataclass(frozen=True)
+class DisclosureAuditRequest:
+    """披露完整性审计请求。
+
+    参数:
+        fund_code: 基金代码。
+        year: 审计年份。
+        work_dir: 受控工作目录。
+
+    返回:
+        不可变请求 DTO。
+    """
+
+    fund_code: str
+    year: int
+    work_dir: Path
+
+
+@dataclass(frozen=True)
+class DisclosureAuditResult:
+    """披露完整性审计结果。
+
+    参数:
+        fund_code: 基金代码。
+        year: 审计年份。
+        document_id: 审计的文档 ID。
+        disclosures: 各披露项审计结果。
+        summary: 汇总（complete / partial / missing 数量）。
+        failure: 失败分类；成功时为 None。
+
+    返回:
+        不可变审计结果 DTO。
+    """
+
+    fund_code: str
+    year: int
+    document_id: str | None = None
+    disclosures: tuple[DisclosureAuditItem, ...] = ()
+    summary: dict[str, int] | None = None
+    failure: ToolFailure | None = None
+
+
 _HOLDINGS_TOP_N = 10
 _HOLDINGS_QUERY = "股票投资明细"
 _HOLDINGS_TABLE_MAX_ROWS = 15
@@ -1937,6 +2003,178 @@ class FundReadingService:
                 series=None,
                 failure=ToolFailure(code=FailureCode.UNAVAILABLE, message="多年度费率聚合暂不可用"),
             )
+
+    def audit_disclosure_completeness(
+        self,
+        request: DisclosureAuditRequest,
+    ) -> DisclosureAuditResult:
+        """审计年报披露完整性。
+
+        参数:
+            request: 披露完整性审计请求。
+
+        返回:
+            DisclosureAuditResult；包含各披露项审计结果和汇总。
+        """
+
+        try:
+            repository = _repository(Path(request.work_dir))
+            catalog_reports = repository.list_reports()
+
+            document_id = None
+            for report in catalog_reports:
+                if report.get("fund_code") == request.fund_code and report.get("year") == request.year:
+                    document_id = str(report["document_id"])
+                    break
+
+            if document_id is None:
+                return DisclosureAuditResult(
+                    fund_code=request.fund_code,
+                    year=request.year,
+                    failure=ToolFailure(code=FailureCode.NOT_FOUND, message=f"catalog 中未找到 {request.fund_code} 的 {request.year} 年年报"),
+                )
+
+            store = repository.load_store(document_id)
+            tool_service = FundDocumentToolService({document_id: store})
+            host = self._host_factory(tool_service)
+
+            disclosures: list[DisclosureAuditItem] = []
+
+            disclosures.append(self._audit_holdings(host, document_id, request.year))
+            disclosures.append(self._audit_asset_allocation(host, document_id, request.year))
+            disclosures.append(self._audit_fee_rates(host, document_id, request.year))
+            disclosures.append(self._audit_performance(host, document_id, request.year))
+            disclosures.append(self._audit_fund_manager(host, document_id, request.year))
+            disclosures.append(self._audit_dividends(host, document_id, request.year))
+
+            complete = sum(1 for d in disclosures if d.status == "complete")
+            partial = sum(1 for d in disclosures if d.status == "partial")
+            missing = sum(1 for d in disclosures if d.status == "missing")
+
+            return DisclosureAuditResult(
+                fund_code=request.fund_code,
+                year=request.year,
+                document_id=document_id,
+                disclosures=tuple(disclosures),
+                summary={"complete": complete, "partial": partial, "missing": missing},
+                failure=None,
+            )
+        except DocumentToolError as exc:
+            return DisclosureAuditResult(
+                fund_code=request.fund_code,
+                year=request.year,
+                failure=ToolFailure(code=exc.code, message=exc.message),
+            )
+        except Exception:
+            return DisclosureAuditResult(
+                fund_code=request.fund_code,
+                year=request.year,
+                failure=ToolFailure(code=FailureCode.UNAVAILABLE, message="披露完整性审计暂不可用"),
+            )
+
+    def _audit_holdings(self, host: MinimalHost, document_id: str, year: int) -> DisclosureAuditItem:
+        """审计持仓披露。"""
+
+        routed = self._run_with_query_candidates(host=host, document_id=document_id, query="股票投资明细")
+        if routed.agent_result.failure is not None:
+            return DisclosureAuditItem(name="holdings", status="missing", chapter=False, message="持仓章节未找到")
+
+        has_table = any(c.locator.locator_kind is LocatorKind.TABLE for c in routed.agent_result.citations)
+        fields = []
+        if has_table:
+            fields = ["stock_code", "stock_name", "percentage"]
+        status = "complete" if has_table else "partial"
+        return DisclosureAuditItem(name="holdings", status=status, chapter=True, table=has_table, fields=tuple(fields))
+
+    def _audit_asset_allocation(self, host: MinimalHost, document_id: str, year: int) -> DisclosureAuditItem:
+        """审计资产配置披露。"""
+
+        routed = self._run_with_query_candidates(host=host, document_id=document_id, query="期末基金资产组合情况")
+        if routed.agent_result.failure is not None:
+            return DisclosureAuditItem(name="asset_allocation", status="missing", chapter=False, message="资产配置章节未找到")
+
+        has_table = any(c.locator.locator_kind is LocatorKind.TABLE for c in routed.agent_result.citations)
+        fields = []
+        if has_table:
+            fields = ["category", "amount", "percentage"]
+        status = "complete" if has_table else "partial"
+        return DisclosureAuditItem(name="asset_allocation", status=status, chapter=True, table=has_table, fields=tuple(fields))
+
+    def _audit_fee_rates(self, host: MinimalHost, document_id: str, year: int) -> DisclosureAuditItem:
+        """审计费率披露。"""
+
+        fee_queries = ("基金管理费", "基金托管费", "销售服务费")
+        found_fees: list[str] = []
+        chapter_found = False
+
+        for query in fee_queries:
+            routed = self._run_with_query_candidates(host=host, document_id=document_id, query=query)
+            if routed.agent_result.failure is None:
+                chapter_found = True
+                has_section = any(c.locator.locator_kind is LocatorKind.SECTION for c in routed.agent_result.citations)
+                if has_section:
+                    if query == "基金管理费":
+                        found_fees.append("management_fee")
+                    elif query == "基金托管费":
+                        found_fees.append("custodian_fee")
+                    elif query == "销售服务费":
+                        found_fees.append("sales_service_fee")
+
+        unique_fees = list(dict.fromkeys(found_fees))
+        if not chapter_found:
+            return DisclosureAuditItem(name="fee_rates", status="missing", chapter=False, message="费率章节未找到")
+        if not unique_fees:
+            return DisclosureAuditItem(name="fee_rates", status="partial", chapter=True, message="费率字段未识别到")
+        if len(unique_fees) >= 3:
+            return DisclosureAuditItem(name="fee_rates", status="complete", chapter=True, fields=tuple(unique_fees))
+        return DisclosureAuditItem(name="fee_rates", status="partial", chapter=True, fields=tuple(unique_fees), message=f"只找到 {len(unique_fees)} 项费率")
+
+    def _audit_performance(self, host: MinimalHost, document_id: str, year: int) -> DisclosureAuditItem:
+        """审计业绩披露。"""
+
+        routed = self._run_with_query_candidates(host=host, document_id=document_id, query="基金份额净值增长率")
+        if routed.agent_result.failure is not None:
+            return DisclosureAuditItem(name="performance", status="missing", chapter=False, message="业绩章节未找到")
+
+        has_table = any(c.locator.locator_kind is LocatorKind.TABLE for c in routed.agent_result.citations)
+        fields = []
+        if has_table:
+            fields = ["nav_growth_rate", "benchmark_return_rate"]
+        status = "complete" if has_table else "partial"
+        return DisclosureAuditItem(name="performance", status=status, chapter=True, table=has_table, fields=tuple(fields))
+
+    def _audit_fund_manager(self, host: MinimalHost, document_id: str, year: int) -> DisclosureAuditItem:
+        """审计基金经理披露。"""
+
+        routed = self._run_with_query_candidates(host=host, document_id=document_id, query="基金经理")
+        if routed.agent_result.failure is not None:
+            return DisclosureAuditItem(name="fund_manager", status="missing", chapter=False, message="基金经理章节未找到")
+
+        has_section = any(c.locator.locator_kind is LocatorKind.SECTION for c in routed.agent_result.citations)
+        has_table = any(c.locator.locator_kind is LocatorKind.TABLE for c in routed.agent_result.citations)
+        fields = []
+        if has_section:
+            fields.append("name")
+        if has_table:
+            fields.append("appointment_date")
+        status = "complete" if has_section else "partial"
+        return DisclosureAuditItem(name="fund_manager", status=status, chapter=has_section, table=has_table if has_table else None, fields=tuple(fields))
+
+    def _audit_dividends(self, host: MinimalHost, document_id: str, year: int) -> DisclosureAuditItem:
+        """审计分红披露。"""
+
+        routed = self._run_with_query_candidates(host=host, document_id=document_id, query="利润分配")
+        if routed.agent_result.failure is not None:
+            routed = self._run_with_query_candidates(host=host, document_id=document_id, query="分红")
+            if routed.agent_result.failure is not None:
+                return DisclosureAuditItem(name="dividends", status="missing", chapter=False, message="分红章节未找到")
+
+        has_table = any(c.locator.locator_kind is LocatorKind.TABLE for c in routed.agent_result.citations)
+        fields = []
+        if has_table:
+            fields = ["amount", "date"]
+        status = "complete" if has_table else "partial"
+        return DisclosureAuditItem(name="dividends", status=status, chapter=True, table=has_table, fields=tuple(fields))
 
     def list_reports(self, request: ListReportsRequest) -> ListReportsResult:
         """列出本地 completed reports 的安全摘要。

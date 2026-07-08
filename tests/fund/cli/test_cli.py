@@ -1715,3 +1715,164 @@ def test_is_industry_allocation_table_rejects_non_industry_table() -> None:
         ("1", "权益投资", "100,000,000", "80.00"),
     )
     assert _is_industry_allocation_table(rows) is False
+
+
+def test_audit_parser_accepts_valid_args() -> None:
+    """audit 子命令 parser 必须接受合法参数。"""
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "audit",
+        "--fund-code", "512890",
+        "--year", "2024",
+    ])
+
+    assert args.command == "audit"
+    assert args.fund_code == "512890"
+    assert args.year == 2024
+
+
+def test_audit_exits_2_when_no_matching_report(tmp_path: Path) -> None:
+    """catalog 中无匹配年报时 audit 必须返回 exit 2。"""
+
+    work_dir = tmp_path / "work"
+    _write_catalog(work_dir, [])
+
+    exit_code, stdout, stderr = _run([
+        "audit",
+        "--fund-code", "512890",
+        "--year", "2024",
+        "--work-dir", str(work_dir),
+    ])
+
+    assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
+    assert "not_found" in stderr
+
+
+def test_audit_json_output_on_success(monkeypatch, tmp_path: Path) -> None:
+    """audit 成功时必须输出 JSON 格式的审计结果。"""
+
+    from fund_agent.service import (
+        DisclosureAuditResult,
+        DisclosureAuditItem,
+    )
+
+    fake_result = DisclosureAuditResult(
+        fund_code="512890",
+        year=2024,
+        document_id="512890-2024-annual_report-abc123",
+        disclosures=(
+            DisclosureAuditItem(name="holdings", status="complete", chapter=True, table=True, fields=("stock_code", "stock_name", "percentage")),
+            DisclosureAuditItem(name="asset_allocation", status="complete", chapter=True, table=True, fields=("category", "amount", "percentage")),
+            DisclosureAuditItem(name="fee_rates", status="complete", chapter=True, fields=("management_fee", "custodian_fee")),
+            DisclosureAuditItem(name="performance", status="partial", chapter=True, table=False, fields=(), message="业绩表格未找到"),
+            DisclosureAuditItem(name="fund_manager", status="complete", chapter=True, fields=("name",)),
+            DisclosureAuditItem(name="dividends", status="complete", chapter=True, table=True, fields=("amount", "date")),
+        ),
+        summary={"complete": 5, "partial": 1, "missing": 0},
+        failure=None,
+    )
+
+    class _FakeService:
+        def audit_disclosure_completeness(self, request):
+            return fake_result
+
+    monkeypatch.setattr(cli_module, "FundReadingService", _FakeService)
+
+    work_dir = tmp_path / "work"
+    _write_catalog(work_dir, [
+        {"document_id": "512890-2024-annual_report-abc123", "year": 2024, "fund_code": "512890"},
+    ])
+
+    exit_code, stdout, stderr = _run([
+        "audit",
+        "--fund-code", "512890",
+        "--year", "2024",
+        "--work-dir", str(work_dir),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE
+    assert stderr == ""
+    output = json.loads(stdout)
+    assert output["fund_code"] == "512890"
+    assert output["year"] == 2024
+    assert len(output["disclosures"]) == 6
+    assert output["summary"]["complete"] == 5
+    assert output["summary"]["partial"] == 1
+    assert output["summary"]["missing"] == 0
+
+
+def test_audit_fee_rates_with_partial_fees(monkeypatch, tmp_path: Path) -> None:
+    """费率审计必须正确识别部分费率（如 ETF 只有管理费和托管费）。"""
+
+    from fund_agent.service import (
+        DisclosureAuditResult,
+        DisclosureAuditItem,
+    )
+
+    fake_result = DisclosureAuditResult(
+        fund_code="512890",
+        year=2024,
+        document_id="512890-2024-annual_report-abc123",
+        disclosures=(
+            DisclosureAuditItem(name="fee_rates", status="partial", chapter=True, fields=("management_fee", "custodian_fee"), message="只找到 2 项费率"),
+        ),
+        summary={"complete": 0, "partial": 1, "missing": 0},
+        failure=None,
+    )
+
+    class _FakeService:
+        def audit_disclosure_completeness(self, request):
+            return fake_result
+
+    monkeypatch.setattr(cli_module, "FundReadingService", _FakeService)
+
+    work_dir = tmp_path / "work"
+    _write_catalog(work_dir, [
+        {"document_id": "512890-2024-annual_report-abc123", "year": 2024, "fund_code": "512890"},
+    ])
+
+    exit_code, stdout, stderr = _run([
+        "audit",
+        "--fund-code", "512890",
+        "--year", "2024",
+        "--work-dir", str(work_dir),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE
+    output = json.loads(stdout)
+    assert output["disclosures"][0]["status"] == "partial"
+    assert "management_fee" in output["disclosures"][0]["fields"]
+    assert "custodian_fee" in output["disclosures"][0]["fields"]
+    assert "sales_service_fee" not in output["disclosures"][0]["fields"]
+
+
+def test_audit_exits_2_when_service_failure(monkeypatch, tmp_path: Path) -> None:
+    """Service 返回 failure 时 audit 必须返回 exit 2。"""
+
+    from fund_agent.service import DisclosureAuditResult
+
+    class _FakeService:
+        def audit_disclosure_completeness(self, request):
+            return DisclosureAuditResult(
+                fund_code="512890",
+                year=2024,
+                failure=ToolFailure(code=FailureCode.NOT_FOUND, message="未找到年报"),
+            )
+
+    monkeypatch.setattr(cli_module, "FundReadingService", _FakeService)
+
+    work_dir = tmp_path / "work"
+    _write_catalog(work_dir, [
+        {"document_id": "512890-2024-annual_report-abc123", "year": 2024, "fund_code": "512890"},
+    ])
+
+    exit_code, stdout, stderr = _run([
+        "audit",
+        "--fund-code", "512890",
+        "--year", "2024",
+        "--work-dir", str(work_dir),
+    ])
+
+    assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
+    assert "not_found" in stderr

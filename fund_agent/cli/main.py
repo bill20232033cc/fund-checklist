@@ -20,6 +20,7 @@ from fund_agent.fund.document_tools.persistent_repository import (
 from fund_agent.service import (
     AggregateMultiYearAnnualPerformanceRequest,
     AnnualReportDocument,
+    DisclosureAuditRequest,
     ExtractAllocationRequest,
     ExtractFeeRatesMultiYearRequest,
     ExtractHoldingsRequest,
@@ -87,6 +88,8 @@ def run_cli(
             return _run_allocation_command(args, stdout=stdout, stderr=stderr)
         if args.command == "fees":
             return _run_fees_command(args, stdout=stdout, stderr=stderr)
+        if args.command == "audit":
+            return _run_audit_command(args, stdout=stdout, stderr=stderr)
     except DocumentToolError as exc:
         _write_classified_failure(ToolFailure(code=exc.code, message=exc.message), stderr)
         return CLASSIFIED_FAILURE_EXIT_CODE
@@ -149,6 +152,11 @@ def build_parser() -> argparse.ArgumentParser:
     fees_parser.add_argument("--fund-code", required=True)
     fees_parser.add_argument("--years", required=True)
     fees_parser.add_argument("--work-dir", default=Path(DEFAULT_WORK_DIR), type=Path)
+
+    audit_parser = subparsers.add_parser("audit")
+    audit_parser.add_argument("--fund-code", required=True)
+    audit_parser.add_argument("--year", required=True, type=int)
+    audit_parser.add_argument("--work-dir", default=Path(DEFAULT_WORK_DIR), type=Path)
     return parser
 
 
@@ -605,6 +613,41 @@ def _run_fees_command(args: argparse.Namespace, *, stdout: TextIO, stderr: TextI
 
     output = {
         "series": [asdict(result.series)],
+    }
+    print(json.dumps(output, ensure_ascii=False, indent=2), file=stdout)
+    return SUCCESS_EXIT_CODE
+
+
+def _run_audit_command(args: argparse.Namespace, *, stdout: TextIO, stderr: TextIO) -> int:
+    """审计年报披露完整性。
+
+    参数:
+        args: argparse 解析出的 audit 参数。
+        stdout: 成功输出流（JSON）。
+        stderr: 失败输出流。
+
+    返回:
+        成功返回 0；not_found 返回 2。
+    """
+
+    service = FundReadingService()
+    result = service.audit_disclosure_completeness(
+        DisclosureAuditRequest(
+            fund_code=args.fund_code,
+            year=args.year,
+            work_dir=Path(args.work_dir),
+        )
+    )
+    if result.failure is not None:
+        _write_classified_failure(result.failure, stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+    output = {
+        "fund_code": result.fund_code,
+        "year": result.year,
+        "document_id": result.document_id,
+        "disclosures": [asdict(d) for d in result.disclosures],
+        "summary": result.summary,
     }
     print(json.dumps(output, ensure_ascii=False, indent=2), file=stdout)
     return SUCCESS_EXIT_CODE
