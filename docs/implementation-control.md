@@ -1,9 +1,9 @@
 # fund-checklist implementation-control
 
 更新时间：2026-07-08
-当前阶段：`POST_MVP_SLICE_10M_IN_PROGRESS`
+当前阶段：`POST_MVP_SLICE_10M_ACCEPTED`
 当前角色：control / CIC-lite controller
-当前目标：Slice 10M batch PDF import。新增独立子命令 `fund-checklist import`，从目录批量导入 PDF 到 catalog，用户指定 fund_code + fund_name + year-range，从文件名提取年份并过滤匹配的 PDF；覆盖已存在条目；单文件失败跳过继续。不得扩成 gateflow / phaseflow / release-readiness，不新增 plan artifact，不进入 batch benchmark、开放语义理解、自动分词、embedding、LLM intent、template contract execution、chapter contract execution、calculation framework、`fund-checklist ask`、UI、自动报告或投资判断。
+当前目标：Slice 10M batch PDF import 已实现并经 DeepSeek review `ACCEPTED`。不得扩成 gateflow / phaseflow / release-readiness，不新增 plan artifact，不进入 batch benchmark、开放语义理解、自动分词、embedding、LLM intent、template contract execution、chapter contract execution、calculation framework、`fund-checklist ask`、UI、自动报告或投资判断。
 
 ## 当前事实
 
@@ -474,7 +474,7 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## Next Action
 
-10M 裁决已写入。下一步进入 10M 代码实现：新增 `fund-checklist import` 子命令，从目录批量导入 PDF 到 catalog，用户指定 fund_code + fund_name + year-range，从文件名提取年份并过滤匹配的 PDF；覆盖已存在条目；单文件失败跳过继续。不得改 read / multi-year 子命令输出，不接真实 LLM，不做自然语言解析、报告生成、年化收益率、扣费后收益率、`R=A+B-C` 或投资判断。
+10M 已完成并经 DeepSeek review `ACCEPTED`。下一步尚未裁决。若继续收益链路，可考虑持仓/资产配置多年度追踪、Disclosure completeness audit 或 Host lifecycle basics。不得改 read / multi-year / import 子命令输出，不接真实 LLM，不做自然语言解析、报告生成、年化收益率、扣费后收益率、`R=A+B-C` 或投资判断。
 
 禁止事项：
 
@@ -572,7 +572,7 @@ uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值
 11A. performance disclosure locator：已 accepted；定位 `基金份额净值增长率及其与同期业绩比较基准收益率的比较` / `基金净值表现` 披露，返回 section/table citation 和原始表格片段；不抽值、不计算。
 11B. disclosure locator contract registry：已 accepted；把既有 controlled disclosure profiles 收敛为 Service 内部 locator contract registry；不新增披露对象，不抽值、不计算、不改 public tool / CLI contract。
 10L. multi-year performance CLI integration：已 accepted；新增独立子命令 `fund-checklist multi-year`，给 Repository 新增 `list_reports()` 方法，从 catalog 按 fund_code + year 查找已导入年报，调用 10I Service 聚合多年度收益，JSON 格式输出；批量导入另开 10M；不改 Service / Host / Agent 核心逻辑。
-10M. batch PDF import：实现中；新增独立子命令 `fund-checklist import`，从目录批量导入 PDF 到 catalog，用户指定 fund_code + fund_name + year-range，从文件名提取年份并过滤匹配的 PDF；覆盖已存在条目；单文件失败跳过继续；逐条进度 + 最终汇总输出；复用现有 `import_local_report()`，不新增 Service 方法。
+10M. batch PDF import：已 accepted；新增独立子命令 `fund-checklist import`，从目录批量导入 PDF 到 catalog，用户指定 fund_code + fund_name + year-range，从文件名提取年份并过滤匹配的 PDF；覆盖已存在条目；单文件失败跳过继续；逐条进度 + 最终汇总输出；复用现有 `import_local_report()`，不新增 Service 方法；24 passed。
 
 ## MVP Acceptance Matrix
 

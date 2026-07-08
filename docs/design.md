@@ -1174,5 +1174,5 @@ Post-MVP 10M 裁决为 batch PDF import：
 下一步只应验证一个问题：
 
 ```text
-10M 裁决已写入。下一步进入 10M 代码实现：新增 fund-checklist import 子命令，从目录批量导入 PDF 到 catalog，用户指定 fund_code + fund_name + year-range，从文件名提取年份并过滤匹配的 PDF；覆盖已存在条目；单文件失败跳过继续。
+10M 已完成并经 DeepSeek review `ACCEPTED`。下一步尚未裁决。若继续收益链路，可考虑持仓/资产配置多年度追踪、Disclosure completeness audit 或 Host lifecycle basics。
 ```
