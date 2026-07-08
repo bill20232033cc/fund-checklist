@@ -1,9 +1,9 @@
 # fund-checklist implementation-control
 
 更新时间：2026-07-08
-当前阶段：`POST_MVP_SLICE_11C_ACCEPTED`
+当前阶段：`POST_MVP_SLICE_11D_IN_PROGRESS`
 当前角色：control / CIC-lite controller
-当前目标：Slice 11C holdings multi-year tracking 已实现并经 DeepSeek review `ACCEPTED`。不得扩成 gateflow / phaseflow / release-readiness，不新增 plan artifact，不进入 batch benchmark、开放语义理解、自动分词、embedding、LLM intent、template contract execution、chapter contract execution、calculation framework、`fund-checklist ask`、UI、自动报告或投资判断。
+当前目标：Slice 11D asset allocation + fee rates multi-year tracking。新增 `fund-checklist allocation` 和 `fund-checklist fees` 子命令，补齐三大披露对象（持仓、资产配置、费率）的多年度能力。不得扩成 gateflow / phaseflow / release-readiness，不新增 plan artifact，不进入 batch benchmark、开放语义理解、自动分词、embedding、LLM intent、template contract execution、chapter contract execution、calculation framework、`fund-checklist ask`、UI、自动报告或投资判断。
 
 ## 当前事实
 
@@ -471,6 +471,20 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - 11C allowed write set：`fund_agent/cli/main.py`、`fund_agent/service/reading_service.py`、测试文件、`docs/implementation-control.md`、`docs/design.md`。
 - 11C smoke 测试使用真实 PDF。
 - 11C 不做股票追踪、行业分析、持仓变化计算、投资判断或自动报告。
+- Post-MVP 11D 裁决为 asset allocation + fee rates multi-year tracking。
+- 11D 新增两个独立子命令：`fund-checklist allocation` 和 `fund-checklist fees`。
+- 11D 目标披露表：
+  - 资产配置：`期末基金资产组合情况`、`期末按行业分类的股票投资组合`
+  - 费率：`基金管理费`、`基金托管费`、`销售服务费`
+- 11D 抽取字段：
+  - 资产配置：资产类别、金额、占净值比、占总资产比
+  - 费率：费率名称、年费率
+- 11D 输出格式为 JSON；返回全部行（不限制 Top N）。
+- 11D allowed write set：`fund_agent/cli/main.py`、`fund_agent/service/reading_service.py`、测试文件、`docs/implementation-control.md`、`docs/design.md`。
+- 11D 实现路径为新增 Service 方法，内部复用 Host/Agent 查询披露表。
+- 11D 失败语义：某年披露表未找到时跳过继续，最终报告 missing_years。
+- 11D smoke 测试使用真实 PDF。
+- 11D 不做费率计算（只抽取披露值）、不改现有子命令、不接真实 LLM、不做投资判断或自动报告。
 
 ## CIC-lite Rules
 
@@ -487,7 +501,7 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## Next Action
 
-11C 已完成并经 DeepSeek review `ACCEPTED`。下一步尚未裁决。可选方向：资产配置多年度追踪、Disclosure completeness audit、Host lifecycle basics 或深化现有能力。不得改 read / multi-year / import / holdings 子命令输出，不接真实 LLM，不做自然语言解析、投资判断或自动报告。
+11D 裁决已写入。下一步进入 11D 代码实现：新增 `allocation` 和 `fees` 子命令，补齐资产配置和费率多年度追踪能力。不得改 read / multi-year / import / holdings 子命令输出，不接真实 LLM，不做费率计算、投资判断或自动报告。
 
 禁止事项：
 
@@ -587,6 +601,7 @@ uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值
 10L. multi-year performance CLI integration：已 accepted；新增独立子命令 `fund-checklist multi-year`，给 Repository 新增 `list_reports()` 方法，从 catalog 按 fund_code + year 查找已导入年报，调用 10I Service 聚合多年度收益，JSON 格式输出；批量导入另开 10M；不改 Service / Host / Agent 核心逻辑。
 10M. batch PDF import：已 accepted；新增独立子命令 `fund-checklist import`，从目录批量导入 PDF 到 catalog，用户指定 fund_code + fund_name + year-range，从文件名提取年份并过滤匹配的 PDF；覆盖已存在条目；单文件失败跳过继续；逐条进度 + 最终汇总输出；复用现有 `import_local_report()`，不新增 Service 方法；24 passed。
 11C. holdings multi-year tracking：已 accepted；新增独立子命令 `fund-checklist holdings`，从已导入年报中抽取前十大持仓表（完整字段：股票代码、股票名称、数量、公允价值、占净值比），按年度列表返回 Top 10 持仓，JSON 格式输出；支持跨页表格合并；58 passed。
+11D. asset allocation + fee rates multi-year tracking：实现中；新增 `fund-checklist allocation` 和 `fund-checklist fees` 子命令，补齐资产配置和费率多年度追踪能力；资产配置目标披露表为 `期末基金资产组合情况` 和 `期末按行业分类的股票投资组合`；费率目标披露表为 `基金管理费`、`基金托管费`、`销售服务费`；JSON 输出；某年披露表未找到时跳过继续。
 
 ## MVP Acceptance Matrix
 

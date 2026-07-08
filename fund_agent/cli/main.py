@@ -20,6 +20,8 @@ from fund_agent.fund.document_tools.persistent_repository import (
 from fund_agent.service import (
     AggregateMultiYearAnnualPerformanceRequest,
     AnnualReportDocument,
+    ExtractAllocationRequest,
+    ExtractFeeRatesMultiYearRequest,
     ExtractHoldingsRequest,
     FundReadingService,
     ImportLocalReportRequest,
@@ -81,6 +83,10 @@ def run_cli(
             return _run_import_command(args, stdout=stdout, stderr=stderr)
         if args.command == "holdings":
             return _run_holdings_command(args, stdout=stdout, stderr=stderr)
+        if args.command == "allocation":
+            return _run_allocation_command(args, stdout=stdout, stderr=stderr)
+        if args.command == "fees":
+            return _run_fees_command(args, stdout=stdout, stderr=stderr)
     except DocumentToolError as exc:
         _write_classified_failure(ToolFailure(code=exc.code, message=exc.message), stderr)
         return CLASSIFIED_FAILURE_EXIT_CODE
@@ -133,7 +139,51 @@ def build_parser() -> argparse.ArgumentParser:
     holdings_parser.add_argument("--fund-code", required=True)
     holdings_parser.add_argument("--years", required=True)
     holdings_parser.add_argument("--work-dir", default=Path(DEFAULT_WORK_DIR), type=Path)
+
+    allocation_parser = subparsers.add_parser("allocation")
+    allocation_parser.add_argument("--fund-code", required=True)
+    allocation_parser.add_argument("--years", required=True)
+    allocation_parser.add_argument("--work-dir", default=Path(DEFAULT_WORK_DIR), type=Path)
+
+    fees_parser = subparsers.add_parser("fees")
+    fees_parser.add_argument("--fund-code", required=True)
+    fees_parser.add_argument("--years", required=True)
+    fees_parser.add_argument("--work-dir", default=Path(DEFAULT_WORK_DIR), type=Path)
     return parser
+
+
+def _collect_matching_docs(
+    work_dir: Path,
+    fund_code: str,
+    requested_years: tuple[int, ...],
+) -> list[AnnualReportDocument] | None:
+    """从 catalog 中查找匹配的年报文档列表。
+
+    参数:
+        work_dir: 工作目录。
+        fund_code: 基金代码。
+        requested_years: 请求年度列表。
+
+    返回:
+        匹配的文档列表；无匹配时返回 None。
+    """
+
+    repository = FilesystemReportRepository(
+        catalog_path=work_dir / CATALOG_FILENAME,
+        blob_root=work_dir / "pdf_blobs",
+        docling_json_root=work_dir / "docling_json",
+    )
+    catalog_reports = repository.list_reports()
+
+    seen_years: dict[int, str] = {}
+    for report in catalog_reports:
+        if report.get("fund_code") == fund_code and report.get("year") in requested_years:
+            year = int(report["year"])
+            doc_id = str(report["document_id"])
+            seen_years[year] = doc_id
+
+    matching_docs = [AnnualReportDocument(year=year, document_id=doc_id) for year, doc_id in sorted(seen_years.items())]
+    return matching_docs if matching_docs else None
 
 
 def _run_read_command(args: argparse.Namespace, *, stdout: TextIO, stderr: TextIO) -> int:
@@ -442,22 +492,7 @@ def _run_holdings_command(args: argparse.Namespace, *, stdout: TextIO, stderr: T
     work_dir = Path(args.work_dir)
     requested_years = _parse_years(args.years)
 
-    repository = FilesystemReportRepository(
-        catalog_path=work_dir / CATALOG_FILENAME,
-        blob_root=work_dir / "pdf_blobs",
-        docling_json_root=work_dir / "docling_json",
-    )
-    catalog_reports = repository.list_reports()
-
-    seen_years: dict[int, str] = {}
-    for report in catalog_reports:
-        if report.get("fund_code") == args.fund_code and report.get("year") in requested_years:
-            year = int(report["year"])
-            doc_id = str(report["document_id"])
-            seen_years[year] = doc_id
-
-    matching_docs = [AnnualReportDocument(year=year, document_id=doc_id) for year, doc_id in sorted(seen_years.items())]
-
+    matching_docs = _collect_matching_docs(work_dir, args.fund_code, requested_years)
     if not matching_docs:
         failure = ToolFailure(code=FailureCode.NOT_FOUND, message=f"catalog 中未找到 {args.fund_code} 的年报")
         _write_classified_failure(failure, stderr)
@@ -466,6 +501,88 @@ def _run_holdings_command(args: argparse.Namespace, *, stdout: TextIO, stderr: T
     service = FundReadingService()
     result = service.extract_multi_year_holdings(
         ExtractHoldingsRequest(
+            fund_code=args.fund_code,
+            requested_years=requested_years,
+            annual_report_documents=tuple(matching_docs),
+            work_dir=work_dir,
+        )
+    )
+    if result.failure is not None:
+        _write_classified_failure(result.failure, stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+    output = {
+        "series": [asdict(result.series)],
+    }
+    print(json.dumps(output, ensure_ascii=False, indent=2), file=stdout)
+    return SUCCESS_EXIT_CODE
+
+
+def _run_allocation_command(args: argparse.Namespace, *, stdout: TextIO, stderr: TextIO) -> int:
+    """从 catalog 查找已导入年报并聚合多年度资产配置数据。
+
+    参数:
+        args: argparse 解析出的 allocation 参数。
+        stdout: 成功输出流（JSON）。
+        stderr: 失败输出流。
+
+    返回:
+        成功返回 0；not_found 返回 2。
+    """
+
+    work_dir = Path(args.work_dir)
+    requested_years = _parse_years(args.years)
+
+    matching_docs = _collect_matching_docs(work_dir, args.fund_code, requested_years)
+    if not matching_docs:
+        failure = ToolFailure(code=FailureCode.NOT_FOUND, message=f"catalog 中未找到 {args.fund_code} 的年报")
+        _write_classified_failure(failure, stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+    service = FundReadingService()
+    result = service.extract_multi_year_allocation(
+        ExtractAllocationRequest(
+            fund_code=args.fund_code,
+            requested_years=requested_years,
+            annual_report_documents=tuple(matching_docs),
+            work_dir=work_dir,
+        )
+    )
+    if result.failure is not None:
+        _write_classified_failure(result.failure, stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+    output = {
+        "series": [asdict(result.series)],
+    }
+    print(json.dumps(output, ensure_ascii=False, indent=2), file=stdout)
+    return SUCCESS_EXIT_CODE
+
+
+def _run_fees_command(args: argparse.Namespace, *, stdout: TextIO, stderr: TextIO) -> int:
+    """从 catalog 查找已导入年报并聚合多年度费率数据。
+
+    参数:
+        args: argparse 解析出的 fees 参数。
+        stdout: 成功输出流（JSON）。
+        stderr: 失败输出流。
+
+    返回:
+        成功返回 0；not_found 返回 2。
+    """
+
+    work_dir = Path(args.work_dir)
+    requested_years = _parse_years(args.years)
+
+    matching_docs = _collect_matching_docs(work_dir, args.fund_code, requested_years)
+    if not matching_docs:
+        failure = ToolFailure(code=FailureCode.NOT_FOUND, message=f"catalog 中未找到 {args.fund_code} 的年报")
+        _write_classified_failure(failure, stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+    service = FundReadingService()
+    result = service.extract_multi_year_fee_rates(
+        ExtractFeeRatesMultiYearRequest(
             fund_code=args.fund_code,
             requested_years=requested_years,
             annual_report_documents=tuple(matching_docs),

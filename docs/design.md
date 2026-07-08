@@ -1184,5 +1184,5 @@ Post-MVP 11C 裁决为 holdings multi-year tracking：
 下一步只应验证一个问题：
 
 ```text
-11C 已完成并经 DeepSeek review `ACCEPTED`。下一步尚未裁决。可选方向：资产配置多年度追踪、Disclosure completeness audit、Host lifecycle basics 或深化现有能力。
+11D 裁决已写入。下一步进入 11D 代码实现：新增 allocation 和 fees 子命令，补齐资产配置和费率多年度追踪能力。
 ```

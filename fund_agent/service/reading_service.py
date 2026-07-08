@@ -572,6 +572,174 @@ class ExtractHoldingsResult:
     failure: ToolFailure | None = None
 
 
+@dataclass(frozen=True)
+class AssetAllocationItem:
+    """单条资产配置记录。
+
+    参数:
+        category: 资产类别（如银行存款、股票投资、债券投资等）。
+        amount: 金额。
+        percentage_of_net: 占基金资产净值比例。
+        percentage_of_total: 占总资产比例（可选）。
+
+    返回:
+        不可变资产配置 DTO。
+    """
+
+    category: str
+    amount: str
+    percentage_of_net: str
+    percentage_of_total: str = ""
+
+
+@dataclass(frozen=True)
+class IndustryAllocationItem:
+    """单条行业配置记录。
+
+    参数:
+        industry: 行业类别。
+        amount: 公允价值。
+        percentage: 占基金资产净值比例。
+
+    返回:
+        不可变行业配置 DTO。
+    """
+
+    industry: str
+    amount: str
+    percentage: str
+
+
+@dataclass(frozen=True)
+class FeeRateItem:
+    """单条费率记录。
+
+    参数:
+        fee_name: 费率名称（如基金管理费、基金托管费、销售服务费A类等）。
+        rate: 年费率。
+
+    返回:
+        不可变费率 DTO。
+    """
+
+    fee_name: str
+    rate: str
+
+
+@dataclass(frozen=True)
+class AnnualAllocationResult:
+    """单年度资产配置抽取结果。
+
+    参数:
+        document_id: 来源文档 ID。
+        year: 报告年份。
+        asset_allocation: 资产配置列表。
+        industry_allocation: 行业配置列表。
+        citation: 表格 citation。
+        failure: 失败分类。
+    """
+
+    document_id: str
+    year: int
+    asset_allocation: tuple[AssetAllocationItem, ...]
+    industry_allocation: tuple[IndustryAllocationItem, ...]
+    citation: Citation | None = None
+    failure: ToolFailure | None = None
+
+
+@dataclass(frozen=True)
+class AnnualFeeResult:
+    """单年度费率抽取结果。
+
+    参数:
+        document_id: 来源文档 ID。
+        year: 报告年份。
+        fees: 费率列表。
+        citation: citation。
+        failure: 失败分类。
+    """
+
+    document_id: str
+    year: int
+    fees: tuple[FeeRateItem, ...]
+    citation: Citation | None = None
+    failure: ToolFailure | None = None
+
+
+@dataclass(frozen=True)
+class MultiYearAllocationSeries:
+    """多年度资产配置 series DTO。
+
+    参数:
+        fund_code: 基金代码。
+        requested_years: 请求年度列表。
+        covered_years: 成功抽取的年度。
+        missing_years: 未找到或抽取失败的年度。
+        annual_allocations: 按年度升序排列的年度资产配置结果。
+    """
+
+    fund_code: str
+    requested_years: tuple[int, ...]
+    covered_years: tuple[int, ...]
+    missing_years: tuple[int, ...]
+    annual_allocations: tuple[AnnualAllocationResult, ...]
+
+
+@dataclass(frozen=True)
+class MultiYearFeeSeries:
+    """多年度费率 series DTO。
+
+    参数:
+        fund_code: 基金代码。
+        requested_years: 请求年度列表。
+        covered_years: 成功抽取的年度。
+        missing_years: 未找到或抽取失败的年度。
+        annual_fees: 按年度升序排列的年度费率结果。
+    """
+
+    fund_code: str
+    requested_years: tuple[int, ...]
+    covered_years: tuple[int, ...]
+    missing_years: tuple[int, ...]
+    annual_fees: tuple[AnnualFeeResult, ...]
+
+
+@dataclass(frozen=True)
+class ExtractAllocationRequest:
+    """资产配置多年度聚合请求。"""
+
+    fund_code: str
+    requested_years: tuple[int, ...] | list[int]
+    annual_report_documents: tuple[AnnualReportDocument, ...] | list[AnnualReportDocument]
+    work_dir: Path
+
+
+@dataclass(frozen=True)
+class ExtractAllocationResult:
+    """资产配置多年度聚合结果。"""
+
+    series: MultiYearAllocationSeries | None = None
+    failure: ToolFailure | None = None
+
+
+@dataclass(frozen=True)
+class ExtractFeeRatesMultiYearRequest:
+    """费率多年度聚合请求。"""
+
+    fund_code: str
+    requested_years: tuple[int, ...] | list[int]
+    annual_report_documents: tuple[AnnualReportDocument, ...] | list[AnnualReportDocument]
+    work_dir: Path
+
+
+@dataclass(frozen=True)
+class ExtractFeeRatesMultiYearResult:
+    """费率多年度聚合结果。"""
+
+    series: MultiYearFeeSeries | None = None
+    failure: ToolFailure | None = None
+
+
 _HOLDINGS_TOP_N = 10
 _HOLDINGS_QUERY = "股票投资明细"
 _HOLDINGS_TABLE_MAX_ROWS = 15
@@ -1500,6 +1668,274 @@ class FundReadingService:
             return ExtractHoldingsResult(
                 series=None,
                 failure=ToolFailure(code=FailureCode.UNAVAILABLE, message="多年度持仓聚合暂不可用"),
+            )
+
+    def _extract_allocation_from_store(
+        self,
+        *,
+        document_id: str,
+        store: DoclingDocumentStore,
+        report_year: int,
+    ) -> AnnualAllocationResult:
+        """从单年度年报中抽取资产配置和行业配置。"""
+
+        tool_service = FundDocumentToolService({document_id: store})
+        host = self._host_factory(tool_service)
+        routed = self._run_with_query_candidates(
+            host=host,
+            document_id=document_id,
+            query="期末基金资产组合情况",
+        )
+        if routed.agent_result.failure is not None:
+            return AnnualAllocationResult(
+                document_id=document_id,
+                year=report_year,
+                asset_allocation=(),
+                industry_allocation=(),
+                failure=routed.agent_result.failure,
+            )
+
+        try:
+            asset_allocation, industry_allocation = _extract_allocation_from_agent_result(
+                document_id=document_id,
+                result=routed.agent_result,
+                tool_service=tool_service,
+            )
+        except DocumentToolError as exc:
+            return AnnualAllocationResult(
+                document_id=document_id,
+                year=report_year,
+                asset_allocation=(),
+                industry_allocation=(),
+                failure=ToolFailure(code=exc.code, message=exc.message),
+            )
+        except Exception:
+            return AnnualAllocationResult(
+                document_id=document_id,
+                year=report_year,
+                asset_allocation=(),
+                industry_allocation=(),
+                failure=ToolFailure(code=FailureCode.UNAVAILABLE, message="资产配置字段抽取暂不可用"),
+            )
+
+        if not industry_allocation:
+            industry_routed = self._run_with_query_candidates(
+                host=host,
+                document_id=document_id,
+                query="按行业分类的股票投资组合",
+            )
+            if industry_routed.agent_result.failure is None:
+                try:
+                    _, industry_allocation = _extract_allocation_from_agent_result(
+                        document_id=document_id,
+                        result=industry_routed.agent_result,
+                        tool_service=tool_service,
+                    )
+                except (DocumentToolError, Exception):
+                    pass
+
+        table_citation = None
+        for citation in routed.agent_result.citations:
+            if citation.locator.locator_kind is LocatorKind.TABLE:
+                table_citation = citation
+                break
+
+        return AnnualAllocationResult(
+            document_id=document_id,
+            year=report_year,
+            asset_allocation=asset_allocation,
+            industry_allocation=industry_allocation,
+            citation=table_citation,
+        )
+
+    def extract_multi_year_allocation(
+        self,
+        request: ExtractAllocationRequest,
+    ) -> ExtractAllocationResult:
+        """聚合多年度资产配置数据。"""
+
+        try:
+            normalized_years = _normalized_holdings_requested_years(request.requested_years)
+            documents_by_year = _multi_year_documents_by_year(request.annual_report_documents)
+            repository = _repository(Path(request.work_dir))
+
+            annual_results: list[AnnualAllocationResult] = []
+            covered_years: list[int] = []
+            missing_years: list[int] = []
+
+            for year in normalized_years:
+                document = documents_by_year.get(year)
+                if document is None:
+                    missing_years.append(year)
+                    continue
+                try:
+                    store = repository.load_store(document.document_id)
+                    _validate_multi_year_report_identity(
+                        document_id=document.document_id,
+                        store=store,
+                        fund_code=request.fund_code,
+                        year=year,
+                    )
+                    result = self._extract_allocation_from_store(
+                        document_id=document.document_id,
+                        store=store,
+                        report_year=year,
+                    )
+                    if result.failure is not None:
+                        missing_years.append(year)
+                        continue
+                    annual_results.append(result)
+                    covered_years.append(year)
+                except DocumentToolError:
+                    missing_years.append(year)
+                    continue
+
+            if not covered_years:
+                return ExtractAllocationResult(
+                    series=None,
+                    failure=ToolFailure(code=FailureCode.NOT_FOUND, message="未找到任何年度的资产配置数据"),
+                )
+
+            series = MultiYearAllocationSeries(
+                fund_code=request.fund_code,
+                requested_years=normalized_years,
+                covered_years=tuple(sorted(covered_years)),
+                missing_years=tuple(sorted(missing_years)),
+                annual_allocations=tuple(annual_results),
+            )
+            return ExtractAllocationResult(series=series, failure=None)
+        except DocumentToolError as exc:
+            return ExtractAllocationResult(
+                series=None,
+                failure=ToolFailure(code=exc.code, message=exc.message),
+            )
+        except Exception:
+            return ExtractAllocationResult(
+                series=None,
+                failure=ToolFailure(code=FailureCode.UNAVAILABLE, message="多年度资产配置聚合暂不可用"),
+            )
+
+    def _extract_fee_rates_from_store(
+        self,
+        *,
+        document_id: str,
+        store: DoclingDocumentStore,
+        report_year: int,
+    ) -> AnnualFeeResult:
+        """从单年度年报中抽取费率信息。"""
+
+        tool_service = FundDocumentToolService({document_id: store})
+        host = self._host_factory(tool_service)
+
+        fees: list[FeeRateItem] = []
+        section_citation: Citation | None = None
+        fee_queries = ("基金管理费", "基金托管费", "销售服务费")
+
+        for query in fee_queries:
+            routed = self._run_with_query_candidates(
+                host=host,
+                document_id=document_id,
+                query=query,
+            )
+            if routed.agent_result.failure is not None:
+                continue
+
+            if section_citation is None:
+                for citation in routed.agent_result.citations:
+                    if citation.locator.locator_kind is LocatorKind.SECTION:
+                        section_citation = citation
+                        break
+
+            try:
+                extracted_fees = _extract_fee_rates_from_agent_result(
+                    result=routed.agent_result,
+                )
+                for fee in extracted_fees:
+                    if not any(f.fee_name == fee.fee_name for f in fees):
+                        fees.append(fee)
+            except (DocumentToolError, Exception):
+                continue
+
+        if not fees:
+            return AnnualFeeResult(
+                document_id=document_id,
+                year=report_year,
+                fees=(),
+                failure=ToolFailure(code=FailureCode.NOT_FOUND, message="未找到费率信息"),
+            )
+
+        return AnnualFeeResult(
+            document_id=document_id,
+            year=report_year,
+            fees=tuple(fees),
+            citation=section_citation,
+        )
+
+    def extract_multi_year_fee_rates(
+        self,
+        request: ExtractFeeRatesMultiYearRequest,
+    ) -> ExtractFeeRatesMultiYearResult:
+        """聚合多年度费率数据。"""
+
+        try:
+            normalized_years = _normalized_holdings_requested_years(request.requested_years)
+            documents_by_year = _multi_year_documents_by_year(request.annual_report_documents)
+            repository = _repository(Path(request.work_dir))
+
+            annual_results: list[AnnualFeeResult] = []
+            covered_years: list[int] = []
+            missing_years: list[int] = []
+
+            for year in normalized_years:
+                document = documents_by_year.get(year)
+                if document is None:
+                    missing_years.append(year)
+                    continue
+                try:
+                    store = repository.load_store(document.document_id)
+                    _validate_multi_year_report_identity(
+                        document_id=document.document_id,
+                        store=store,
+                        fund_code=request.fund_code,
+                        year=year,
+                    )
+                    result = self._extract_fee_rates_from_store(
+                        document_id=document.document_id,
+                        store=store,
+                        report_year=year,
+                    )
+                    if result.failure is not None:
+                        missing_years.append(year)
+                        continue
+                    annual_results.append(result)
+                    covered_years.append(year)
+                except DocumentToolError:
+                    missing_years.append(year)
+                    continue
+
+            if not covered_years:
+                return ExtractFeeRatesMultiYearResult(
+                    series=None,
+                    failure=ToolFailure(code=FailureCode.NOT_FOUND, message="未找到任何年度的费率数据"),
+                )
+
+            series = MultiYearFeeSeries(
+                fund_code=request.fund_code,
+                requested_years=normalized_years,
+                covered_years=tuple(sorted(covered_years)),
+                missing_years=tuple(sorted(missing_years)),
+                annual_fees=tuple(annual_results),
+            )
+            return ExtractFeeRatesMultiYearResult(series=series, failure=None)
+        except DocumentToolError as exc:
+            return ExtractFeeRatesMultiYearResult(
+                series=None,
+                failure=ToolFailure(code=exc.code, message=exc.message),
+            )
+        except Exception:
+            return ExtractFeeRatesMultiYearResult(
+                series=None,
+                failure=ToolFailure(code=FailureCode.UNAVAILABLE, message="多年度费率聚合暂不可用"),
             )
 
     def list_reports(self, request: ListReportsRequest) -> ListReportsResult:
@@ -2974,3 +3410,190 @@ def _holdings_column_indexes(rows: tuple[tuple[str, ...], ...]) -> dict[str, int
     if all(k in mapping for k in required):
         return mapping
     return None
+
+
+def _extract_allocation_from_agent_result(
+    *,
+    document_id: str,
+    result: AgentRunResult,
+    tool_service: FundDocumentToolService,
+) -> tuple[tuple[AssetAllocationItem, ...], tuple[IndustryAllocationItem, ...]]:
+    """从 Agent 结果中抽取资产配置和行业配置。"""
+
+    asset_allocation: list[AssetAllocationItem] = []
+    industry_allocation: list[IndustryAllocationItem] = []
+
+    table_citation_refs = [
+        citation for citation in result.citations
+        if citation.locator.locator_kind is LocatorKind.TABLE and citation.locator.table_ref
+    ]
+
+    for citation in table_citation_refs:
+        table_ref = citation.locator.table_ref
+        if not table_ref:
+            continue
+        table = tool_service.read_table(document_id, table_ref, max_rows=30)
+        if isinstance(table, ToolFailure):
+            continue
+
+        if _is_asset_allocation_table(table.rows):
+            asset_allocation = _parse_asset_allocation_table(table.rows)
+            break
+
+    if not industry_allocation:
+        all_tables = tool_service.list_tables(document_id)
+        for t in all_tables:
+            table = tool_service.read_table(document_id, t.table_ref, max_rows=30)
+            if isinstance(table, ToolFailure):
+                continue
+            if _is_industry_allocation_table(table.rows):
+                industry_allocation = _parse_industry_allocation_table(table.rows)
+                break
+
+    return tuple(asset_allocation), tuple(industry_allocation)
+
+
+def _is_asset_allocation_table(rows: tuple[tuple[str, ...], ...]) -> bool:
+    """判断是否为资产配置表。"""
+
+    if not rows:
+        return False
+    header = rows[0]
+    header_text = " ".join(str(c) for c in header)
+    return "项目" in header_text and "金额" in header_text and ("占基金总资产" in header_text or "占总资产" in header_text)
+
+
+def _is_industry_allocation_table(rows: tuple[tuple[str, ...], ...]) -> bool:
+    """判断是否为行业配置表。"""
+
+    if not rows:
+        return False
+    header = rows[0]
+    header_text = " ".join(str(c) for c in header)
+    return "行业类别" in header_text and "公允价值" in header_text
+
+
+def _parse_asset_allocation_table(rows: tuple[tuple[str, ...], ...]) -> list[AssetAllocationItem]:
+    """解析资产配置表。"""
+
+    items: list[AssetAllocationItem] = []
+    header = rows[0]
+
+    category_idx = None
+    amount_idx = None
+    net_pct_idx = None
+    total_pct_idx = None
+
+    for idx, cell in enumerate(header):
+        cell_str = str(cell).strip()
+        if "项目" in cell_str:
+            category_idx = idx
+        elif "金额" in cell_str:
+            amount_idx = idx
+        elif "占基金资产净值" in cell_str:
+            net_pct_idx = idx
+        elif "占基金总资产" in cell_str or "占总资产" in cell_str:
+            total_pct_idx = idx
+
+    if category_idx is None or amount_idx is None:
+        return items
+
+    for row in rows[1:]:
+        if len(row) <= max(category_idx, amount_idx):
+            continue
+        category = str(row[category_idx]).strip()
+        amount = str(row[amount_idx]).strip()
+        if not category or not amount:
+            continue
+        net_pct = str(row[net_pct_idx]).strip() if net_pct_idx is not None and len(row) > net_pct_idx else ""
+        total_pct = str(row[total_pct_idx]).strip() if total_pct_idx is not None and len(row) > total_pct_idx else ""
+        items.append(AssetAllocationItem(
+            category=category,
+            amount=amount,
+            percentage_of_net=net_pct,
+            percentage_of_total=total_pct,
+        ))
+
+    return items
+
+
+def _parse_industry_allocation_table(rows: tuple[tuple[str, ...], ...]) -> list[IndustryAllocationItem]:
+    """解析行业配置表。"""
+
+    items: list[IndustryAllocationItem] = []
+    header = rows[0]
+
+    industry_idx = None
+    amount_idx = None
+    pct_idx = None
+
+    for idx, cell in enumerate(header):
+        cell_str = str(cell).strip()
+        if "行业类别" in cell_str:
+            industry_idx = idx
+        elif "公允价值" in cell_str:
+            amount_idx = idx
+        elif "占基金资产净值" in cell_str:
+            pct_idx = idx
+
+    if industry_idx is None or amount_idx is None:
+        return items
+
+    for row in rows[1:]:
+        if len(row) <= max(industry_idx, amount_idx):
+            continue
+        industry = str(row[industry_idx]).strip()
+        amount = str(row[amount_idx]).strip()
+        if not industry or not amount:
+            continue
+        pct = str(row[pct_idx]).strip() if pct_idx is not None and len(row) > pct_idx else ""
+        items.append(IndustryAllocationItem(
+            industry=industry,
+            amount=amount,
+            percentage=pct,
+        ))
+
+    return items
+
+
+def _extract_fee_rates_from_agent_result(
+    *,
+    result: AgentRunResult,
+) -> tuple[FeeRateItem, ...]:
+    """从 Agent 结果中抽取费率信息。"""
+
+    fees: list[FeeRateItem] = []
+    answer = result.answer
+    fee_patterns = [
+        (r"基金管理费[^\d]*?(\d+\.?\d*%)", "基金管理费"),
+        (r"基金托管费[^\d]*?(\d+\.?\d*%)", "基金托管费"),
+        (r"销售服务费[^\d]*?A类[^\d]*?不收取", "销售服务费A类"),
+        (r"销售服务费[^\d]*?A类[^\d]*?(\d+\.?\d*%)", "销售服务费A类"),
+        (r"C类[^\d]*?销售服务费[^\d]*?(\d+\.?\d*%)", "销售服务费C类"),
+        (r"销售服务费[^\d]*?C类[^\d]*?(\d+\.?\d*%)", "销售服务费C类"),
+    ]
+
+    for pattern, name in fee_patterns:
+        match = re.search(pattern, answer)
+        if match:
+            rate = match.group(1) if match.lastindex else "不收取"
+            if not any(f.fee_name == name for f in fees):
+                fees.append(FeeRateItem(fee_name=name, rate=rate))
+
+    if not fees:
+        management_match = re.search(r"管理费[^\d]*?(\d+\.?\d*%)", answer)
+        custodian_match = re.search(r"托管费[^\d]*?(\d+\.?\d*%)", answer)
+
+        if management_match:
+            fees.append(FeeRateItem(fee_name="基金管理费", rate=management_match.group(1)))
+        if custodian_match:
+            fees.append(FeeRateItem(fee_name="基金托管费", rate=custodian_match.group(1)))
+
+        if "不收取" in answer and "销售服务费" in answer:
+            fees.append(FeeRateItem(fee_name="销售服务费A类", rate="不收取"))
+
+        sales_c_match = re.search(r"C[^\d]*?(\d+\.?\d*%)[^\d]*?销售服务费", answer)
+        if sales_c_match:
+            fees.append(FeeRateItem(fee_name="销售服务费C类", rate=sales_c_match.group(1)))
+
+    return tuple(fees)

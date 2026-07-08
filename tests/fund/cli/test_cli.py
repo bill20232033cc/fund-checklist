@@ -1447,3 +1447,271 @@ def test_is_continuation_row_rejects_empty_rows() -> None:
 
     assert _is_continuation_row(()) is False
     assert _is_continuation_row(((),)) is False
+
+
+def test_allocation_parser_accepts_valid_args() -> None:
+    """allocation 子命令 parser 必须接受合法参数。"""
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "allocation",
+        "--fund-code", "004393",
+        "--years", "2022,2023,2024",
+    ])
+
+    assert args.command == "allocation"
+    assert args.fund_code == "004393"
+    assert args.years == "2022,2023,2024"
+
+
+def test_fees_parser_accepts_valid_args() -> None:
+    """fees 子命令 parser 必须接受合法参数。"""
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "fees",
+        "--fund-code", "004393",
+        "--years", "2022,2023,2024",
+    ])
+
+    assert args.command == "fees"
+    assert args.fund_code == "004393"
+    assert args.years == "2022,2023,2024"
+
+
+def test_allocation_exits_2_when_no_matching_reports(tmp_path: Path) -> None:
+    """catalog 中无匹配年报时 allocation 必须返回 exit 2。"""
+
+    work_dir = tmp_path / "work"
+    _write_catalog(work_dir, [])
+
+    exit_code, stdout, stderr = _run([
+        "allocation",
+        "--fund-code", "004393",
+        "--years", "2022,2023,2024",
+        "--work-dir", str(work_dir),
+    ])
+
+    assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
+    assert "not_found" in stderr
+
+
+def test_fees_exits_2_when_no_matching_reports(tmp_path: Path) -> None:
+    """catalog 中无匹配年报时 fees 必须返回 exit 2。"""
+
+    work_dir = tmp_path / "work"
+    _write_catalog(work_dir, [])
+
+    exit_code, stdout, stderr = _run([
+        "fees",
+        "--fund-code", "004393",
+        "--years", "2022,2023,2024",
+        "--work-dir", str(work_dir),
+    ])
+
+    assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
+    assert "not_found" in stderr
+
+
+def test_allocation_json_output_on_success(monkeypatch, tmp_path: Path) -> None:
+    """allocation 成功时必须输出 JSON 格式的资产配置数据。"""
+
+    from fund_agent.service import (
+        ExtractAllocationResult,
+        MultiYearAllocationSeries,
+        AnnualAllocationResult,
+        AssetAllocationItem,
+        IndustryAllocationItem,
+    )
+    from fund_agent.fund.document_tools.models import Citation, Locator
+
+    fake_series = MultiYearAllocationSeries(
+        fund_code="004393",
+        requested_years=(2024,),
+        covered_years=(2024,),
+        missing_years=(),
+        annual_allocations=(
+            AnnualAllocationResult(
+                document_id="doc-2024",
+                year=2024,
+                asset_allocation=(
+                    AssetAllocationItem(category="权益投资", amount="100,000,000", percentage_of_net="80.00", percentage_of_total="75.00"),
+                ),
+                industry_allocation=(
+                    IndustryAllocationItem(industry="制造业", amount="50,000,000", percentage="40.00"),
+                ),
+                citation=Citation(
+                    document_id="doc-2024",
+                    fund_code="004393",
+                    fund_name="安信企业价值优选",
+                    year=2024,
+                    report_type="annual_report",
+                    locator=Locator(
+                        document_id="doc-2024",
+                        locator_kind="table",
+                        section_ref=None,
+                        table_ref="table-0075",
+                        page_no=50,
+                        page_range=None,
+                        internal_ref=None,
+                        internal_ref_available=False,
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    class _FakeService:
+        def extract_multi_year_allocation(self, request):
+            return ExtractAllocationResult(series=fake_series, failure=None)
+
+    monkeypatch.setattr(cli_module, "FundReadingService", _FakeService)
+
+    work_dir = tmp_path / "work"
+    _write_catalog(work_dir, [
+        {"document_id": "doc-2024", "year": 2024, "fund_code": "004393"},
+    ])
+
+    exit_code, stdout, stderr = _run([
+        "allocation",
+        "--fund-code", "004393",
+        "--years", "2024",
+        "--work-dir", str(work_dir),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE
+    assert stderr == ""
+    output = json.loads(stdout)
+    assert "series" in output
+    assert len(output["series"]) == 1
+    assert output["series"][0]["fund_code"] == "004393"
+    assert len(output["series"][0]["annual_allocations"]) == 1
+    assert len(output["series"][0]["annual_allocations"][0]["asset_allocation"]) == 1
+    assert output["series"][0]["annual_allocations"][0]["asset_allocation"][0]["category"] == "权益投资"
+    assert len(output["series"][0]["annual_allocations"][0]["industry_allocation"]) == 1
+    assert output["series"][0]["annual_allocations"][0]["industry_allocation"][0]["industry"] == "制造业"
+
+
+def test_fees_json_output_on_success(monkeypatch, tmp_path: Path) -> None:
+    """fees 成功时必须输出 JSON 格式的费率数据。"""
+
+    from fund_agent.service import (
+        ExtractFeeRatesMultiYearResult,
+        MultiYearFeeSeries,
+        AnnualFeeResult,
+        FeeRateItem,
+    )
+    from fund_agent.fund.document_tools.models import Citation, Locator
+
+    fake_series = MultiYearFeeSeries(
+        fund_code="004393",
+        requested_years=(2024,),
+        covered_years=(2024,),
+        missing_years=(),
+        annual_fees=(
+            AnnualFeeResult(
+                document_id="doc-2024",
+                year=2024,
+                fees=(
+                    FeeRateItem(fee_name="基金管理费", rate="1.20%"),
+                    FeeRateItem(fee_name="基金托管费", rate="0.20%"),
+                    FeeRateItem(fee_name="销售服务费A类", rate="不收取"),
+                    FeeRateItem(fee_name="销售服务费C类", rate="0.40%"),
+                ),
+                citation=Citation(
+                    document_id="doc-2024",
+                    fund_code="004393",
+                    fund_name="安信企业价值优选",
+                    year=2024,
+                    report_type="annual_report",
+                    locator=Locator(
+                        document_id="doc-2024",
+                        locator_kind="section",
+                        section_ref="section-0100",
+                        table_ref=None,
+                        page_no=30,
+                        page_range=None,
+                        internal_ref=None,
+                        internal_ref_available=False,
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    class _FakeService:
+        def extract_multi_year_fee_rates(self, request):
+            return ExtractFeeRatesMultiYearResult(series=fake_series, failure=None)
+
+    monkeypatch.setattr(cli_module, "FundReadingService", _FakeService)
+
+    work_dir = tmp_path / "work"
+    _write_catalog(work_dir, [
+        {"document_id": "doc-2024", "year": 2024, "fund_code": "004393"},
+    ])
+
+    exit_code, stdout, stderr = _run([
+        "fees",
+        "--fund-code", "004393",
+        "--years", "2024",
+        "--work-dir", str(work_dir),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE
+    assert stderr == ""
+    output = json.loads(stdout)
+    assert "series" in output
+    assert len(output["series"]) == 1
+    assert output["series"][0]["fund_code"] == "004393"
+    assert len(output["series"][0]["annual_fees"]) == 1
+    assert len(output["series"][0]["annual_fees"][0]["fees"]) == 4
+    assert output["series"][0]["annual_fees"][0]["fees"][0]["fee_name"] == "基金管理费"
+    assert output["series"][0]["annual_fees"][0]["fees"][0]["rate"] == "1.20%"
+
+
+def test_is_asset_allocation_table_recognizes_standard_header() -> None:
+    """_is_asset_allocation_table 必须识别标准资产配置表头。"""
+
+    from fund_agent.service.reading_service import _is_asset_allocation_table
+
+    rows = (
+        ("序号", "项目", "金额", "占基金总资产的比例（%）"),
+        ("1", "权益投资", "100,000,000", "80.00"),
+    )
+    assert _is_asset_allocation_table(rows) is True
+
+
+def test_is_asset_allocation_table_rejects_non_asset_table() -> None:
+    """_is_asset_allocation_table 对非资产配置表必须返回 False。"""
+
+    from fund_agent.service.reading_service import _is_asset_allocation_table
+
+    rows = (
+        ("序号", "股票代码", "股票名称", "数量（股）"),
+        ("1", "00939", "建设银行", "3,030,000"),
+    )
+    assert _is_asset_allocation_table(rows) is False
+
+
+def test_is_industry_allocation_table_recognizes_standard_header() -> None:
+    """_is_industry_allocation_table 必须识别标准行业配置表头。"""
+
+    from fund_agent.service.reading_service import _is_industry_allocation_table
+
+    rows = (
+        ("代码", "行业类别", "公允价值（元）", "占基金资产净值比例（%）"),
+        ("A", "农、林、牧、渔业", "1,037,880.00", "0.35"),
+    )
+    assert _is_industry_allocation_table(rows) is True
+
+
+def test_is_industry_allocation_table_rejects_non_industry_table() -> None:
+    """_is_industry_allocation_table 对非行业配置表必须返回 False。"""
+
+    from fund_agent.service.reading_service import _is_industry_allocation_table
+
+    rows = (
+        ("序号", "项目", "金额", "占基金总资产的比例（%）"),
+        ("1", "权益投资", "100,000,000", "80.00"),
+    )
+    assert _is_industry_allocation_table(rows) is False
