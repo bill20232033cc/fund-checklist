@@ -8,6 +8,8 @@ import json
 from importlib.metadata import entry_points
 from pathlib import Path
 
+import pytest
+
 from fund_agent.agent import AgentRunResult, ToolTraceEntry
 from fund_agent.cli.main import (
     CLASSIFIED_FAILURE_EXIT_CODE,
@@ -810,6 +812,42 @@ def test_multi_year_json_output_on_success(monkeypatch, tmp_path: Path) -> None:
     assert output["series"][0]["coverage_status"] == "complete"
 
 
+def test_multi_year_deduplicates_same_year_entries(monkeypatch, tmp_path: Path) -> None:
+    """multi-year 必须对同一年份的多条 catalog 记录去重。"""
+
+    from fund_agent.service import (
+        AggregateMultiYearAnnualPerformanceResult,
+        MultiYearAnnualPerformanceSeries,
+        MultiYearAnnualPerformanceRow,
+        AnnualPerformanceFieldCitation,
+    )
+
+    class _FakeService:
+        def aggregate_multi_year_annual_performance(self, request):
+            years = [d.year for d in request.annual_report_documents]
+            assert len(years) == len(set(years)), f"发现重复年份: {years}"
+            return AggregateMultiYearAnnualPerformanceResult(series=(), failure=None)
+
+    monkeypatch.setattr(cli_module, "FundReadingService", _FakeService)
+
+    work_dir = tmp_path / "work"
+    _write_catalog(work_dir, [
+        {"document_id": "doc-2022", "year": 2022, "fund_code": "004393"},
+        {"document_id": "doc-2023a", "year": 2023, "fund_code": "004393"},
+        {"document_id": "doc-2023b", "year": 2023, "fund_code": "004393"},
+        {"document_id": "doc-2024", "year": 2024, "fund_code": "004393"},
+    ])
+
+    exit_code, stdout, stderr = _run([
+        "multi-year",
+        "--fund-code", "004393",
+        "--years", "2022,2023,2024",
+        "--work-dir", str(work_dir),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE
+
+
 def test_import_parser_accepts_valid_args() -> None:
     """import 子命令 parser 必须接受合法参数。"""
 
@@ -1052,3 +1090,81 @@ def test_import_year_range_with_comma_format(monkeypatch, tmp_path: Path) -> Non
 
     assert exit_code == SUCCESS_EXIT_CODE
     assert "2 imported" in stdout
+
+
+def test_import_filters_out_wrong_fund_pdfs(monkeypatch, tmp_path: Path) -> None:
+    """import 必须过滤掉不属于目标基金的 PDF。"""
+
+    from fund_agent.service import ImportLocalReportResult
+    from fund_agent.fund.document_tools.models import ReportSummary
+
+    imported_files: list[str] = []
+
+    class _FakeService:
+        def import_local_report(self, request):
+            imported_files.append(request.pdf_path.name)
+            return ImportLocalReportResult(
+                document_id=f"{request.fund_code}-{request.year}-annual_report-fake",
+                report=ReportSummary(
+                    document_id=f"{request.fund_code}-{request.year}-annual_report-fake",
+                    fund_code=request.fund_code,
+                    fund_name=request.fund_name,
+                    year=request.year,
+                    report_type="annual_report",
+                    source_kind="local_pdf",
+                    source_summary="fake",
+                    content_fingerprint="fake",
+                ),
+            )
+
+    monkeypatch.setattr(cli_module, "FundReadingService", _FakeService)
+
+    pdf_dir = tmp_path / "pdfs"
+    pdf_dir.mkdir()
+    (pdf_dir / "安信企业价值优选混合型证券投资基金2024年年度报告.pdf").write_bytes(b"%PDF-1.4\n")
+    (pdf_dir / "招商中证白酒指数证券投资基金2024年年度报告.pdf").write_bytes(b"%PDF-1.4\n")
+    (pdf_dir / "国泰利享中短债债券型证券投资基金2024年年度报告.pdf").write_bytes(b"%PDF-1.4\n")
+
+    exit_code, stdout, stderr = _run([
+        "import",
+        "--pdf-dir", str(pdf_dir),
+        "--fund-code", "004393",
+        "--fund-name", "安信企业价值优选混合型证券投资基金",
+        "--year-range", "2024-2024",
+        "--work-dir", str(tmp_path / "work"),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE
+    assert "1 imported" in stdout
+    assert len(imported_files) == 1
+    assert "安信企业价值优选" in imported_files[0]
+    assert "招商" not in imported_files[0]
+    assert "国泰" not in imported_files[0]
+
+
+def test_extract_keyword_removes_all_stop_words() -> None:
+    """_extract_fund_name_keyword 必须去除所有通用后缀。"""
+
+    from fund_agent.cli.main import _extract_fund_name_keyword
+
+    keyword = _extract_fund_name_keyword("安信企业价值优选混合型证券投资基金")
+    assert keyword == "安信企业价值优选"
+
+
+def test_extract_keyword_result_used_for_matching() -> None:
+    """_extract_fund_name_keyword 提取的关键词必须能在文件名中匹配。"""
+
+    from fund_agent.cli.main import _extract_fund_name_keyword, _matches_fund_name
+
+    keyword = _extract_fund_name_keyword("国泰利享中短债债券型证券投资基金")
+    assert _matches_fund_name("国泰利享中短债债券型证券投资基金2024年年度报告.pdf", keyword)
+    assert not _matches_fund_name("安信企业价值优选混合型证券投资基金2024年年度报告.pdf", keyword)
+
+
+def test_extract_keyword_empty_fund_name_raises() -> None:
+    """纯停用词组成的基金名称必须抛出 ValueError。"""
+
+    from fund_agent.cli.main import _extract_fund_name_keyword
+
+    with pytest.raises(ValueError, match="无法提取关键词"):
+        _extract_fund_name_keyword("灵活配置混合型证券投资基金")

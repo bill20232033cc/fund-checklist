@@ -221,7 +221,10 @@ def _extract_year_from_filename(filename: str) -> int | None:
     return None
 
 
-_FUND_NAME_STOP_WORDS = frozenset({"混合型", "债券型", "股票型", "指数型", "灵活配置", "证券投资基金", "发起式", "交易型开放式", "联接基金"})
+_FUND_NAME_STOP_WORDS = (
+    "交易型开放式", "证券投资基金", "联接基金", "灵活配置",
+    "混合型", "债券型", "股票型", "指数型", "发起式",
+)
 
 
 def _extract_fund_name_keyword(fund_name: str) -> str:
@@ -232,12 +235,18 @@ def _extract_fund_name_keyword(fund_name: str) -> str:
 
     返回:
         去除通用后缀后的关键词，如 "安信企业价值优选"。
+
+    异常:
+        ValueError: 关键词为空（基金名称全由通用后缀组成）时抛出。
     """
 
     keyword = fund_name
     for stop in _FUND_NAME_STOP_WORDS:
         keyword = keyword.replace(stop, "")
-    return keyword.strip()
+    keyword = keyword.strip()
+    if not keyword:
+        raise ValueError(f"基金名称无法提取关键词: {fund_name}")
+    return keyword
 
 
 def _matches_fund_name(filename: str, fund_name_keyword: str) -> bool:
@@ -285,7 +294,12 @@ def _run_import_command(args: argparse.Namespace, *, stdout: TextIO, stderr: Tex
         return CLASSIFIED_FAILURE_EXIT_CODE
 
     matching_files: list[tuple[Path, int]] = []
-    fund_name_keyword = _extract_fund_name_keyword(args.fund_name)
+    try:
+        fund_name_keyword = _extract_fund_name_keyword(args.fund_name)
+    except ValueError as exc:
+        failure = ToolFailure(code=FailureCode.SCHEMA_DRIFT, message=str(exc))
+        _write_classified_failure(failure, stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
     for pdf_path in pdf_files:
         year = _extract_year_from_filename(pdf_path.name)
         if year is not None and year in year_range_set and _matches_fund_name(pdf_path.name, fund_name_keyword):
@@ -366,12 +380,16 @@ def _run_multi_year_command(args: argparse.Namespace, *, stdout: TextIO, stderr:
     catalog_reports = repository.list_reports()
 
     matching_docs: list[AnnualReportDocument] = []
+    seen_years: dict[int, str] = {}
     for report in catalog_reports:
         if report.get("fund_code") == args.fund_code and report.get("year") in requested_years:
-            matching_docs.append(AnnualReportDocument(
-                year=int(report["year"]),
-                document_id=str(report["document_id"]),
-            ))
+            year = int(report["year"])
+            doc_id = str(report["document_id"])
+            # last-wins：同一年有多条 catalog 记录时保留最后一条（catalog 按 document_id 字典序排列）
+            seen_years[year] = doc_id
+
+    for year, doc_id in sorted(seen_years.items()):
+        matching_docs.append(AnnualReportDocument(year=year, document_id=doc_id))
 
     if len(matching_docs) < 3:
         failure = ToolFailure(code=FailureCode.NOT_FOUND, message=f"catalog 中匹配 {args.fund_code} 的年报不足 3 年")
