@@ -318,7 +318,17 @@ def _matches_fund_name(filename: str, fund_name_keyword: str) -> bool:
         文件名包含关键词时返回 True。
     """
 
-    return fund_name_keyword in filename
+    if fund_name_keyword in filename:
+        return True
+
+    # 处理关键词被停用词分割的情况（如 "交易型开放式" 在中间）
+    # 将关键词拆分为单字符，检查文件名是否包含所有字符
+    # 阈值 >= 4 降低短关键词误匹配概率
+    parts = [p for p in fund_name_keyword if p.strip()]
+    if len(parts) >= 4:
+        return all(part in filename for part in parts)
+
+    return False
 
 
 def _run_import_command(args: argparse.Namespace, *, stdout: TextIO, stderr: TextIO) -> int:

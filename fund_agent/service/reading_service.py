@@ -3394,7 +3394,7 @@ def _holdings_column_indexes(rows: tuple[tuple[str, ...], ...]) -> dict[str, int
     header = rows[0]
     mapping: dict[str, int] = {}
     for idx, cell in enumerate(header):
-        cell_clean = cell.strip()
+        cell_clean = cell.strip().replace(" ", "")
         if "股票代码" in cell_clean:
             mapping["stock_code"] = idx
         elif "股票名称" in cell_clean:

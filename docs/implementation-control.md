@@ -1,9 +1,9 @@
 # fund-checklist implementation-control
 
 更新时间：2026-07-08
-当前阶段：`POST_MVP_SLICE_11D_IN_PROGRESS`
+当前阶段：`POST_MVP_SLICE_12A_IN_PROGRESS`
 当前角色：control / CIC-lite controller
-当前目标：Slice 11D asset allocation + fee rates multi-year tracking。新增 `fund-checklist allocation` 和 `fund-checklist fees` 子命令，补齐三大披露对象（持仓、资产配置、费率）的多年度能力。不得扩成 gateflow / phaseflow / release-readiness，不新增 plan artifact，不进入 batch benchmark、开放语义理解、自动分词、embedding、LLM intent、template contract execution、chapter contract execution、calculation framework、`fund-checklist ask`、UI、自动报告或投资判断。
+当前目标：Slice 12A Host lifecycle basics。引入 HostRunResult（扩展封装：AgentRunResult + 耗时 + 事件列表 + tool_trace 统计）、HostRunEvent（完整事件类型）和简单 timeout（默认 300 秒）。不得扩成 gateflow / phaseflow / release-readiness，不新增 plan artifact，不进入 batch benchmark、开放语义理解、自动分词、embedding、LLM intent、template contract execution、chapter contract execution、calculation framework、`fund-checklist ask`、UI、自动报告或投资判断。
 
 ## 当前事实
 
@@ -485,6 +485,15 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - 11D 失败语义：某年披露表未找到时跳过继续，最终报告 missing_years。
 - 11D smoke 测试使用真实 PDF。
 - 11D 不做费率计算（只抽取披露值）、不改现有子命令、不接真实 LLM、不做投资判断或自动报告。
+- Post-MVP 12A 裁决为 Host lifecycle basics。
+- 12A 引入 `HostRunResult`：扩展封装，包含 AgentRunResult + 耗时 + 请求参数摘要 + 事件列表 + tool_trace 统计。
+- 12A 引入 `HostRunEvent`：完整事件类型，包括 started / search / read_section / list_tables / read_table / get_excerpt / completed / failed。
+- 12A 引入简单 timeout：默认 300 秒，可通过参数覆盖；使用 threading.Event + threading.Timer 实现。
+- 12A Service 适配方式为新增 Service 方法，不改现有方法。
+- 12A CLI 输出展示耗时和事件统计。
+- 12A allowed write set：`fund_agent/host/`、`fund_agent/service/`、测试文件、`docs/implementation-control.md`、`docs/design.md`。
+- 12A 不做 session 管理、并发治理、cancel/resume、reply outbox、多轮会话托管。
+- 12A 不改现有 read / multi-year / import / holdings / allocation / fees 子命令的核心逻辑。
 
 ## CIC-lite Rules
 
@@ -501,7 +510,7 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## Next Action
 
-11D 裁决已写入。下一步进入 11D 代码实现：新增 `allocation` 和 `fees` 子命令，补齐资产配置和费率多年度追踪能力。不得改 read / multi-year / import / holdings 子命令输出，不接真实 LLM，不做费率计算、投资判断或自动报告。
+12A 裁决已写入。下一步进入 12A 代码实现：引入 HostRunResult、HostRunEvent 和简单 timeout。不得改 read / multi-year / import / holdings / allocation / fees 子命令核心逻辑，不接真实 LLM，不做投资判断或自动报告。
 
 禁止事项：
 
@@ -602,6 +611,7 @@ uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值
 10M. batch PDF import：已 accepted；新增独立子命令 `fund-checklist import`，从目录批量导入 PDF 到 catalog，用户指定 fund_code + fund_name + year-range，从文件名提取年份并过滤匹配的 PDF；覆盖已存在条目；单文件失败跳过继续；逐条进度 + 最终汇总输出；复用现有 `import_local_report()`，不新增 Service 方法；24 passed。
 11C. holdings multi-year tracking：已 accepted；新增独立子命令 `fund-checklist holdings`，从已导入年报中抽取前十大持仓表（完整字段：股票代码、股票名称、数量、公允价值、占净值比），按年度列表返回 Top 10 持仓，JSON 格式输出；支持跨页表格合并；58 passed。
 11D. asset allocation + fee rates multi-year tracking：实现中；新增 `fund-checklist allocation` 和 `fund-checklist fees` 子命令，补齐资产配置和费率多年度追踪能力；资产配置目标披露表为 `期末基金资产组合情况` 和 `期末按行业分类的股票投资组合`；费率目标披露表为 `基金管理费`、`基金托管费`、`销售服务费`；JSON 输出；某年披露表未找到时跳过继续。
+12A. Host lifecycle basics：实现中；引入 HostRunResult（扩展封装：AgentRunResult + 耗时 + 事件列表 + tool_trace 统计）、HostRunEvent（完整事件类型）和简单 timeout（默认 300 秒）；新增 Service 方法；CLI 展示耗时和事件统计。
 
 ## MVP Acceptance Matrix
 

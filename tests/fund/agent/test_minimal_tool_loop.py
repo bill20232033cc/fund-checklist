@@ -21,7 +21,7 @@ from fund_agent.fund.document_tools.models import (
     ToolFailure,
 )
 from fund_agent.fund.document_tools.service import FundDocumentToolService
-from fund_agent.host import MinimalHost
+from fund_agent.host import HostRunEventType, HostRunResult, MinimalHost
 
 
 def _identity() -> ReportIdentity:
@@ -502,3 +502,72 @@ def test_agent_tool_loop_does_not_receive_raw_docling_json(tmp_path: Path) -> No
     assert "schema_name" not in rendered
     assert "texts" not in rendered
     assert _identity().local_import_id not in rendered
+
+
+def test_host_run_result_contains_duration_and_events(tmp_path: Path) -> None:
+    """HostRunResult 必须包含耗时和事件列表。"""
+
+    host = MinimalHost(MinimalFundDocumentAgent(_service(tmp_path)))
+    result = host.run(document_id=_identity().document_id, query="基金经理")
+
+    assert isinstance(result, HostRunResult)
+    assert result.duration > 0
+    assert len(result.events) > 0
+    assert result.events[0].event_type == HostRunEventType.STARTED
+    assert result.events[-1].event_type == HostRunEventType.COMPLETED
+    assert result.timed_out is False
+    assert result.timeout == 300.0
+
+
+def test_host_run_result_contains_tool_trace_summary(tmp_path: Path) -> None:
+    """HostRunResult 必须包含工具调用统计。"""
+
+    host = MinimalHost(MinimalFundDocumentAgent(_service(tmp_path)))
+    result = host.run(document_id=_identity().document_id, query="基金经理")
+
+    assert "total" in result.tool_trace_summary
+    assert "success" in result.tool_trace_summary
+    assert "failure" in result.tool_trace_summary
+    assert result.tool_trace_summary["total"] > 0
+    assert result.tool_trace_summary["success"] > 0
+    assert result.tool_trace_summary["failure"] == 0
+
+
+def test_host_run_result_provides_backward_compatible_access(tmp_path: Path) -> None:
+    """HostRunResult 必须通过属性代理提供向后兼容的访问。"""
+
+    host = MinimalHost(MinimalFundDocumentAgent(_service(tmp_path)))
+    result = host.run(document_id=_identity().document_id, query="基金经理")
+
+    assert result.failure is None
+    assert "基金经理" in result.answer
+    assert len(result.citations) > 0
+    assert len(result.tool_trace) > 0
+
+
+def test_host_run_records_search_and_read_events(tmp_path: Path) -> None:
+    """HostRunResult 必须记录 search 和 read_section 事件。"""
+
+    host = MinimalHost(MinimalFundDocumentAgent(_service(tmp_path)))
+    result = host.run(document_id=_identity().document_id, query="基金经理")
+
+    event_types = [e.event_type for e in result.events]
+    assert HostRunEventType.SEARCH in event_types
+    assert HostRunEventType.READ_SECTION in event_types
+
+
+def test_host_timeout_returns_timed_out_result(tmp_path: Path) -> None:
+    """timeout 时 HostRunResult 必须标记 timed_out=True。"""
+
+    class _SlowAgent:
+        def run(self, **kwargs):
+            import time
+            time.sleep(10)
+            return AgentRunResult(answer="", citations=(), tool_trace=(), failure=None)
+
+    host = MinimalHost(_SlowAgent(), timeout=0.1)
+    result = host.run(document_id=_identity().document_id, query="test")
+
+    assert result.timed_out is True
+    assert result.duration < 1.0
+    assert result.events[-1].event_type == HostRunEventType.FAILED
