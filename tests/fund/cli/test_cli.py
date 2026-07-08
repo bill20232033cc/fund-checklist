@@ -1374,3 +1374,76 @@ def test_holdings_deduplicates_same_year_entries(monkeypatch, tmp_path: Path) ->
     ])
 
     assert exit_code == SUCCESS_EXIT_CODE
+
+
+def test_holdings_column_indexes_recognizes_standard_header() -> None:
+    """_holdings_column_indexes 必须识别标准持仓表头。"""
+
+    from fund_agent.service.reading_service import _holdings_column_indexes
+
+    rows = (
+        ("序号", "股票代码", "股票名称", "数量（股）", "公允价值（元）", "占基金资产净值比例（%）"),
+        ("1", "00939", "建设银行", "3,030,000", "18,182,239.78", "6.08"),
+    )
+    indexes = _holdings_column_indexes(rows)
+    assert indexes is not None
+    assert indexes["stock_code"] == 1
+    assert indexes["stock_name"] == 2
+    assert indexes["quantity"] == 3
+    assert indexes["fair_value"] == 4
+    assert indexes["percentage"] == 5
+
+
+def test_holdings_column_indexes_returns_none_for_non_holdings_header() -> None:
+    """_holdings_column_indexes 对非持仓表头必须返回 None。"""
+
+    from fund_agent.service.reading_service import _holdings_column_indexes
+
+    rows = (
+        ("项目", "本期", "上期"),
+        ("管理费", "100,000", "80,000"),
+    )
+    indexes = _holdings_column_indexes(rows)
+    assert indexes is None
+
+
+def test_holdings_column_indexes_returns_none_for_empty_rows() -> None:
+    """_holdings_column_indexes 对空行必须返回 None。"""
+
+    from fund_agent.service.reading_service import _holdings_column_indexes
+
+    indexes = _holdings_column_indexes(())
+    assert indexes is None
+
+
+def test_is_continuation_row_recognizes_numbered_rows() -> None:
+    """_is_continuation_row 必须识别以序号开头的续表行。"""
+
+    from fund_agent.service.reading_service import _is_continuation_row
+
+    rows = (
+        ("5", "00688", "中国海外发展", "237,000", "3,054,626.09", "6.17"),
+        ("6", "600519", "贵州茅台", "1,553", "2,682,031.00", "5.42"),
+    )
+    assert _is_continuation_row(rows) is True
+
+
+def test_is_continuation_row_rejects_non_numbered_rows() -> None:
+    """_is_continuation_row 对非序号行必须返回 False。"""
+
+    from fund_agent.service.reading_service import _is_continuation_row
+
+    rows = (
+        ("项目", "本期", "上期"),
+        ("管理费", "100,000", "80,000"),
+    )
+    assert _is_continuation_row(rows) is False
+
+
+def test_is_continuation_row_rejects_empty_rows() -> None:
+    """_is_continuation_row 对空行必须返回 False。"""
+
+    from fund_agent.service.reading_service import _is_continuation_row
+
+    assert _is_continuation_row(()) is False
+    assert _is_continuation_row(((),)) is False
