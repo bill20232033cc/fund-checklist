@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Literal
 
@@ -869,6 +871,92 @@ class DeepAuditResult:
     document_id: str | None = None
     audit_results: tuple[DeepAuditItem, ...] = ()
     summary: dict[str, int] | None = None
+    failure: ToolFailure | None = None
+
+
+@dataclass(frozen=True)
+class ReportChapter:
+    """报告单章节。
+
+    参数:
+        chapter_id: 章节编号（0-7）。
+        title: 章节标题。
+        content: 章节内容（Markdown 格式）。
+        data_sources: 引用的数据来源列表。
+
+    返回:
+        不可变章节 DTO。
+    """
+
+    chapter_id: int
+    title: str
+    content: str
+    data_sources: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class FundReport:
+    """基金分析报告。
+
+    参数:
+        fund_code: 基金代码。
+        fund_name: 基金名称。
+        report_year: 报告年份。
+        chapters: 8 章内容。
+        metadata: 报告元数据（生成时间、数据来源等）。
+
+    返回:
+        不可变报告 DTO。
+    """
+
+    fund_code: str
+    fund_name: str
+    report_year: int
+    chapters: tuple[ReportChapter, ...]
+    metadata: dict[str, object] | None = None
+
+
+@dataclass(frozen=True)
+class GenerateReportRequest:
+    """报告生成请求。
+
+    参数:
+        fund_code: 基金代码。
+        fund_name: 基金名称。
+        report_year: 报告年份。
+        years: 需要的年度数据列表（默认 5 年）。
+        work_dir: 受控工作目录。
+        output_format: 输出格式（json / markdown / pdf）。
+
+    返回:
+        不可变请求 DTO。
+    """
+
+    fund_code: str
+    fund_name: str
+    report_year: int
+    years: tuple[int, ...] | list[int] = (2020, 2021, 2022, 2023, 2024)
+    work_dir: Path = Path(".fund_checklist")
+    output_format: str = "json"
+
+
+@dataclass(frozen=True)
+class GenerateReportResult:
+    """报告生成结果。
+
+    参数:
+        report: 生成的报告。
+        output_path: 输出文件路径（Markdown/PDF 时非空）。
+        warnings: 警告信息列表。
+        failure: 失败分类；成功时为 None。
+
+    返回:
+        不可变结果 DTO。
+    """
+
+    report: FundReport | None = None
+    output_path: str | None = None
+    warnings: tuple[str, ...] = ()
     failure: ToolFailure | None = None
 
 
@@ -2386,6 +2474,376 @@ class FundReadingService:
                 year=request.year,
                 failure=ToolFailure(code=FailureCode.UNAVAILABLE, message=f"深度审计暂不可用: {exc}"),
             )
+
+    def generate_report(
+        self,
+        request: GenerateReportRequest,
+    ) -> GenerateReportResult:
+        """生成基金分析报告。
+
+        参数:
+            request: 报告生成请求。
+
+        返回:
+            GenerateReportResult；成功时包含 FundReport。
+        """
+
+        try:
+            # 1. 提取多年度数据
+            years = tuple(request.years) if request.years else tuple(range(request.report_year - 4, request.report_year + 1))
+            repository = _repository(Path(request.work_dir))
+            catalog_reports = repository.list_reports()
+
+            # 查找匹配的年报（按年份去重，保留最后一条）
+            docs_by_year: dict[int, str] = {}
+            for report in catalog_reports:
+                if report.get("fund_code") == request.fund_code and report.get("year") in years:
+                    year = int(report["year"])
+                    docs_by_year[year] = str(report["document_id"])
+
+            annual_docs = [
+                AnnualReportDocument(year=year, document_id=doc_id)
+                for year, doc_id in sorted(docs_by_year.items())
+            ]
+
+            if not annual_docs:
+                return GenerateReportResult(
+                    failure=ToolFailure(code=FailureCode.NOT_FOUND, message=f"未找到 {request.fund_code} 的年报数据"),
+                )
+
+            # 2. 提取各项数据
+            holdings_data = self._extract_report_holdings(request.fund_code, annual_docs, request.work_dir)
+            fee_data = self._extract_report_fees(request.fund_code, annual_docs, request.work_dir)
+            performance_data = self._extract_report_performance(request.fund_code, annual_docs, request.work_dir)
+            allocation_data = self._extract_report_allocation(request.fund_code, annual_docs, request.work_dir)
+
+            # 3. 生成报告章节
+            chapters = self._generate_chapters(
+                fund_code=request.fund_code,
+                fund_name=request.fund_name,
+                report_year=request.report_year,
+                holdings=holdings_data,
+                fees=fee_data,
+                performance=performance_data,
+                allocation=allocation_data,
+            )
+
+            report = FundReport(
+                fund_code=request.fund_code,
+                fund_name=request.fund_name,
+                report_year=request.report_year,
+                chapters=tuple(chapters),
+                metadata={
+                    "generated_at": date.today().isoformat(),
+                    "data_years": list(years),
+                    "template_version": "v1",
+                },
+            )
+
+            # 4. 输出
+            output_path = None
+            warnings: list[str] = []
+            if request.output_format == "markdown":
+                output_path = self._export_markdown(report, request.work_dir)
+            elif request.output_format == "pdf":
+                md_path = self._export_markdown(report, request.work_dir)
+                output_path, pdf_warning = self._export_pdf(md_path, request.work_dir)
+                if pdf_warning:
+                    warnings.append(pdf_warning)
+
+            return GenerateReportResult(
+                report=report,
+                output_path=output_path,
+                warnings=tuple(warnings),
+                failure=None,
+            )
+
+        except DocumentToolError as exc:
+            return GenerateReportResult(failure=ToolFailure(code=exc.code, message=exc.message))
+        except Exception as exc:
+            return GenerateReportResult(failure=ToolFailure(code=FailureCode.UNAVAILABLE, message=f"报告生成暂不可用: {exc}"))
+
+    def _extract_report_holdings(
+        self,
+        fund_code: str,
+        annual_docs: list[AnnualReportDocument],
+        work_dir: Path,
+    ) -> dict[int, tuple[HoldingExtraction, ...]]:
+        """提取多年度持仓数据。"""
+
+        result = self.extract_multi_year_holdings(ExtractHoldingsRequest(
+            fund_code=fund_code,
+            requested_years=[d.year for d in annual_docs],
+            annual_report_documents=annual_docs,
+            work_dir=work_dir,
+        ))
+        if result.series is None:
+            return {}
+        return {h.year: h.holdings for h in result.series.annual_holdings}
+
+    def _extract_report_fees(
+        self,
+        fund_code: str,
+        annual_docs: list[AnnualReportDocument],
+        work_dir: Path,
+    ) -> dict[int, tuple[FeeRateItem, ...]]:
+        """提取多年度费率数据。"""
+
+        result = self.extract_multi_year_fee_rates(ExtractFeeRatesMultiYearRequest(
+            fund_code=fund_code,
+            requested_years=[d.year for d in annual_docs],
+            annual_report_documents=annual_docs,
+            work_dir=work_dir,
+        ))
+        if result.series is None:
+            return {}
+        return {f.year: f.fees for f in result.series.annual_fees}
+
+    def _extract_report_performance(
+        self,
+        fund_code: str,
+        annual_docs: list[AnnualReportDocument],
+        work_dir: Path,
+    ) -> dict[int, dict[str, str]]:
+        """提取多年度业绩数据。"""
+
+        result = self.aggregate_multi_year_annual_performance(AggregateMultiYearAnnualPerformanceRequest(
+            fund_code=fund_code,
+            requested_years=[d.year for d in annual_docs],
+            annual_report_documents=annual_docs,
+            work_dir=work_dir,
+        ))
+        if not result.series:
+            return {}
+        performance = {}
+        for s in result.series:
+            for row in s.rows:
+                performance[row.year] = {
+                    "nav_growth_rate": row.annual_nav_growth_rate,
+                    "benchmark_return_rate": row.annual_benchmark_return_rate,
+                    "excess_return": row.annual_excess_return,
+                }
+        return performance
+
+    def _extract_report_allocation(
+        self,
+        fund_code: str,
+        annual_docs: list[AnnualReportDocument],
+        work_dir: Path,
+    ) -> dict[int, tuple[AssetAllocationItem, ...]]:
+        """提取多年度资产配置数据。"""
+
+        result = self.extract_multi_year_allocation(ExtractAllocationRequest(
+            fund_code=fund_code,
+            requested_years=[d.year for d in annual_docs],
+            annual_report_documents=annual_docs,
+            work_dir=work_dir,
+        ))
+        if result.series is None:
+            return {}
+        return {a.year: a.asset_allocation for a in result.series.annual_allocations}
+
+    def _generate_chapters(
+        self,
+        *,
+        fund_code: str,
+        fund_name: str,
+        report_year: int,
+        holdings: dict[int, tuple[HoldingExtraction, ...]],
+        fees: dict[int, tuple[FeeRateItem, ...]],
+        performance: dict[int, dict[str, str]],
+        allocation: dict[int, tuple[AssetAllocationItem, ...]],
+    ) -> list[ReportChapter]:
+        """生成 8 章报告内容。"""
+
+        chapters: list[ReportChapter] = []
+
+        # Ch0: 投资要点概览
+        chapters.append(ReportChapter(
+            chapter_id=0,
+            title="投资要点概览",
+            content=self._generate_ch0_summary(fund_name, report_year, performance),
+            data_sources=("performance",),
+        ))
+
+        # Ch1: 基金概况
+        chapters.append(ReportChapter(
+            chapter_id=1,
+            title="这只基金到底是什么产品",
+            content=f"## 基金概况\n\n- 基金代码：{fund_code}\n- 基金名称：{fund_name}\n- 报告年份：{report_year}\n",
+            data_sources=("basic_info",),
+        ))
+
+        # Ch2: 业绩分析
+        chapters.append(ReportChapter(
+            chapter_id=2,
+            title="业绩分析",
+            content=self._generate_ch2_performance(performance),
+            data_sources=("performance",),
+        ))
+
+        # Ch3: 持仓分析
+        chapters.append(ReportChapter(
+            chapter_id=3,
+            title="持仓分析",
+            content=self._generate_ch3_holdings(holdings),
+            data_sources=("holdings",),
+        ))
+
+        # Ch4: 资产配置
+        chapters.append(ReportChapter(
+            chapter_id=4,
+            title="资产配置分析",
+            content=self._generate_ch4_allocation(allocation),
+            data_sources=("allocation",),
+        ))
+
+        # Ch5: 费率分析
+        chapters.append(ReportChapter(
+            chapter_id=5,
+            title="费率分析",
+            content=self._generate_ch5_fees(fees),
+            data_sources=("fees",),
+        ))
+
+        # Ch6: 分红分析
+        chapters.append(ReportChapter(
+            chapter_id=6,
+            title="分红分析",
+            content="## 分红情况\n\n分红数据抽取暂不支持，详见原始年报。\n",
+            data_sources=(),
+        ))
+
+        # Ch7: 风险提示
+        chapters.append(ReportChapter(
+            chapter_id=7,
+            title="风险提示",
+            content=self._generate_ch7_risks(fund_name, performance, holdings),
+            data_sources=("performance", "holdings"),
+        ))
+
+        return chapters
+
+    def _generate_ch0_summary(
+        self,
+        fund_name: str,
+        report_year: int,
+        performance: dict[int, dict[str, str]],
+    ) -> str:
+        """生成投资要点概览。"""
+
+        latest_perf = performance.get(report_year, {})
+        nav_growth = latest_perf.get("nav_growth_rate", "N/A")
+
+        return f"""## 一眼看懂
+
+- **基金名称**：{fund_name}
+- **报告年份**：{report_year}
+- **最新净值增长率**：{nav_growth}
+
+## 投资要点
+
+基于 {report_year} 年报数据分析，该基金业绩表现和持仓情况详见后续章节。
+"""
+
+    def _generate_ch2_performance(self, performance: dict[int, dict[str, str]]) -> str:
+        """生成业绩分析章节。"""
+
+        lines = ["## 业绩表现\n", "| 年份 | 净值增长率 | 基准收益率 | 超额收益 |", "|------|-----------|-----------|---------|"]
+        for year in sorted(performance.keys()):
+            p = performance[year]
+            lines.append(f"| {year} | {p.get('nav_growth_rate', 'N/A')} | {p.get('benchmark_return_rate', 'N/A')} | {p.get('excess_return', 'N/A')} |")
+        return "\n".join(lines) + "\n"
+
+    def _generate_ch3_holdings(self, holdings: dict[int, tuple[HoldingExtraction, ...]]) -> str:
+        """生成持仓分析章节。"""
+
+        lines = ["## 持仓分析\n"]
+        for year in sorted(holdings.keys()):
+            lines.append(f"### {year} 年前十大持仓\n")
+            lines.append("| 排名 | 股票代码 | 股票名称 | 占净值比 |")
+            lines.append("|------|---------|---------|---------|")
+            for h in holdings[year][:10]:
+                lines.append(f"| {h.rank} | {h.stock_code} | {h.stock_name} | {h.percentage} |")
+            lines.append("")
+        return "\n".join(lines)
+
+    def _generate_ch4_allocation(self, allocation: dict[int, tuple[AssetAllocationItem, ...]]) -> str:
+        """生成资产配置章节。"""
+
+        lines = ["## 资产配置\n"]
+        for year in sorted(allocation.keys()):
+            lines.append(f"### {year} 年资产配置\n")
+            lines.append("| 资产类别 | 金额 | 占净值比 |")
+            lines.append("|---------|------|---------|")
+            for a in allocation[year][:10]:
+                lines.append(f"| {a.category} | {a.amount} | {a.percentage_of_total} |")
+            lines.append("")
+        return "\n".join(lines)
+
+    def _generate_ch5_fees(self, fees: dict[int, tuple[FeeRateItem, ...]]) -> str:
+        """生成费率分析章节。"""
+
+        lines = ["## 费率分析\n", "| 年份 | 费率名称 | 费率 |", "|------|---------|------|"]
+        for year in sorted(fees.keys()):
+            for f in fees[year]:
+                lines.append(f"| {year} | {f.fee_name} | {f.rate} |")
+        return "\n".join(lines) + "\n"
+
+    def _generate_ch7_risks(
+        self,
+        fund_name: str,
+        performance: dict[int, dict[str, str]],
+        holdings: dict[int, tuple[HoldingExtraction, ...]],
+    ) -> str:
+        """生成风险提示章节。"""
+
+        return f"""## 风险提示
+
+1. 本基金过往业绩不代表未来表现
+2. 投资有风险，入市需谨慎
+3. 基金持仓和费率数据来源于公开披露的年度报告
+4. 本报告由 AI 辅助生成，仅供参考
+
+*数据来源：{fund_name} 年度报告*
+"""
+
+    def _export_markdown(self, report: FundReport, work_dir: Path) -> str:
+        """导出 Markdown 文件。"""
+
+        output_dir = work_dir / "reports"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"{report.fund_code}-{report.report_year}-analysis.md"
+
+        lines = [f"# {report.fund_name}（{report.fund_code}）{report.report_year} 年度分析报告\n"]
+        lines.append("**风险警示**：本报告由 AI 辅助生成，仅供参考，不构成投资建议。\n")
+
+        for chapter in report.chapters:
+            lines.append(f"\n---\n\n## 第 {chapter.chapter_id} 章：{chapter.title}\n")
+            lines.append(chapter.content)
+
+        output_path.write_text("\n".join(lines), encoding="utf-8")
+        return str(output_path)
+
+    def _export_pdf(self, md_path: str, work_dir: Path) -> tuple[str, str | None]:
+        """使用 pandoc 导出 PDF。
+
+        返回:
+            (输出路径, 警告信息或 None)
+        """
+
+        pdf_path = md_path.replace(".md", ".pdf")
+        try:
+            subprocess.run(
+                ["pandoc", md_path, "-o", pdf_path, "--pdf-engine=xelatex"],
+                check=True,
+                capture_output=True,
+            )
+            return pdf_path, None
+        except FileNotFoundError:
+            return md_path, "pandoc 未安装，已回退为 Markdown 格式"
+        except subprocess.CalledProcessError:
+            return md_path, "PDF 导出失败，已回退为 Markdown 格式"
 
     def list_reports(self, request: ListReportsRequest) -> ListReportsResult:
         """列出本地 completed reports 的安全摘要。

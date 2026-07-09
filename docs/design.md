@@ -1184,5 +1184,5 @@ Post-MVP 11C 裁决为 holdings multi-year tracking：
 下一步只应验证一个问题：
 
 ```text
-12C 裁决已写入。下一步进入 12C 代码实现：新增 fund-checklist llm-audit 子命令，复用现有 tool loop 逐项独立审计，输出带原文引用的审计文本。
+13A 裁决已写入。下一步进入 13A 代码实现：新增 fund-checklist generate 子命令，基于 5 年年报数据生成 8 章结构化分析报告。
 ```

@@ -26,6 +26,7 @@ from fund_agent.service import (
     ExtractFeeRatesMultiYearRequest,
     ExtractHoldingsRequest,
     FundReadingService,
+    GenerateReportRequest,
     ImportLocalReportRequest,
     ReadLocalReportRequest,
 )
@@ -93,6 +94,8 @@ def run_cli(
             return _run_audit_command(args, stdout=stdout, stderr=stderr)
         if args.command == "deep-audit":
             return _run_deep_audit_command(args, stdout=stdout, stderr=stderr)
+        if args.command == "generate":
+            return _run_generate_command(args, stdout=stdout, stderr=stderr)
     except DocumentToolError as exc:
         _write_classified_failure(ToolFailure(code=exc.code, message=exc.message), stderr)
         return CLASSIFIED_FAILURE_EXIT_CODE
@@ -165,6 +168,14 @@ def build_parser() -> argparse.ArgumentParser:
     deep_audit_parser.add_argument("--fund-code", required=True)
     deep_audit_parser.add_argument("--year", required=True, type=int)
     deep_audit_parser.add_argument("--work-dir", default=Path(DEFAULT_WORK_DIR), type=Path)
+
+    generate_parser = subparsers.add_parser("generate")
+    generate_parser.add_argument("--fund-code", required=True)
+    generate_parser.add_argument("--fund-name", required=True)
+    generate_parser.add_argument("--year", required=True, type=int)
+    generate_parser.add_argument("--years", default="2020,2021,2022,2023,2024")
+    generate_parser.add_argument("--format", dest="output_format", default="json", choices=["json", "markdown", "pdf"])
+    generate_parser.add_argument("--work-dir", default=Path(DEFAULT_WORK_DIR), type=Path)
     return parser
 
 
@@ -691,6 +702,54 @@ def _run_deep_audit_command(args: argparse.Namespace, *, stdout: TextIO, stderr:
         "document_id": result.document_id,
         "audit_results": [asdict(r) for r in result.audit_results],
         "summary": result.summary,
+    }
+    print(json.dumps(output, ensure_ascii=False, indent=2), file=stdout)
+    return SUCCESS_EXIT_CODE
+
+
+def _run_generate_command(args: argparse.Namespace, *, stdout: TextIO, stderr: TextIO) -> int:
+    """生成基金分析报告。
+
+    参数:
+        args: argparse 解析出的 generate 参数。
+        stdout: 成功输出流（JSON）。
+        stderr: 失败输出流。
+
+    返回:
+        成功返回 0；not_found 返回 2。
+    """
+
+    years = _parse_years(args.years)
+    service = FundReadingService()
+    result = service.generate_report(
+        GenerateReportRequest(
+            fund_code=args.fund_code,
+            fund_name=args.fund_name,
+            report_year=args.year,
+            years=years,
+            work_dir=Path(args.work_dir),
+            output_format=args.output_format,
+        )
+    )
+    if result.failure is not None:
+        _write_classified_failure(result.failure, stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+    output = {
+        "fund_code": result.report.fund_code,
+        "fund_name": result.report.fund_name,
+        "report_year": result.report.report_year,
+        "chapters": [
+            {
+                "chapter_id": c.chapter_id,
+                "title": c.title,
+                "content": c.content,
+                "data_sources": list(c.data_sources),
+            }
+            for c in result.report.chapters
+        ],
+        "metadata": result.report.metadata,
+        "output_path": result.output_path,
     }
     print(json.dumps(output, ensure_ascii=False, indent=2), file=stdout)
     return SUCCESS_EXIT_CODE

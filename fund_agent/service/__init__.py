@@ -29,6 +29,9 @@ from fund_agent.service.reading_service import (
     FeeRateExtraction,
     FeeRateItem,
     FundReadingService,
+    FundReport,
+    GenerateReportRequest,
+    GenerateReportResult,
     HoldingExtraction,
     ImportLocalReportRequest,
     ImportLocalReportResult,
@@ -43,6 +46,7 @@ from fund_agent.service.reading_service import (
     QueryRouteAttempt,
     ReadLocalReportRequest,
     ReadLocalReportResult,
+    ReportChapter,
 )
 
 __all__ = [
@@ -74,6 +78,9 @@ __all__ = [
     "FeeRateExtraction",
     "FeeRateItem",
     "FundReadingService",
+    "FundReport",
+    "GenerateReportRequest",
+    "GenerateReportResult",
     "HoldingExtraction",
     "ImportLocalReportRequest",
     "ImportLocalReportResult",
@@ -88,4 +95,5 @@ __all__ = [
     "QueryRouteAttempt",
     "ReadLocalReportRequest",
     "ReadLocalReportResult",
+    "ReportChapter",
 ]

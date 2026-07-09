@@ -1963,3 +1963,107 @@ def test_deep_audit_json_output_on_success(monkeypatch, tmp_path: Path) -> None:
     assert output["summary"]["fail"] == 0
     assert output["audit_results"][0]["status"] == "pass"
     assert "持仓章节" in output["audit_results"][0]["completeness"]
+
+
+def test_generate_parser_accepts_valid_args() -> None:
+    """generate 子命令 parser 必须接受合法参数。"""
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "generate",
+        "--fund-code", "004393",
+        "--fund-name", "安信企业价值优选混合型证券投资基金",
+        "--year", "2024",
+        "--years", "2022,2023,2024",
+        "--format", "json",
+    ])
+
+    assert args.command == "generate"
+    assert args.fund_code == "004393"
+    assert args.fund_name == "安信企业价值优选混合型证券投资基金"
+    assert args.year == 2024
+    assert args.years == "2022,2023,2024"
+    assert args.output_format == "json"
+
+
+def test_generate_exits_2_when_no_data(monkeypatch, tmp_path: Path) -> None:
+    """无数据时 generate 必须返回 exit 2。"""
+
+    from fund_agent.service import GenerateReportResult
+
+    class _FakeService:
+        def generate_report(self, request):
+            return GenerateReportResult(
+                failure=ToolFailure(code=FailureCode.NOT_FOUND, message="未找到年报数据"),
+            )
+
+    monkeypatch.setattr(cli_module, "FundReadingService", _FakeService)
+
+    work_dir = tmp_path / "work"
+    _write_catalog(work_dir, [])
+
+    exit_code, stdout, stderr = _run([
+        "generate",
+        "--fund-code", "004393",
+        "--fund-name", "安信企业价值优选混合型证券投资基金",
+        "--year", "2024",
+        "--work-dir", str(work_dir),
+    ])
+
+    assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
+    assert "not_found" in stderr
+
+
+def test_generate_json_output_on_success(monkeypatch, tmp_path: Path) -> None:
+    """generate 成功时必须输出 JSON 格式的报告。"""
+
+    from fund_agent.service import (
+        GenerateReportResult,
+        FundReport,
+        ReportChapter,
+    )
+
+    fake_report = FundReport(
+        fund_code="004393",
+        fund_name="安信企业价值优选混合型证券投资基金",
+        report_year=2024,
+        chapters=(
+            ReportChapter(chapter_id=0, title="投资要点概览", content="测试内容", data_sources=("performance",)),
+            ReportChapter(chapter_id=1, title="基金概况", content="测试内容", data_sources=("basic_info",)),
+            ReportChapter(chapter_id=2, title="业绩分析", content="测试内容", data_sources=("performance",)),
+            ReportChapter(chapter_id=3, title="持仓分析", content="测试内容", data_sources=("holdings",)),
+            ReportChapter(chapter_id=4, title="资产配置分析", content="测试内容", data_sources=("allocation",)),
+            ReportChapter(chapter_id=5, title="费率分析", content="测试内容", data_sources=("fees",)),
+            ReportChapter(chapter_id=6, title="分红分析", content="测试内容", data_sources=()),
+            ReportChapter(chapter_id=7, title="风险提示", content="测试内容", data_sources=("performance",)),
+        ),
+        metadata={"generated_at": "2026-07-08", "data_years": [2024], "template_version": "v1"},
+    )
+
+    class _FakeService:
+        def generate_report(self, request):
+            return GenerateReportResult(report=fake_report, output_path=None, failure=None)
+
+    monkeypatch.setattr(cli_module, "FundReadingService", _FakeService)
+
+    work_dir = tmp_path / "work"
+    _write_catalog(work_dir, [
+        {"document_id": "doc-2024", "year": 2024, "fund_code": "004393"},
+    ])
+
+    exit_code, stdout, stderr = _run([
+        "generate",
+        "--fund-code", "004393",
+        "--fund-name", "安信企业价值优选混合型证券投资基金",
+        "--year", "2024",
+        "--work-dir", str(work_dir),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE
+    assert stderr == ""
+    output = json.loads(stdout)
+    assert output["fund_code"] == "004393"
+    assert output["report_year"] == 2024
+    assert len(output["chapters"]) == 8
+    assert output["chapters"][0]["title"] == "投资要点概览"
+    assert output["chapters"][0]["content"] == "测试内容"
