@@ -1876,3 +1876,90 @@ def test_audit_exits_2_when_service_failure(monkeypatch, tmp_path: Path) -> None
 
     assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
     assert "not_found" in stderr
+
+
+def test_deep_audit_parser_accepts_valid_args() -> None:
+    """deep-audit 子命令 parser 必须接受合法参数。"""
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "deep-audit",
+        "--fund-code", "512890",
+        "--year", "2024",
+    ])
+
+    assert args.command == "deep-audit"
+    assert args.fund_code == "512890"
+    assert args.year == 2024
+
+
+def test_deep_audit_exits_2_when_no_matching_report(tmp_path: Path) -> None:
+    """catalog 中无匹配年报时 deep-audit 必须返回 exit 2。"""
+
+    work_dir = tmp_path / "work"
+    _write_catalog(work_dir, [])
+
+    exit_code, stdout, stderr = _run([
+        "deep-audit",
+        "--fund-code", "512890",
+        "--year", "2024",
+        "--work-dir", str(work_dir),
+    ])
+
+    assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
+    assert "not_found" in stderr
+
+
+def test_deep_audit_json_output_on_success(monkeypatch, tmp_path: Path) -> None:
+    """deep-audit 成功时必须输出 JSON 格式的审计结果。"""
+
+    from fund_agent.service import (
+        DeepAuditResult,
+        DeepAuditItem,
+    )
+
+    fake_result = DeepAuditResult(
+        fund_code="512890",
+        year=2024,
+        document_id="512890-2024-annual_report-abc123",
+        audit_results=(
+            DeepAuditItem(name="holdings", status="pass", completeness="找到持仓章节和相关表格", consistency="通过", citation_text="section_ref=section-0593"),
+            DeepAuditItem(name="asset_allocation", status="pass", completeness="找到资产配置章节和相关表格", consistency="通过", citation_text="section_ref=section-0580"),
+            DeepAuditItem(name="fee_rates", status="warning", completeness="找到费率章节，未找到相关表格", consistency="需人工验证", citation_text="section_ref=section-0432"),
+            DeepAuditItem(name="performance", status="warning", completeness="找到业绩章节，未找到相关表格", consistency="需人工验证", citation_text="section_ref=section-0039"),
+            DeepAuditItem(name="fund_manager", status="pass", completeness="找到基金经理章节和相关表格", consistency="通过", citation_text="section_ref=section-0053"),
+            DeepAuditItem(name="dividends", status="warning", completeness="找到分红章节，未找到相关表格", consistency="需人工验证", citation_text="section_ref=section-0045"),
+        ),
+        summary={"pass": 3, "fail": 0, "warning": 3},
+        failure=None,
+    )
+
+    class _FakeService:
+        def deep_audit_disclosure(self, request):
+            return fake_result
+
+    monkeypatch.setattr(cli_module, "FundReadingService", _FakeService)
+
+    work_dir = tmp_path / "work"
+    _write_catalog(work_dir, [
+        {"document_id": "512890-2024-annual_report-abc123", "year": 2024, "fund_code": "512890"},
+    ])
+
+    exit_code, stdout, stderr = _run([
+        "deep-audit",
+        "--fund-code", "512890",
+        "--year", "2024",
+        "--work-dir", str(work_dir),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE
+    assert stderr == ""
+    output = json.loads(stdout)
+    assert output["fund_code"] == "512890"
+    assert output["year"] == 2024
+    assert len(output["audit_results"]) == 6
+    assert output["summary"]["pass"] == 3
+    assert output["summary"]["warning"] == 3
+    assert output["summary"]["fail"] == 0
+    assert output["audit_results"][0]["status"] == "pass"
+    assert "持仓章节" in output["audit_results"][0]["completeness"]

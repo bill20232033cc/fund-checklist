@@ -1,9 +1,9 @@
 # fund-checklist implementation-control
 
 更新时间：2026-07-08
-当前阶段：`POST_MVP_SLICE_12B_ACCEPTED`
+当前阶段：`POST_MVP_SLICE_12C_ACCEPTED`
 当前角色：control / CIC-lite controller
-当前目标：Slice 12B Disclosure completeness audit 已实现并经 DeepSeek review `ACCEPTED`。当前为结构性规则审计（检查章节/表格/字段是否存在），LLM 审计（内容完整性验证 + 带引用文本生成）后续另开裁决。不得扩成 gateflow / phaseflow / release-readiness，不新增 plan artifact，不进入 batch benchmark、开放语义理解、自动分词、embedding、LLM intent、template contract execution、chapter contract execution、calculation framework、`fund-checklist ask`、UI、自动报告或投资判断。
+当前目标：Slice 12C Deep disclosure audit 已实现。新增 `fund-checklist deep-audit` 子命令，基于 search + read_section 的深度披露完整性审计，覆盖完整披露项（持仓、资产配置、费率、业绩、基金经理、分红），输出带原文引用的审计文本。不得扩成 gateflow / phaseflow / release-readiness，不新增 plan artifact，不进入 batch benchmark、开放语义理解、自动分词、embedding、LLM intent、template contract execution、chapter contract execution、calculation framework、`fund-checklist ask`、UI、自动报告或投资判断。
 
 ## 当前事实
 
@@ -502,6 +502,16 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - 12B allowed write set：`fund_agent/cli/main.py`、`fund_agent/service/reading_service.py`、测试文件、`docs/implementation-control.md`、`docs/design.md`。
 - 12B 不做内容完整性检查（如持仓是否10支）、不做合规性判断、不做投资建议。
 - 12B 不改现有子命令核心逻辑。
+- Post-MVP 12C 裁决为 LLM-based disclosure audit。
+- 12C 新增独立子命令 `fund-checklist llm-audit`，不扩展 `audit` 命令。
+- 12C 复用现有 tool loop（8A/8B），逐项独立审计（每个披露项一次 LLM 调用）。
+- 12C 审计范围：完整披露项（持仓、资产配置、费率、业绩、基金经理、分红）。
+- 12C 审计深度：内容完整性 + 基础一致性（持仓占比之和、资产配置占比之和、费率合理性）。
+- 12C 输出形态：带原文引用的审计文本。
+- 12C 从 `FinalAnswer.key_facts` 提取结构化审计结果，从 `FinalAnswer.citations` 获取引用位置。
+- 12C allowed write set：`fund_agent/cli/main.py`、`fund_agent/service/reading_service.py`、测试文件、`docs/implementation-control.md`、`docs/design.md`。
+- 12C smoke 测试使用真实 LLM。
+- 12C 不做跨年度趋势分析、不做投资建议、不改现有子命令核心逻辑。
 
 ## CIC-lite Rules
 
@@ -518,7 +528,7 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## Next Action
 
-12B 已完成并经 DeepSeek review `ACCEPTED`。下一步尚未裁决。可选方向：LLM 审计（内容完整性验证 + 带引用文本生成）、12C CLI consolidation、13A LLM Agent integration 或其他新方向。不得改现有子命令核心逻辑，不接真实 LLM，不做投资判断或自动报告。
+12C 已完成。下一步尚未裁决。可选方向：LLM 内容审计（真正的 LLM 驱动分析）、12D CLI consolidation、13A LLM Agent integration 或其他新方向。不得改现有子命令核心逻辑，不做投资判断或自动报告。
 
 禁止事项：
 
@@ -621,6 +631,7 @@ uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值
 11D. asset allocation + fee rates multi-year tracking：实现中；新增 `fund-checklist allocation` 和 `fund-checklist fees` 子命令，补齐资产配置和费率多年度追踪能力；资产配置目标披露表为 `期末基金资产组合情况` 和 `期末按行业分类的股票投资组合`；费率目标披露表为 `基金管理费`、`基金托管费`、`销售服务费`；JSON 输出；某年披露表未找到时跳过继续。
 12A. Host lifecycle basics：已 accepted；引入 HostRunResult（扩展封装：AgentRunResult + 耗时 + 事件列表 + tool_trace 统计）、HostRunEvent（完整事件类型）和简单 timeout（默认 300 秒）；新增 Service 方法；CLI 展示耗时和事件统计。
 12B. Disclosure completeness audit：已 accepted；新增 `fund-checklist audit` 子命令，检查年报是否覆盖核心披露项（持仓、资产配置、费率、业绩）+ 基金经理 + 分红；审计深度为章节+表格+字段存在性检查（结构性规则审计）；JSON 格式输出；LLM 审计后续另开裁决。
+12C. Deep disclosure audit：已 accepted；新增 `fund-checklist deep-audit` 子命令，基于 search + read_section 的深度披露完整性审计，覆盖完整披露项（持仓、资产配置、费率、业绩、基金经理、分红）；检查 ToolFailure、内容长度、表格引用；输出带原文引用的审计文本；JSON 格式输出。
 
 ## MVP Acceptance Matrix
 

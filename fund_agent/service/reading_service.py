@@ -806,6 +806,72 @@ class DisclosureAuditResult:
     failure: ToolFailure | None = None
 
 
+@dataclass(frozen=True)
+class DeepAuditItem:
+    """深度审计单个披露项结果。
+
+    参数:
+        name: 披露项名称。
+        status: 状态（pass / fail / warning）。
+        completeness: 内容完整性描述。
+        consistency: 数据一致性描述。
+        citation_text: 引用的原文片段。
+        raw_answer: 原始内容片段。
+
+    返回:
+        不可变深度审计结果 DTO。
+    """
+
+    name: str
+    status: str
+    completeness: str = ""
+    consistency: str = ""
+    citation_text: str = ""
+    raw_answer: str = ""
+
+
+@dataclass(frozen=True)
+class DeepAuditRequest:
+    """深度审计请求。
+
+    参数:
+        fund_code: 基金代码。
+        year: 审计年份。
+        work_dir: 受控工作目录。
+
+    返回:
+        不可变请求 DTO。
+    """
+
+    fund_code: str
+    year: int
+    work_dir: Path
+
+
+@dataclass(frozen=True)
+class DeepAuditResult:
+    """深度审计结果。
+
+    参数:
+        fund_code: 基金代码。
+        year: 审计年份。
+        document_id: 审计的文档 ID。
+        audit_results: 各披露项审计结果。
+        summary: 汇总（pass / fail / warning 数量）。
+        failure: 失败分类；成功时为 None。
+
+    返回:
+        不可变深度审计结果 DTO。
+    """
+
+    fund_code: str
+    year: int
+    document_id: str | None = None
+    audit_results: tuple[DeepAuditItem, ...] = ()
+    summary: dict[str, int] | None = None
+    failure: ToolFailure | None = None
+
+
 _HOLDINGS_TOP_N = 10
 _HOLDINGS_QUERY = "股票投资明细"
 _HOLDINGS_TABLE_MAX_ROWS = 15
@@ -2175,6 +2241,151 @@ class FundReadingService:
             fields = ["amount", "date"]
         status = "complete" if has_table else "partial"
         return DisclosureAuditItem(name="dividends", status=status, chapter=True, table=has_table, fields=tuple(fields))
+
+    def deep_audit_disclosure(
+        self,
+        request: DeepAuditRequest,
+    ) -> DeepAuditResult:
+        """深度披露完整性审计（基于 search + read_section）。
+
+        参数:
+            request: 深度审计请求。
+
+        返回:
+            DeepAuditResult；包含各披露项审计结果和汇总。
+        """
+
+        try:
+            repository = _repository(Path(request.work_dir))
+            catalog_reports = repository.list_reports()
+
+            document_id = None
+            for report in catalog_reports:
+                if report.get("fund_code") == request.fund_code and report.get("year") == request.year:
+                    document_id = str(report["document_id"])
+                    break
+
+            if document_id is None:
+                return DeepAuditResult(
+                    fund_code=request.fund_code,
+                    year=request.year,
+                    failure=ToolFailure(code=FailureCode.NOT_FOUND, message=f"catalog 中未找到 {request.fund_code} 的 {request.year} 年年报"),
+                )
+
+            store = repository.load_store(document_id)
+            tool_service = FundDocumentToolService({document_id: store})
+
+            audit_queries = [
+                ("holdings", "持仓", "股票投资明细"),
+                ("asset_allocation", "资产配置", "期末基金资产组合情况"),
+                ("fee_rates", "费率", "基金管理费"),
+                ("performance", "业绩", "基金份额净值增长率"),
+                ("fund_manager", "基金经理", "基金经理"),
+                ("dividends", "分红", "利润分配"),
+            ]
+
+            results: list[DeepAuditItem] = []
+            for item_name, item_desc, query in audit_queries:
+                try:
+                    search_results = tool_service.search_document(document_id, query)
+                    if isinstance(search_results, ToolFailure):
+                        results.append(DeepAuditItem(
+                            name=item_name,
+                            status="fail",
+                            completeness=f"{item_desc}搜索失败: {search_results.message}",
+                            consistency="",
+                            citation_text="",
+                            raw_answer="",
+                        ))
+                        continue
+
+                    if not search_results:
+                        results.append(DeepAuditItem(
+                            name=item_name,
+                            status="fail",
+                            completeness=f"未找到{item_desc}相关章节",
+                            consistency="",
+                            citation_text="",
+                            raw_answer="",
+                        ))
+                        continue
+
+                    first_hit = search_results[0]
+                    section_ref = first_hit.section_ref
+                    citation_text = f"section_ref={section_ref}" if section_ref else ""
+
+                    content = ""
+                    if section_ref:
+                        section = tool_service.read_section(document_id, section_ref)
+                        if isinstance(section, ToolFailure):
+                            results.append(DeepAuditItem(
+                                name=item_name,
+                                status="fail",
+                                completeness=f"{item_desc}章节读取失败: {section.message}",
+                                consistency="",
+                                citation_text=citation_text,
+                                raw_answer="",
+                            ))
+                            continue
+                        content = section.text
+                    else:
+                        content = first_hit.excerpt or ""
+
+                    has_content = len(content) > 20
+                    has_table = any(r.table_ref for r in search_results)
+
+                    if has_content and has_table:
+                        status = "pass"
+                        completeness = f"找到{item_desc}章节和相关表格"
+                    elif has_content:
+                        status = "warning"
+                        completeness = f"找到{item_desc}章节，未找到相关表格"
+                    else:
+                        status = "fail"
+                        completeness = f"{item_desc}内容不完整"
+
+                    results.append(DeepAuditItem(
+                        name=item_name,
+                        status=status,
+                        completeness=completeness,
+                        consistency="通过" if status == "pass" else "需人工验证",
+                        citation_text=citation_text,
+                        raw_answer=content[:200] if content else "",
+                    ))
+                except Exception as exc:
+                    results.append(DeepAuditItem(
+                        name=item_name,
+                        status="fail",
+                        completeness=f"{item_desc}审计执行失败: {exc}",
+                        consistency="",
+                        citation_text="",
+                        raw_answer="",
+                    ))
+
+            pass_count = sum(1 for r in results if r.status == "pass")
+            fail_count = sum(1 for r in results if r.status == "fail")
+            warning_count = sum(1 for r in results if r.status == "warning")
+
+            return DeepAuditResult(
+                fund_code=request.fund_code,
+                year=request.year,
+                document_id=document_id,
+                audit_results=tuple(results),
+                summary={"pass": pass_count, "fail": fail_count, "warning": warning_count},
+                failure=None,
+            )
+        except DocumentToolError as exc:
+            return DeepAuditResult(
+                fund_code=request.fund_code,
+                year=request.year,
+                failure=ToolFailure(code=exc.code, message=exc.message),
+            )
+        except Exception as exc:
+            return DeepAuditResult(
+                fund_code=request.fund_code,
+                year=request.year,
+                failure=ToolFailure(code=FailureCode.UNAVAILABLE, message=f"深度审计暂不可用: {exc}"),
+            )
 
     def list_reports(self, request: ListReportsRequest) -> ListReportsResult:
         """列出本地 completed reports 的安全摘要。
