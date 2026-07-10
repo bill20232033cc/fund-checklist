@@ -155,6 +155,13 @@ implement -> tests -> diff review
 - 禁止任何 Agent 用“逻辑上完成”“应该通过”“已按计划完成”替代测试输出。
 - 若调用 code-is-cheap 相关 skill，必须显式声明本项目使用 CIC-lite；不得启用完整 gateflow / phaseflow / release-readiness。
 
+## Review 规则
+
+- LLM reviewer（DeepSeek 等）处理大 diff 时可能捏造不存在的代码并给出"修复建议"。
+- 对 review findings 中的 P0/P1 项，必须先 `grep -n` 确认代码存在再行动。
+- review prompt 应要求 reviewer 先列出代码行号和实际内容，再给出判断。
+- 不要盲目信任 review 结论——reviewer 也会 hallucinate。
+
 ## 测试规则
 
 - 每次代码修改必须同步新增或更新测试。

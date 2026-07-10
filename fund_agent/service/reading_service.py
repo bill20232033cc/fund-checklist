@@ -629,6 +629,48 @@ class FeeRateItem:
 
 
 @dataclass(frozen=True)
+class FundManagerInfo:
+    """基金经理信息。
+
+    参数:
+        name: 基金经理姓名。
+        tenure_start: 任职日期文本。
+        years_of_service: 证券从业年限文本。
+        investment_strategy: 投资策略描述（从§4.4.1提取）。
+        holds_fund: 基金经理持有本基金区间（如"10~50万份"）。
+
+    返回:
+        不可变基金经理信息 DTO。
+    """
+
+    name: str
+    tenure_start: str
+    years_of_service: str
+    investment_strategy: str
+    holds_fund: str
+
+
+@dataclass(frozen=True)
+class ScaleInfo:
+    """基金规模信息。
+
+    参数:
+        total_shares_a: A类份额总数。
+        total_shares_c: C类份额总数。
+        individual_investor_ratio: 个人投资者持有比例。
+        management_holds: 管理人从业人员持有比例。
+
+    返回:
+        不可变规模信息 DTO。
+    """
+
+    total_shares_a: str
+    total_shares_c: str
+    individual_investor_ratio: str
+    management_holds: str
+
+
+@dataclass(frozen=True)
 class AnnualAllocationResult:
     """单年度资产配置抽取结果。
 
@@ -935,7 +977,7 @@ class GenerateReportRequest:
     fund_code: str
     fund_name: str
     report_year: int
-    years: tuple[int, ...] | list[int] = (2020, 2021, 2022, 2023, 2024)
+    years: tuple[int, ...] | list[int] = ()
     work_dir: Path = Path(".fund_checklist")
     output_format: str = "json"
 
@@ -958,6 +1000,400 @@ class GenerateReportResult:
     output_path: str | None = None
     warnings: tuple[str, ...] = ()
     failure: ToolFailure | None = None
+
+
+_LLM_CHAPTER_SYSTEM_PROMPT = (
+    "你是一位专业的基金分析师。请基于提供的数据表格，撰写定性分析评论。\n\n"
+    "【输出格式 - 必须严格遵守】\n"
+    "1. 你的输出是纯定性分析文本，禁止包含任何数字、百分比、金额\n"
+    "2. 数据表格已由系统生成，你只需要写分析评论\n"
+    "3. 用'据上表''数据显示''从趋势看'等方式引用数据，不要重复数字\n"
+    "4. 禁止输出投资建议（如'买入''卖出''推荐'）\n"
+    "5. 禁止预测未来收益或市场走势\n"
+    "6. 使用 Markdown 格式，语言简洁专业\n\n"
+    "违反以上约束的输出将被拒绝。"
+)
+
+_LLM_ANALYSIS_PROMPTS: dict[int, str] = {
+    0: (
+        "请基于上述关键指标数据，写一段「投资要点概览」分析。要求：\n"
+        "- 用一句话定义这是什么基金\n"
+        "- 给出极简基金简介（类型、经理、规模中最必要的信息）\n"
+        "- 回答当前综合评估结论：表现优异、表现平稳还是需要关注\n"
+        "- 回答当前最值得盯住的变量是什么\n"
+        "- 回答当前最大的风险是什么（只保留1个）\n"
+        "- 回答下一步最小验证问题是什么（只写1个）\n"
+        "- 不要包含任何数字"
+    ),
+    1: (
+        "请基于上述基本信息和基金经理投资策略，写一段「产品定义」分析。要求：\n"
+        "- 用最低认知负担定义这只基金到底是什么产品\n"
+        "- 说明投资目标和投资策略\n"
+        "- 说明看这类基金时通常最先要看什么\n"
+        "- 不要包含任何数字"
+    ),
+    2: (
+        "请基于上述业绩数据和成本数据，写一段「R=A+B-C 收益归因」分析。要求：\n"
+        "- 分析超额收益(A=R-B)的趋势：是结构性的还是阶段性的\n"
+        "- 判断超额收益是否为正且稳定\n"
+        "- 用定性描述（如'上升''下降''稳定''由正转负'），不要重复数字\n"
+        "- 不要包含任何数字"
+    ),
+    3: (
+        "请基于上述基金经理信息和持仓数据，写一段「基金经理画像」分析。要求：\n"
+        "- 分析基金经理的投资策略与实际持仓行为是否一致\n"
+        "- 分析持仓集中度趋势、行业分布特点\n"
+        "- 分析基金经理是否持有本基金（利益一致性）\n"
+        "- 不做性格或人品的主观评价\n"
+        "- 不猜测基金经理的动机\n"
+        "- 不要包含任何数字"
+    ),
+    4: "投资者实际收益数据暂不可用，详见原始年报。",
+    5: (
+        "请基于上述规模和配置数据，写一段「当前阶段与关键变化」分析。要求：\n"
+        "- 判断当前阶段（建仓期/稳定期/膨胀期/萎缩期/转型期）\n"
+        "- 指出过去一年最关键的1-3个变化\n"
+        "- 这些变化是否影响原始投资假设\n"
+        "- 不要包含任何数字"
+    ),
+    6: (
+        "请基于上述风险相关数据，写一段「核心风险与否决项」分析。要求：\n"
+        "- 指出最关键的风险或否决项（1-2个最致命的）\n"
+        "- 说明为什么足以改变结论\n"
+        "- 判断是否触发一票否决，还是仍可跟踪\n"
+        "- 包含标准风险声明（过往业绩不代表未来表现）\n"
+        "- 不要包含任何数字"
+    ),
+    7: (
+        "请基于上述判断依据数据和前6章分析，写一段「综合评估与跟踪建议」。要求：\n"
+        "- 给出综合评估结论\n"
+        "- 说明支撑结论的核心依据\n"
+        "- 指出当前最容易看错的地方\n"
+        "- 给出下一轮最小验证计划（1-2个）\n"
+        "- 不要包含任何数字"
+    ),
+}
+
+
+def _generate_data_table(
+    chapter_id: int,
+    fund_code: str,
+    fund_name: str,
+    report_year: int,
+    performance: dict[int, dict[str, str]],
+    holdings: dict[int, tuple[HoldingExtraction, ...]],
+    allocation: dict[int, tuple[AssetAllocationItem, ...]],
+    fees: dict[int, tuple[FeeRateItem, ...]],
+    fund_manager: FundManagerInfo | None = None,
+    scale_info: ScaleInfo | None = None,
+) -> str:
+    """程序化生成数据表格（数字 100% 从数据 dict 提取，不经过 LLM）。
+
+    参数:
+        chapter_id: 章节编号。
+        fund_code/fund_name/report_year: 基本信息。
+        performance/holdings/allocation/fees: 多年度数据。
+        fund_manager: 基金经理信息。
+        scale_info: 规模信息。
+
+    返回:
+        Markdown 格式的数据表格文本。
+    """
+
+    # Ch0: 投资要点概览 — 汇总关键指标
+    if chapter_id == 0:
+        latest = performance.get(report_year, {})
+        latest_nav = latest.get("nav_growth_rate", "N/A")
+        latest_bench = latest.get("benchmark_return_rate", "N/A")
+        latest_excess = latest.get("excess_return", "N/A")
+
+        # 计算多年超额收益趋势
+        excess_trend = ""
+        excess_years = sorted(performance.keys())
+        if len(excess_years) >= 2:
+            excesses = [performance[y].get("excess_return", "N/A") for y in excess_years]
+            excess_trend = ", ".join(f"{y}年:{e}" for y, e in zip(excess_years, excesses))
+
+        # 最新费率
+        latest_fees = fees.get(report_year, [])
+        mgmt_fee = ""
+        custodian_fee = ""
+        for f in latest_fees:
+            if "管理" in f.fee_name:
+                mgmt_fee = f.rate
+            elif "托管" in f.fee_name:
+                custodian_fee = f.rate
+
+        lines = [
+            "## 关键指标",
+            "",
+            "| 指标 | 值 |",
+            "|------|----|",
+            f"| 基金名称 | {fund_name} |",
+            f"| 基金代码 | {fund_code} |",
+            f"| 报告年份 | {report_year} |",
+            f"| 最新净值增长率 | {latest_nav} |",
+            f"| 最新基准收益率 | {latest_bench} |",
+            f"| 最新超额收益 | {latest_excess} |",
+            f"| 管理费 | {mgmt_fee or 'N/A'} |",
+            f"| 托管费 | {custodian_fee or 'N/A'} |",
+        ]
+        if fund_manager:
+            lines.append(f"| 基金经理 | {fund_manager.name} |")
+        if excess_trend:
+            lines.append("")
+            lines.append(f"**超额收益趋势**：{excess_trend}")
+        return "\n".join(lines)
+
+    # Ch1: 产品定义 — 基本信息 + 基金经理
+    if chapter_id == 1:
+        lines = [
+            "## 基本信息",
+            "",
+            "| 项目 | 值 |",
+            "|------|----|",
+            f"| 基金代码 | {fund_code} |",
+            f"| 基金名称 | {fund_name} |",
+            f"| 报告年份 | {report_year} |",
+        ]
+        if fund_manager:
+            lines.extend([
+                f"| 基金经理 | {fund_manager.name} |",
+                f"| 任职日期 | {fund_manager.tenure_start} |",
+                f"| 从业年限 | {fund_manager.years_of_service} |",
+            ])
+            if fund_manager.investment_strategy:
+                lines.append("")
+                lines.append("## 基金经理投资策略（原文摘录）")
+                lines.append("")
+                lines.append(fund_manager.investment_strategy[:400])
+        return "\n".join(lines)
+
+    # Ch2: R=A+B-C 收益归因
+    if chapter_id == 2:
+        lines = [
+            "## 业绩数据",
+            "",
+            "| 年份 | 净值增长率(R) | 基准收益率(B) | 超额收益(A=R-B) |",
+            "|------|-------------|-------------|----------------|",
+        ]
+        for year in sorted(performance.keys()):
+            p = performance[year]
+            lines.append(
+                f"| {year} | {p.get('nav_growth_rate', 'N/A')} | "
+                f"{p.get('benchmark_return_rate', 'N/A')} | "
+                f"{p.get('excess_return', 'N/A')} |"
+            )
+        # 费率作为成本C
+        lines.extend(["", "## 成本数据(C)", ""])
+        lines.extend(["| 年份 | 管理费 | 托管费 |", "|------|--------|--------|"])
+        for year in sorted(fees.keys()):
+            mgmt = ""
+            cust = ""
+            for f in fees[year]:
+                if "管理" in f.fee_name:
+                    mgmt = f.rate
+                elif "托管" in f.fee_name:
+                    cust = f.rate
+            lines.append(f"| {year} | {mgmt} | {cust} |")
+        return "\n".join(lines)
+
+    # Ch3: 基金经理画像
+    if chapter_id == 3:
+        lines = ["## 基金经理信息"]
+        if fund_manager:
+            lines.extend([
+                "",
+                "| 项目 | 值 |",
+                "|------|----|",
+                f"| 姓名 | {fund_manager.name} |",
+                f"| 任职日期 | {fund_manager.tenure_start} |",
+                f"| 从业年限 | {fund_manager.years_of_service} |",
+                f"| 持有本基金 | {fund_manager.holds_fund or '未披露'} |",
+            ])
+            if fund_manager.investment_strategy:
+                lines.extend(["", "## 宣称投资策略（原文）", "", fund_manager.investment_strategy[:600]])
+        else:
+            lines.append("\n基金经理信息暂不可用。")
+        # 持仓变化作为实际行为
+        lines.extend(["", "## 实际持仓行为"])
+        for year in sorted(holdings.keys()):
+            lines.append(f"\n### {year} 年前十大持仓")
+            lines.append("| 排名 | 股票代码 | 股票名称 | 占净值比 |")
+            lines.append("|------|---------|---------|---------|")
+            for h in holdings[year][:10]:
+                lines.append(f"| {h.rank} | {h.stock_code} | {h.stock_name} | {h.percentage} |")
+        return "\n".join(lines)
+
+    # Ch4: 投资者获得感 — 暂不可用
+    if chapter_id == 4:
+        return "## 投资者获得感\n\n投资者实际收益数据暂不可用，详见原始年报。"
+
+    # Ch5: 当前阶段与关键变化
+    if chapter_id == 5:
+        lines = ["## 规模与配置数据"]
+        if scale_info:
+            lines.extend([
+                "",
+                "| 项目 | 值 |",
+                "|------|----|",
+                f"| A类份额总数 | {scale_info.total_shares_a} |",
+                f"| C类份额总数 | {scale_info.total_shares_c} |",
+                f"| 个人投资者持有比例 | {scale_info.individual_investor_ratio} |",
+                f"| 管理人从业人员持有比例 | {scale_info.management_holds} |",
+            ])
+        # 资产配置变化
+        lines.extend(["", "## 资产配置变化"])
+        for year in sorted(allocation.keys()):
+            lines.append(f"\n### {year} 年资产配置")
+            lines.append("| 资产类别 | 金额 | 占净值比 |")
+            lines.append("|---------|------|---------|")
+            for a in allocation[year][:8]:
+                lines.append(f"| {a.category} | {a.amount} | {a.percentage_of_net} |")
+        return "\n".join(lines)
+
+    # Ch6: 核心风险与否决项
+    if chapter_id == 6:
+        lines = ["## 风险相关数据"]
+        # 持仓集中度
+        for year in sorted(holdings.keys()):
+            top5_pct = sum(float(h.percentage.rstrip("%") or "0") for h in holdings[year][:5])
+            lines.append(f"\n{year}年前五大持仓集中度: {top5_pct:.2f}%")
+        # 业绩波动
+        lines.extend(["", "## 业绩波动"])
+        lines.append("| 年份 | 净值增长率 | 超额收益 |")
+        lines.append("|------|-----------|---------|")
+        for year in sorted(performance.keys()):
+            p = performance[year]
+            lines.append(f"| {year} | {p.get('nav_growth_rate', 'N/A')} | {p.get('excess_return', 'N/A')} |")
+        return "\n".join(lines)
+
+    # Ch7: 最终判断 — 汇总数据
+    if chapter_id == 7:
+        latest = performance.get(report_year, {})
+        lines = [
+            "## 判断依据数据",
+            "",
+            f"- 最新净值增长率: {latest.get('nav_growth_rate', 'N/A')}",
+            f"- 最新超额收益: {latest.get('excess_return', 'N/A')}",
+        ]
+        if fund_manager:
+            lines.append(f"- 基金经理: {fund_manager.name}（从业{fund_manager.years_of_service}）")
+        # 最新费率
+        latest_fees = fees.get(report_year, [])
+        for f in latest_fees:
+            lines.append(f"- {f.fee_name}: {f.rate}")
+        return "\n".join(lines)
+
+    return ""
+
+
+class LlmChapterGenerator:
+    """基于 LLM 的逐章生成器（两阶段模式）。
+
+    阶段 1：程序从数据 dict 生成表格（数字 100% 准确）。
+    阶段 2：LLM 只写定性分析评论（无数字）。
+    最终：表格 + LLM 分析。
+
+    参数:
+        llm_client: DeepSeekLlmClient 实例。
+
+    返回:
+        可逐章生成分析文本的生成器。
+
+    异常:
+        generate_chapter 不向调用方抛出内部异常，失败返回 None。
+    """
+
+    def __init__(self, llm_client: Any) -> None:
+        """保存 LLM client。"""
+        self._llm_client = llm_client
+
+    def generate_chapter(
+        self,
+        chapter_id: int,
+        fund_code: str,
+        fund_name: str,
+        report_year: int,
+        performance: dict[int, dict[str, str]],
+        holdings: dict[int, tuple[HoldingExtraction, ...]],
+        allocation: dict[int, tuple[AssetAllocationItem, ...]],
+        fees: dict[int, tuple[FeeRateItem, ...]],
+        fund_manager: FundManagerInfo | None = None,
+        scale_info: ScaleInfo | None = None,
+    ) -> str | None:
+        """生成单个章节（程序表格 + LLM 分析）。
+
+        参数:
+            chapter_id: 章节编号（0-7）。
+            fund_code/fund_name/report_year: 基本信息。
+            performance/holdings/allocation/fees: 多年度数据。
+            fund_manager: 基金经理信息。
+            scale_info: 规模信息。
+
+        返回:
+            完整的章节 Markdown；LLM 失败时返回 None（调用方应回退模板）。
+        """
+
+        # 阶段 1：程序生成数据表格
+        data_table = _generate_data_table(
+            chapter_id, fund_code, fund_name, report_year,
+            performance, holdings, allocation, fees,
+            fund_manager, scale_info,
+        )
+
+        # 阶段 2：LLM 生成定性分析
+        analysis_prompt = _LLM_ANALYSIS_PROMPTS.get(chapter_id)
+        if not analysis_prompt:
+            return data_table if data_table else None
+
+        user_prompt = (
+            f"基金名称：{fund_name}\n"
+            f"报告年份：{report_year}\n\n"
+            f"## 数据表格\n\n{data_table}\n\n"
+            f"## 分析要求\n\n{analysis_prompt}"
+        )
+
+        try:
+            llm_analysis = self._llm_client.generate_text(
+                system_prompt=_LLM_CHAPTER_SYSTEM_PROMPT,
+                user_prompt=user_prompt,
+            )
+            # 从数据表中提取允许的数字（这些数字来自真实数据，不是 hallucination）
+            allowed_numbers = set(re.findall(r'\d+\.?\d*', data_table))
+            # 检查 LLM 是否违规输出了数字
+            if _contains_non_year_numbers(llm_analysis, allowed_numbers):
+                return None  # hallucination，回退模板
+            return f"{data_table}\n\n## 分析\n\n{llm_analysis}"
+        except Exception:
+            return None
+
+
+def _contains_non_year_numbers(text: str, allowed_numbers: set[str] | None = None) -> bool:
+    """检查文本是否包含非年份的数字（hallucination 检测）。
+
+    参数:
+        text: 待检查文本。
+        allowed_numbers: 允许的数字集合（从数据表中提取）；这些数字不视为 hallucination。
+
+    返回:
+        包含可疑数字时返回 True。
+    """
+
+    numbers = re.findall(r'(?<!\d)\d+\.?\d*%?(?!\d)', text)
+    for n in numbers:
+        cleaned = n.rstrip('%')
+        # 年份（20xx）允许
+        if re.match(r'^(20[12]\d)$', cleaned):
+            continue
+        # 单位数字（1-9）和常见小数字（10-99）允许（从业年限、排名等）
+        if re.match(r'^[1-9]\d?$', cleaned):
+            continue
+        # 在允许列表中的数字允许
+        if allowed_numbers and cleaned in allowed_numbers:
+            continue
+        return True
+    return False
 
 
 _HOLDINGS_TOP_N = 10
@@ -2478,11 +2914,14 @@ class FundReadingService:
     def generate_report(
         self,
         request: GenerateReportRequest,
+        llm_client: Any | None = None,
     ) -> GenerateReportResult:
         """生成基金分析报告。
 
         参数:
             request: 报告生成请求。
+            llm_client: 可选 LLM client（DeepSeekLlmClient），用于生成分析文本；
+                为 None 时使用模板填充。
 
         返回:
             GenerateReportResult；成功时包含 FundReport。
@@ -2490,16 +2929,22 @@ class FundReadingService:
 
         try:
             # 1. 提取多年度数据
-            years = tuple(request.years) if request.years else tuple(range(request.report_year - 4, request.report_year + 1))
             repository = _repository(Path(request.work_dir))
             catalog_reports = repository.list_reports()
 
             # 查找匹配的年报（按年份去重，保留最后一条）
             docs_by_year: dict[int, str] = {}
+            available_years: list[int] = []
             for report in catalog_reports:
-                if report.get("fund_code") == request.fund_code and report.get("year") in years:
+                if report.get("fund_code") == request.fund_code:
                     year = int(report["year"])
+                    available_years.append(year)
                     docs_by_year[year] = str(report["document_id"])
+
+            # 用户指定年份时过滤；否则使用 catalog 中全部可用年份
+            if request.years:
+                target_years = set(int(y) for y in request.years)
+                docs_by_year = {y: d for y, d in docs_by_year.items() if y in target_years}
 
             annual_docs = [
                 AnnualReportDocument(year=year, document_id=doc_id)
@@ -2516,17 +2961,70 @@ class FundReadingService:
             fee_data = self._extract_report_fees(request.fund_code, annual_docs, request.work_dir)
             performance_data = self._extract_report_performance(request.fund_code, annual_docs, request.work_dir)
             allocation_data = self._extract_report_allocation(request.fund_code, annual_docs, request.work_dir)
+            fund_manager = self._extract_fund_manager(request.fund_code, annual_docs, request.work_dir)
+            scale_info = self._extract_scale_info(request.fund_code, annual_docs, request.work_dir)
 
             # 3. 生成报告章节
-            chapters = self._generate_chapters(
-                fund_code=request.fund_code,
-                fund_name=request.fund_name,
-                report_year=request.report_year,
-                holdings=holdings_data,
-                fees=fee_data,
-                performance=performance_data,
-                allocation=allocation_data,
-            )
+            llm_warnings: list[str] = []
+            if llm_client is not None:
+                # 使用审计管道协调器（14C）
+                from fund_agent.service.audit_pipeline import ReportGenerationCoordinator
+                coordinator = ReportGenerationCoordinator(
+                    llm_client=llm_client,
+                    work_dir=Path(request.work_dir),
+                )
+                chapter_contents, coordinator_warnings = coordinator.generate_report(
+                    fund_code=request.fund_code,
+                    fund_name=request.fund_name,
+                    report_year=request.report_year,
+                    performance=performance_data,
+                    holdings=holdings_data,
+                    allocation=allocation_data,
+                    fees=fee_data,
+                    fund_manager=fund_manager,
+                    scale_info=scale_info,
+                )
+                llm_warnings.extend(coordinator_warnings)
+
+                # 转换为 ReportChapter 列表
+                chapter_specs = [
+                    (0, "投资要点概览", ("performance", "holdings", "fees")),
+                    (1, "这只基金到底是什么产品", ("basic_info",)),
+                    (2, "R=A+B-C 收益归因", ("performance", "fees")),
+                    (3, "基金经理画像与言行一致性", ("fund_manager",)),
+                    (4, "投资者获得感", ()),
+                    (5, "当前阶段与关键变化", ("performance", "allocation")),
+                    (6, "核心风险与否决项", ("performance", "holdings")),
+                    (7, "综合评估与跟踪建议", ("performance", "holdings")),
+                ]
+                chapters = []
+                for chapter_id, title, data_sources in chapter_specs:
+                    content = chapter_contents.get(chapter_id, "")
+                    chapters.append(ReportChapter(
+                        chapter_id=chapter_id,
+                        title=title,
+                        content=content,
+                        data_sources=data_sources,
+                    ))
+
+                # 获取审计状态
+                process_states = coordinator.get_process_states()
+                passed_count = sum(1 for s in process_states.values() if s.status == "passed")
+                failed_count = sum(1 for s in process_states.values() if s.status == "failed")
+                llm_warnings.append(f"审计结果: {passed_count}章通过, {failed_count}章失败")
+
+            else:
+                chapters = self._generate_chapters(
+                    fund_code=request.fund_code,
+                    fund_name=request.fund_name,
+                    report_year=request.report_year,
+                    holdings=holdings_data,
+                    fees=fee_data,
+                    performance=performance_data,
+                    allocation=allocation_data,
+                    fund_manager=fund_manager,
+                    scale_info=scale_info,
+                )
 
             report = FundReport(
                 fund_code=request.fund_code,
@@ -2535,14 +3033,15 @@ class FundReadingService:
                 chapters=tuple(chapters),
                 metadata={
                     "generated_at": date.today().isoformat(),
-                    "data_years": list(years),
-                    "template_version": "v1",
+                    "data_years": sorted(docs_by_year.keys()),
+                    "template_version": "v2" if llm_client else "v1",
+                    "generation_mode": "llm" if llm_client else "template",
                 },
             )
 
             # 4. 输出
             output_path = None
-            warnings: list[str] = []
+            warnings: list[str] = list(llm_warnings)
             if request.output_format == "markdown":
                 output_path = self._export_markdown(report, request.work_dir)
             elif request.output_format == "pdf":
@@ -2605,24 +3104,59 @@ class FundReadingService:
         annual_docs: list[AnnualReportDocument],
         work_dir: Path,
     ) -> dict[int, dict[str, str]]:
-        """提取多年度业绩数据。"""
+        """提取多年度业绩数据（逐年抽取，跳过失败年份）。
 
-        result = self.aggregate_multi_year_annual_performance(AggregateMultiYearAnnualPerformanceRequest(
-            fund_code=fund_code,
-            requested_years=[d.year for d in annual_docs],
-            annual_report_documents=annual_docs,
-            work_dir=work_dir,
-        ))
-        if not result.series:
-            return {}
-        performance = {}
-        for s in result.series:
-            for row in s.rows:
-                performance[row.year] = {
-                    "nav_growth_rate": row.annual_nav_growth_rate,
-                    "benchmark_return_rate": row.annual_benchmark_return_rate,
-                    "excess_return": row.annual_excess_return,
+        直接调用单年抽取，绕过 aggregate_multi_year_annual_performance 的 3 年最低要求。
+
+        参数:
+            fund_code: 基金代码。
+            annual_docs: 年报文档列表。
+            work_dir: 工作目录。
+
+        返回:
+            年份到业绩数据的映射；失败年份自动跳过。
+        """
+
+        repository = _repository(Path(work_dir))
+        performance: dict[int, dict[str, str]] = {}
+
+        for doc in annual_docs:
+            try:
+                store = repository.load_store(doc.document_id)
+            except Exception:
+                continue
+            result = self._extract_annual_performance_from_store(
+                document_id=doc.document_id,
+                store=store,
+                report_year=doc.year,
+                share_class=None,
+            )
+            if result.failure or not result.fields:
+                continue
+            nav = ""
+            bench = ""
+            for f in result.fields:
+                if f.field_name == "annual_nav_growth_rate":
+                    nav = f.decimal_percent_text
+                elif f.field_name == "annual_benchmark_return_rate":
+                    bench = f.decimal_percent_text
+            if nav:
+                excess = ""
+                # 尝试抽取超额收益
+                excess_result = self._extract_annual_excess_return_from_store(
+                    document_id=doc.document_id,
+                    store=store,
+                    report_year=doc.year,
+                    share_class=None,
+                )
+                if not excess_result.failure and excess_result.fields:
+                    excess = excess_result.fields[0].decimal_percent_text
+                performance[doc.year] = {
+                    "nav_growth_rate": nav,
+                    "benchmark_return_rate": bench,
+                    "excess_return": excess,
                 }
+
         return performance
 
     def _extract_report_allocation(
@@ -2643,6 +3177,169 @@ class FundReadingService:
             return {}
         return {a.year: a.asset_allocation for a in result.series.annual_allocations}
 
+    def _extract_fund_manager(
+        self,
+        fund_code: str,
+        annual_docs: list[AnnualReportDocument],
+        work_dir: Path,
+    ) -> FundManagerInfo | None:
+        """从最新年报提取基金经理信息。
+
+        参数:
+            fund_code: 基金代码。
+            annual_docs: 年报文档列表。
+            work_dir: 工作目录。
+
+        返回:
+            FundManagerInfo；未找到时返回 None。
+        """
+
+        if not annual_docs:
+            return None
+
+        latest_doc = max(annual_docs, key=lambda d: d.year)
+        repository = _repository(Path(work_dir))
+        try:
+            store = repository.load_store(latest_doc.document_id)
+        except Exception:
+            return None
+
+        tool_service = FundDocumentToolService({latest_doc.document_id: store})
+        doc_id = latest_doc.document_id
+
+        # 搜索基金经理简介表
+        name = ""
+        tenure_start = ""
+        years_of_service = ""
+        search_results = tool_service.search_document(doc_id, "基金经理")
+        for hit in search_results:
+            if isinstance(hit, ToolFailure):
+                continue
+            if "简介" in (hit.title or "") and hit.section_ref:
+                tables = tool_service.list_tables(doc_id)
+                for t in tables:
+                    if hasattr(t, "section_ref") and t.section_ref == hit.section_ref:
+                        table = tool_service.read_table(doc_id, t.table_ref, max_rows=5)
+                        if hasattr(table, "rows") and len(table.rows) >= 3:
+                            # 表头: row[0]=('姓名','职务','任职日期','','从业年限','说明')
+                            # 数据: row[2]=('张明', '本基金的基金经理...', '2022年8月8日', '-', '13年', '...')
+                            data_row = table.rows[2] if len(table.rows) > 2 else table.rows[1]
+                            if len(data_row) >= 5:
+                                name = str(data_row[0]).strip()
+                                tenure_start = str(data_row[2]).strip()
+                                years_of_service = str(data_row[4]).strip()
+                break
+
+        # 搜索投资策略
+        investment_strategy = ""
+        strategy_results = tool_service.search_document(doc_id, "投资策略和运作分析")
+        for hit in strategy_results:
+            if isinstance(hit, ToolFailure):
+                continue
+            if hit.section_ref:
+                section = tool_service.read_section(doc_id, hit.section_ref)
+                if hasattr(section, "text") and len(section.text) > 50:
+                    # 取前500字符
+                    investment_strategy = section.text[:500].strip()
+                    break
+
+        # 搜索基金经理持有本基金
+        holds_fund = ""
+        tables = tool_service.list_tables(doc_id)
+        for t in tables:
+            table = tool_service.read_table(doc_id, t.table_ref, max_rows=10)
+            if hasattr(table, "rows"):
+                for row in table.rows:
+                    row_str = " ".join(str(cell) for cell in row)
+                    if "基金经理持有" in row_str and "开放式基金" in row_str:
+                        # 找到持有区间
+                        for cell in row:
+                            cell_str = str(cell).strip()
+                            if "~" in cell_str or "万份" in cell_str:
+                                holds_fund = cell_str
+                                break
+                        break
+
+        if not name:
+            return None
+
+        return FundManagerInfo(
+            name=name,
+            tenure_start=tenure_start,
+            years_of_service=years_of_service,
+            investment_strategy=investment_strategy,
+            holds_fund=holds_fund,
+        )
+
+    def _extract_scale_info(
+        self,
+        fund_code: str,
+        annual_docs: list[AnnualReportDocument],
+        work_dir: Path,
+    ) -> ScaleInfo | None:
+        """从年报提取规模信息（从最新年份开始尝试，回退到更早年份）。
+
+        参数:
+            fund_code: 基金代码。
+            annual_docs: 年报文档列表。
+            work_dir: 工作目录。
+
+        返回:
+            ScaleInfo；未找到时返回 None。
+        """
+
+        if not annual_docs:
+            return None
+
+        repository = _repository(Path(work_dir))
+        sorted_docs = sorted(annual_docs, key=lambda d: d.year, reverse=True)
+
+        for doc in sorted_docs:
+            try:
+                store = repository.load_store(doc.document_id)
+            except Exception:
+                continue
+
+            tool_service = FundDocumentToolService({doc.document_id: store})
+            doc_id = doc.document_id
+
+            total_shares_a = ""
+            total_shares_c = ""
+            individual_investor_ratio = ""
+
+            # 搜索份额变动表（§10），包含持有人结构数据
+            search_results = tool_service.search_document(doc_id, "开放式基金份额变动")
+            for hit in search_results:
+                if isinstance(hit, ToolFailure) or not hit.section_ref:
+                    continue
+                tables = tool_service.list_tables(doc_id)
+                for t in tables:
+                    if not (hasattr(t, "section_ref") and t.section_ref == hit.section_ref):
+                        continue
+                    table = tool_service.read_table(doc_id, t.table_ref, max_rows=15)
+                    if not hasattr(table, "rows"):
+                        continue
+                    for row in table.rows:
+                        if len(row) < 7:
+                            continue
+                        row_str = " ".join(str(cell) for cell in row)
+                        if "混合A" in row_str or "A类" in row_str:
+                            total_shares_a = str(row[3]).strip()
+                        elif "混合C" in row_str or "C类" in row_str:
+                            total_shares_c = str(row[3]).strip()
+                        elif "合计" in row_str:
+                            individual_investor_ratio = str(row[4]).strip() if len(row) > 4 else ""
+
+            if total_shares_a or total_shares_c:
+                return ScaleInfo(
+                    total_shares_a=total_shares_a,
+                    total_shares_c=total_shares_c,
+                    individual_investor_ratio=individual_investor_ratio,
+                    management_holds="",
+                )
+
+        return None
+
     def _generate_chapters(
         self,
         *,
@@ -2653,98 +3350,38 @@ class FundReadingService:
         fees: dict[int, tuple[FeeRateItem, ...]],
         performance: dict[int, dict[str, str]],
         allocation: dict[int, tuple[AssetAllocationItem, ...]],
+        fund_manager: FundManagerInfo | None = None,
+        scale_info: ScaleInfo | None = None,
     ) -> list[ReportChapter]:
-        """生成 8 章报告内容。"""
+        """生成 8 章报告内容（模板对齐版）。"""
 
         chapters: list[ReportChapter] = []
 
-        # Ch0: 投资要点概览
-        chapters.append(ReportChapter(
-            chapter_id=0,
-            title="投资要点概览",
-            content=self._generate_ch0_summary(fund_name, report_year, performance),
-            data_sources=("performance",),
-        ))
+        chapter_specs = [
+            (0, "投资要点概览", ("performance", "holdings", "fees")),
+            (1, "这只基金到底是什么产品", ("basic_info",)),
+            (2, "R=A+B-C 收益归因", ("performance", "fees")),
+            (3, "基金经理画像与言行一致性", ("fund_manager",)),
+            (4, "投资者获得感", ()),
+            (5, "当前阶段与关键变化", ("performance", "allocation")),
+            (6, "核心风险与否决项", ("performance", "holdings")),
+            (7, "综合评估与跟踪建议", ("performance", "holdings")),
+        ]
 
-        # Ch1: 基金概况
-        chapters.append(ReportChapter(
-            chapter_id=1,
-            title="这只基金到底是什么产品",
-            content=f"## 基金概况\n\n- 基金代码：{fund_code}\n- 基金名称：{fund_name}\n- 报告年份：{report_year}\n",
-            data_sources=("basic_info",),
-        ))
-
-        # Ch2: 业绩分析
-        chapters.append(ReportChapter(
-            chapter_id=2,
-            title="业绩分析",
-            content=self._generate_ch2_performance(performance),
-            data_sources=("performance",),
-        ))
-
-        # Ch3: 持仓分析
-        chapters.append(ReportChapter(
-            chapter_id=3,
-            title="持仓分析",
-            content=self._generate_ch3_holdings(holdings),
-            data_sources=("holdings",),
-        ))
-
-        # Ch4: 资产配置
-        chapters.append(ReportChapter(
-            chapter_id=4,
-            title="资产配置分析",
-            content=self._generate_ch4_allocation(allocation),
-            data_sources=("allocation",),
-        ))
-
-        # Ch5: 费率分析
-        chapters.append(ReportChapter(
-            chapter_id=5,
-            title="费率分析",
-            content=self._generate_ch5_fees(fees),
-            data_sources=("fees",),
-        ))
-
-        # Ch6: 分红分析
-        chapters.append(ReportChapter(
-            chapter_id=6,
-            title="分红分析",
-            content="## 分红情况\n\n分红数据抽取暂不支持，详见原始年报。\n",
-            data_sources=(),
-        ))
-
-        # Ch7: 风险提示
-        chapters.append(ReportChapter(
-            chapter_id=7,
-            title="风险提示",
-            content=self._generate_ch7_risks(fund_name, performance, holdings),
-            data_sources=("performance", "holdings"),
-        ))
+        for chapter_id, title, data_sources in chapter_specs:
+            content = self._generate_template_chapter(
+                chapter_id, fund_code, fund_name, report_year,
+                performance, holdings, allocation, fees,
+                fund_manager, scale_info,
+            )
+            chapters.append(ReportChapter(
+                chapter_id=chapter_id,
+                title=title,
+                content=content,
+                data_sources=data_sources,
+            ))
 
         return chapters
-
-    def _generate_ch0_summary(
-        self,
-        fund_name: str,
-        report_year: int,
-        performance: dict[int, dict[str, str]],
-    ) -> str:
-        """生成投资要点概览。"""
-
-        latest_perf = performance.get(report_year, {})
-        nav_growth = latest_perf.get("nav_growth_rate", "N/A")
-
-        return f"""## 一眼看懂
-
-- **基金名称**：{fund_name}
-- **报告年份**：{report_year}
-- **最新净值增长率**：{nav_growth}
-
-## 投资要点
-
-基于 {report_year} 年报数据分析，该基金业绩表现和持仓情况详见后续章节。
-"""
 
     def _generate_ch2_performance(self, performance: dict[int, dict[str, str]]) -> str:
         """生成业绩分析章节。"""
@@ -2755,46 +3392,9 @@ class FundReadingService:
             lines.append(f"| {year} | {p.get('nav_growth_rate', 'N/A')} | {p.get('benchmark_return_rate', 'N/A')} | {p.get('excess_return', 'N/A')} |")
         return "\n".join(lines) + "\n"
 
-    def _generate_ch3_holdings(self, holdings: dict[int, tuple[HoldingExtraction, ...]]) -> str:
-        """生成持仓分析章节。"""
-
-        lines = ["## 持仓分析\n"]
-        for year in sorted(holdings.keys()):
-            lines.append(f"### {year} 年前十大持仓\n")
-            lines.append("| 排名 | 股票代码 | 股票名称 | 占净值比 |")
-            lines.append("|------|---------|---------|---------|")
-            for h in holdings[year][:10]:
-                lines.append(f"| {h.rank} | {h.stock_code} | {h.stock_name} | {h.percentage} |")
-            lines.append("")
-        return "\n".join(lines)
-
-    def _generate_ch4_allocation(self, allocation: dict[int, tuple[AssetAllocationItem, ...]]) -> str:
-        """生成资产配置章节。"""
-
-        lines = ["## 资产配置\n"]
-        for year in sorted(allocation.keys()):
-            lines.append(f"### {year} 年资产配置\n")
-            lines.append("| 资产类别 | 金额 | 占净值比 |")
-            lines.append("|---------|------|---------|")
-            for a in allocation[year][:10]:
-                lines.append(f"| {a.category} | {a.amount} | {a.percentage_of_total} |")
-            lines.append("")
-        return "\n".join(lines)
-
-    def _generate_ch5_fees(self, fees: dict[int, tuple[FeeRateItem, ...]]) -> str:
-        """生成费率分析章节。"""
-
-        lines = ["## 费率分析\n", "| 年份 | 费率名称 | 费率 |", "|------|---------|------|"]
-        for year in sorted(fees.keys()):
-            for f in fees[year]:
-                lines.append(f"| {year} | {f.fee_name} | {f.rate} |")
-        return "\n".join(lines) + "\n"
-
     def _generate_ch7_risks(
         self,
         fund_name: str,
-        performance: dict[int, dict[str, str]],
-        holdings: dict[int, tuple[HoldingExtraction, ...]],
     ) -> str:
         """生成风险提示章节。"""
 
@@ -2808,6 +3408,171 @@ class FundReadingService:
 *数据来源：{fund_name} 年度报告*
 """
 
+    def _generate_chapters_with_llm(
+        self,
+        *,
+        llm_client: Any,
+        fund_code: str,
+        fund_name: str,
+        report_year: int,
+        holdings: dict[int, tuple[HoldingExtraction, ...]],
+        fees: dict[int, tuple[FeeRateItem, ...]],
+        performance: dict[int, dict[str, str]],
+        allocation: dict[int, tuple[AssetAllocationItem, ...]],
+        fund_manager: FundManagerInfo | None,
+        scale_info: ScaleInfo | None,
+    ) -> tuple[list[ReportChapter], list[str]]:
+        """使用 LLM 逐章生成分析文本（两阶段：程序表格 + LLM 分析）。
+
+        数字 100% 从数据 dict 提取，LLM 只写定性分析，消除 hallucination。
+
+        参数:
+            llm_client: DeepSeekLlmClient 实例。
+            fund_code: 基金代码。
+            fund_name: 基金名称。
+            report_year: 报告年份。
+            holdings: 多年度持仓数据。
+            fees: 多年度费率数据。
+            performance: 多年度业绩数据。
+            allocation: 多年度资产配置数据。
+            fund_manager: 基金经理信息。
+            scale_info: 规模信息。
+
+        返回:
+            (章节列表, 警告列表)。
+        """
+
+        generator = LlmChapterGenerator(llm_client=llm_client)
+        warnings: list[str] = []
+        chapters: list[ReportChapter] = []
+
+        chapter_specs = [
+            (0, "投资要点概览", ("performance", "holdings", "fees")),
+            (1, "这只基金到底是什么产品", ("basic_info",)),
+            (2, "R=A+B-C 收益归因", ("performance", "fees")),
+            (3, "基金经理画像与言行一致性", ("fund_manager",)),
+            (4, "投资者获得感", ()),
+            (5, "当前阶段与关键变化", ("performance", "allocation")),
+            (6, "核心风险与否决项", ("performance", "holdings")),
+            (7, "综合评估与跟踪建议", ("performance", "holdings")),
+        ]
+
+        for chapter_id, title, data_sources in chapter_specs:
+            content = generator.generate_chapter(
+                chapter_id=chapter_id,
+                fund_code=fund_code,
+                fund_name=fund_name,
+                report_year=report_year,
+                performance=performance,
+                holdings=holdings,
+                allocation=allocation,
+                fees=fees,
+                fund_manager=fund_manager,
+                scale_info=scale_info,
+            )
+
+            if content is None:
+                content = self._generate_template_chapter(
+                    chapter_id, fund_code, fund_name, report_year,
+                    performance, holdings, allocation, fees,
+                    fund_manager, scale_info,
+                )
+                warnings.append(f"Ch{chapter_id} LLM 分析失败，已回退模板")
+
+            chapters.append(ReportChapter(
+                chapter_id=chapter_id,
+                title=title,
+                content=content,
+                data_sources=data_sources,
+            ))
+
+        return chapters, warnings
+
+    def _generate_template_chapter(
+        self,
+        chapter_id: int,
+        fund_code: str,
+        fund_name: str,
+        report_year: int,
+        performance: dict[int, dict[str, str]],
+        holdings: dict[int, tuple[HoldingExtraction, ...]],
+        allocation: dict[int, tuple[AssetAllocationItem, ...]],
+        fees: dict[int, tuple[FeeRateItem, ...]],
+        fund_manager: FundManagerInfo | None = None,
+        scale_info: ScaleInfo | None = None,
+    ) -> str:
+        """回退用的模板章节生成（模板对齐版）。
+
+        参数:
+            chapter_id: 章节编号。
+            fund_code: 基金代码。
+            fund_name: 基金名称。
+            report_year: 报告年份。
+            performance/holdings/allocation/fees: 多年度数据。
+            fund_manager: 基金经理信息。
+            scale_info: 规模信息。
+
+        返回:
+            模板生成的 Markdown 文本。
+        """
+
+        if chapter_id == 0:
+            latest = performance.get(report_year, {})
+            return (
+                f"## 一眼看懂\n\n"
+                f"- **基金名称**：{fund_name}\n"
+                f"- **基金代码**：{fund_code}\n"
+                f"- **报告年份**：{report_year}\n"
+                f"- **最新净值增长率**：{latest.get('nav_growth_rate', 'N/A')}\n\n"
+                f"## 投资要点\n\n"
+                f"基于 {report_year} 年报数据分析，该基金业绩表现和持仓情况详见后续章节。\n"
+            )
+        elif chapter_id == 1:
+            lines = [
+                f"## 基金概况\n",
+                f"- 基金代码：{fund_code}",
+                f"- 基金名称：{fund_name}",
+                f"- 报告年份：{report_year}",
+            ]
+            if fund_manager:
+                lines.append(f"- 基金经理：{fund_manager.name}（从业{fund_manager.years_of_service}）")
+            return "\n".join(lines) + "\n"
+        elif chapter_id == 2:
+            return self._generate_ch2_performance(performance)
+        elif chapter_id == 3:
+            lines = ["## 基金经理信息"]
+            if fund_manager:
+                lines.extend([
+                    f"- 姓名：{fund_manager.name}",
+                    f"- 任职日期：{fund_manager.tenure_start}",
+                    f"- 从业年限：{fund_manager.years_of_service}",
+                    f"- 持有本基金：{fund_manager.holds_fund or '未披露'}",
+                ])
+            else:
+                lines.append("基金经理信息暂不可用。")
+            return "\n".join(lines) + "\n"
+        elif chapter_id == 4:
+            return "## 投资者获得感\n\n投资者实际收益数据暂不可用，详见原始年报。\n"
+        elif chapter_id == 5:
+            lines = ["## 当前阶段与关键变化"]
+            if scale_info:
+                lines.extend([
+                    f"- A类份额总数：{scale_info.total_shares_a}",
+                    f"- C类份额总数：{scale_info.total_shares_c}",
+                    f"- 管理人持有比例：{scale_info.management_holds}",
+                ])
+            return "\n".join(lines) + "\n"
+        elif chapter_id == 6:
+            return self._generate_ch7_risks(fund_name)
+        elif chapter_id == 7:
+            latest = performance.get(report_year, {})
+            return (
+                f"## 综合评估\n\n"
+                f"基于 {report_year} 年报数据，该基金最新净值增长率为 {latest.get('nav_growth_rate', 'N/A')}，"
+                f"超额收益为 {latest.get('excess_return', 'N/A')}。详见前6章分析。\n"
+            )
+        return ""
+
     def _export_markdown(self, report: FundReport, work_dir: Path) -> str:
         """导出 Markdown 文件。"""
 
@@ -2819,7 +3584,7 @@ class FundReadingService:
         lines.append("**风险警示**：本报告由 AI 辅助生成，仅供参考，不构成投资建议。\n")
 
         for chapter in report.chapters:
-            lines.append(f"\n---\n\n## 第 {chapter.chapter_id} 章：{chapter.title}\n")
+            lines.append(f"\n---\n\n## 第 {chapter.chapter_id + 1} 章：{chapter.title}\n")
             lines.append(chapter.content)
 
         output_path.write_text("\n".join(lines), encoding="utf-8")

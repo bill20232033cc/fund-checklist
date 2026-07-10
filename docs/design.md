@@ -1184,5 +1184,5 @@ Post-MVP 11C 裁决为 holdings multi-year tracking：
 下一步只应验证一个问题：
 
 ```text
-13A 裁决已写入。下一步进入 13A 代码实现：新增 fund-checklist generate 子命令，基于 5 年年报数据生成 8 章结构化分析报告。
+14C 裁决已确认。下一步进入 14C 实现：基于 dayu write_pipeline 设计三层审计架构，4类22项违规分类，评分体系（程序30%+LLM70%，≥80通过/50-79修复/<50重写），PATCH/REGENERATE/NONE三策略修复。
 ```

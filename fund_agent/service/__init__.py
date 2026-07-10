@@ -28,6 +28,7 @@ from fund_agent.service.reading_service import (
     ExtractHoldingsResult,
     FeeRateExtraction,
     FeeRateItem,
+    FundManagerInfo,
     FundReadingService,
     FundReport,
     GenerateReportRequest,
@@ -36,6 +37,7 @@ from fund_agent.service.reading_service import (
     ImportLocalReportRequest,
     ImportLocalReportResult,
     IndustryAllocationItem,
+    LlmChapterGenerator,
     ListReportsRequest,
     ListReportsResult,
     MultiYearAllocationSeries,
@@ -47,6 +49,7 @@ from fund_agent.service.reading_service import (
     ReadLocalReportRequest,
     ReadLocalReportResult,
     ReportChapter,
+    ScaleInfo,
 )
 
 __all__ = [
@@ -77,6 +80,7 @@ __all__ = [
     "ExtractHoldingsResult",
     "FeeRateExtraction",
     "FeeRateItem",
+    "FundManagerInfo",
     "FundReadingService",
     "FundReport",
     "GenerateReportRequest",
@@ -85,6 +89,7 @@ __all__ = [
     "ImportLocalReportRequest",
     "ImportLocalReportResult",
     "IndustryAllocationItem",
+    "LlmChapterGenerator",
     "ListReportsRequest",
     "ListReportsResult",
     "MultiYearAllocationSeries",
@@ -96,4 +101,5 @@ __all__ = [
     "ReadLocalReportRequest",
     "ReadLocalReportResult",
     "ReportChapter",
+    "ScaleInfo",
 ]

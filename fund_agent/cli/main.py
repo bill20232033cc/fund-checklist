@@ -17,6 +17,7 @@ from fund_agent.fund.document_tools.persistent_repository import (
     CATALOG_FILENAME,
     FilesystemReportRepository,
 )
+from fund_agent.agent.deepseek_llm import DeepSeekLlmClient
 from fund_agent.service import (
     AggregateMultiYearAnnualPerformanceRequest,
     AnnualReportDocument,
@@ -173,8 +174,9 @@ def build_parser() -> argparse.ArgumentParser:
     generate_parser.add_argument("--fund-code", required=True)
     generate_parser.add_argument("--fund-name", required=True)
     generate_parser.add_argument("--year", required=True, type=int)
-    generate_parser.add_argument("--years", default="2020,2021,2022,2023,2024")
+    generate_parser.add_argument("--years", default="", help="逗号分隔年份列表；留空则自动使用 catalog 中所有可用年份")
     generate_parser.add_argument("--format", dest="output_format", default="json", choices=["json", "markdown", "pdf"])
+    generate_parser.add_argument("--llm", action="store_true", default=False, help="使用 LLM 生成分析文本（需要 DEEPSEEK_API_KEY）")
     generate_parser.add_argument("--work-dir", default=Path(DEFAULT_WORK_DIR), type=Path)
     return parser
 
@@ -253,7 +255,7 @@ def _parse_years(years_str: str) -> tuple[int, ...]:
     """解析逗号分隔的年度字符串为升序元组。
 
     参数:
-        years_str: 逗号分隔的年度字符串，如 "2020,2021,2022,2023,2024"。
+        years_str: 逗号分隔的年度字符串，如 "2020,2021,2022,2023,2024"；空字符串返回空元组。
 
     返回:
         升序排列的年度元组。
@@ -262,6 +264,8 @@ def _parse_years(years_str: str) -> tuple[int, ...]:
         ValueError: 年度格式不合法时抛出。
     """
 
+    if not years_str or not years_str.strip():
+        return ()
     years = tuple(int(y.strip()) for y in years_str.split(","))
     return tuple(sorted(years))
 
@@ -721,6 +725,11 @@ def _run_generate_command(args: argparse.Namespace, *, stdout: TextIO, stderr: T
 
     years = _parse_years(args.years)
     service = FundReadingService()
+
+    llm_client = None
+    if getattr(args, "llm", False):
+        llm_client = DeepSeekLlmClient()
+
     result = service.generate_report(
         GenerateReportRequest(
             fund_code=args.fund_code,
@@ -729,7 +738,8 @@ def _run_generate_command(args: argparse.Namespace, *, stdout: TextIO, stderr: T
             years=years,
             work_dir=Path(args.work_dir),
             output_format=args.output_format,
-        )
+        ),
+        llm_client=llm_client,
     )
     if result.failure is not None:
         _write_classified_failure(result.failure, stderr)
@@ -750,6 +760,7 @@ def _run_generate_command(args: argparse.Namespace, *, stdout: TextIO, stderr: T
         ],
         "metadata": result.report.metadata,
         "output_path": result.output_path,
+        "warnings": list(result.warnings),
     }
     print(json.dumps(output, ensure_ascii=False, indent=2), file=stdout)
     return SUCCESS_EXIT_CODE

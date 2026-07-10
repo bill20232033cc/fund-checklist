@@ -206,6 +206,59 @@ class DeepSeekLlmClient:
             raise LlmClientFailure(FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE)
         return _parse_response(response.body)
 
+    def generate_text(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = 0,
+    ) -> str:
+        """直接调用 LLM 生成文本，不走 tool-loop。
+
+        参数:
+            system_prompt: 系统提示词。
+            user_prompt: 用户提示词。
+            temperature: 生成温度。
+
+        返回:
+            LLM 生成的文本内容。
+
+        异常:
+            provider 不可用时抛 LlmClientFailure(unavailable)。
+            response 不可解析时抛 LlmClientFailure(llm_malformed_response)。
+        """
+
+        env = self._env if self._env is not None else os.environ
+        api_key = env.get(DEEPSEEK_API_KEY_ENV, "").strip()
+        if not api_key:
+            raise LlmClientFailure(FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE)
+
+        request = DeepSeekChatRequest(
+            url=_chat_completions_url(env.get(DEEPSEEK_BASE_URL_ENV, DEFAULT_DEEPSEEK_BASE_URL)),
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": _JSON_CONTENT_TYPE,
+            },
+            payload={
+                "model": env.get(DEEPSEEK_MODEL_ENV, DEFAULT_DEEPSEEK_MODEL).strip() or DEFAULT_DEEPSEEK_MODEL,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": temperature,
+                "stream": False,
+            },
+            timeout_seconds=self._timeout_seconds,
+        )
+        try:
+            response = self._transport.send(request)
+        except DeepSeekTransportUnavailable as exc:
+            raise LlmClientFailure(FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE) from exc
+
+        if response.status_code < 200 or response.status_code >= 300:
+            raise LlmClientFailure(FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE)
+        return _parse_text_content(response.body)
+
 
 def _chat_completions_url(base_url: str) -> str:
     """规范化 base URL 并拼接 chat completions endpoint。"""
@@ -536,3 +589,16 @@ def _required_list(payload: Mapping[str, Any], key: str) -> list[Any]:
     if not isinstance(value, list):
         raise ValueError(f"{key} must be list")
     return value
+
+
+def _parse_text_content(body: str) -> str:
+    """从 chat completions response 提取纯文本内容。"""
+
+    try:
+        payload = json.loads(body)
+        content = payload["choices"][0]["message"]["content"]
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
+        raise LlmClientFailure(FailureCode.LLM_MALFORMED_RESPONSE, _MALFORMED_MESSAGE) from exc
+    if not isinstance(content, str) or not content.strip():
+        raise LlmClientFailure(FailureCode.LLM_MALFORMED_RESPONSE, _MALFORMED_MESSAGE)
+    return content

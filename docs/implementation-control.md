@@ -1,9 +1,21 @@
 # fund-checklist implementation-control
 
-更新时间：2026-07-08
-当前阶段：`POST_MVP_SLICE_13A_IN_PROGRESS`
+更新时间：2026-07-09
+当前阶段：`POST_MVP_SLICE_14A_ACCEPTED`
 当前角色：control / CIC-lite controller
-当前目标：Slice 13A Fund report generation。新增 `fund-checklist generate` 子命令，基于 5 年年报数据生成 8 章结构化分析报告。LLM 生成分析文本，严格基于抽取数据；输出 JSON → Markdown → PDF（pandoc）。不得扩成 gateflow / phaseflow / release-readiness，不新增 plan artifact，不进入 batch benchmark、开放语义理解、自动分词、embedding、template contract execution、chapter contract execution、calculation framework、`fund-checklist ask`、UI 或投资判断。
+当前目标：Slice 14A Template-aligned report generation 已 accepted。下一步裁决 14C。
+
+14C 裁决已确认（基于 dayu write_pipeline 设计）：
+- 审计分层：三层递进（程序审计+LLM审计+LLM复核）
+- 违规分类：4类22项（P1-P4/E1-E5/S1-S7/C1-C6）完整对齐dayu
+- 评分权重：程序审计30% + LLM审计70%
+- 阈值：≥80分通过，50-79分需修复，<50分需重写
+- 修复策略：PATCH/REGENERATE/NONE三策略
+- 修复次数：PATCH最多3次 + REGENERATE最多3次
+- Ch0/Ch7：Ch1-6全部通过后生成
+- 数据表格：禁止修改
+- 审计产物：落盘（phase_audit.json、phase_repair.json）
+- 年报年份：默认5年，最少3年
 
 ## 当前事实
 
@@ -522,6 +534,20 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - 13A LLM 约束：每个结论必须引用数据来源，不得生成无数据支撑的分析。
 - 13A allowed write set：`fund_agent/cli/main.py`、`fund_agent/service/reading_service.py`、测试文件、`docs/implementation-control.md`、`docs/design.md`。
 - 13A 不做投资建议、不改现有子命令核心逻辑。
+- 13A DeepSeek review 结论：无 P0；P1×2（表头字段不匹配、CLI JSON 缺 warnings）已修复；P2×4（未用参数、多份额覆盖、缺测试、章节编号）已修复。
+- 13A 测试结果：`uv run pytest tests/fund/cli/test_cli.py -k generate` -> 5 passed。
+- 13A 文本生成为模板填充，未接入真实 LLM；LLM 生成后续另开 13B。
+- Post-MVP 13B 裁决为 LLM-generated chapter text。
+- 13B 复用 8A/8B `LlmToolLoopRunner` + `LlmClientProtocol` + `DeepSeekLlmClient`。
+- 13B 两阶段方案：程序生成数据表格（数字 100% 从 dict 提取）+ LLM 只写定性分析（禁止输出数字）。
+- 13B hallucination 检测：`_contains_non_year_numbers()` 检测 LLM 输出中的非年份数字，检测到则拒绝并回退模板。
+- 13B 失败回退：LLM 失败的章节回退到 13A 模板填充。
+- 13B 全部 8 章用 LLM 生成（包括基金概况和分红）。
+- 13B 复用现有 `generate` 子命令，新增 `--llm` 标志。
+- 13B `--years` 留空时自动从 catalog 获取可用年份，不写死默认值。
+- 13B 业绩抽取修复：`_extract_report_performance` 改为逐年直接抽取，跳过失败年份，绕过 `aggregate_multi_year_annual_performance` 的 3 年最低要求。
+- 13B allowed write set：`fund_agent/cli/main.py`、`fund_agent/service/reading_service.py`、`fund_agent/agent/`、测试文件、`docs/implementation-control.md`、`docs/design.md`。
+- 13B 不做投资建议、不改现有子命令核心逻辑、不新增 CLI 子命令。
 
 ## CIC-lite Rules
 
@@ -538,7 +564,32 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## Next Action
 
-13A 裁决已写入。下一步进入 13A 代码实现：新增 `fund-checklist generate` 子命令，基于 5 年年报数据生成 8 章结构化分析报告。LLM 生成分析文本，严格基于抽取数据；输出 JSON → Markdown → PDF。不得改现有子命令核心逻辑，不做投资判断。
+14A 已 accepted。14C 裁决已确认。下一步进入 14C 代码实现。
+
+14C 实现计划：
+1. ChapterContract 定义（从模板提取 must_answer/must_not_cover/required_output_items）
+2. 违规分类体系（4类22项 P/E/S/C）
+3. ProgrammaticAuditor（规则审计）
+4. LlmAuditor（LLM审计）
+5. ChapterRepairer（PATCH/REGENERATE修复）
+6. ReportGenerationCoordinator（Ch1-6 → 审计 → Ch0+Ch7 流程控制）
+7. ProcessState + ArtifactStore（可观测性）
+
+禁止事项：
+- 换手率保持禁止
+- 不做投资建议
+- 数据表格禁止修改
+- 不改现有子命令核心逻辑
+
+13B 裁决：
+
+1. LLM 用途：复用 8A/8B tool-loop 架构（`LlmToolLoopRunner` + `LlmClientProtocol`），LLM 作为 Agent 通过 tool call 读取数据。
+2. 章节粒度：逐章独立 prompt，8 次 LLM 调用，每次生成 1 章；单章失败不影响其他章节。
+3. 输出约束：prompt 约束（要求引用数据来源）+ 后验证（校验输出中的数字是否在输入数据中出现过）。
+4. 失败回退：LLM 调用失败的章节回退到 13A 模板填充，其余章节正常。
+5. 章节范围：全部 8 章用 LLM 生成（包括基金概况和分红）。
+
+13B 不得改现有子命令核心逻辑，不做投资判断，不新增 CLI 子命令（复用 `generate`）。
 
 禁止事项：
 
@@ -642,7 +693,10 @@ uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值
 12A. Host lifecycle basics：已 accepted；引入 HostRunResult（扩展封装：AgentRunResult + 耗时 + 事件列表 + tool_trace 统计）、HostRunEvent（完整事件类型）和简单 timeout（默认 300 秒）；新增 Service 方法；CLI 展示耗时和事件统计。
 12B. Disclosure completeness audit：已 accepted；新增 `fund-checklist audit` 子命令，检查年报是否覆盖核心披露项（持仓、资产配置、费率、业绩）+ 基金经理 + 分红；审计深度为章节+表格+字段存在性检查（结构性规则审计）；JSON 格式输出；LLM 审计后续另开裁决。
 12C. Deep disclosure audit：已 accepted；新增 `fund-checklist deep-audit` 子命令，基于 search + read_section 的深度披露完整性审计，覆盖完整披露项（持仓、资产配置、费率、业绩、基金经理、分红）；检查 ToolFailure、内容长度、表格引用；输出带原文引用的审计文本；JSON 格式输出。
-13A. Fund report generation：实现中；新增 `fund-checklist generate` 子命令，基于 5 年年报数据生成 8 章结构化分析报告；LLM 生成分析文本，严格基于抽取数据；输出 JSON → Markdown → PDF（pandoc）；使用现有 8 章模板。
+13A. Fund report generation：已 accepted；新增 `fund-checklist generate` 子命令，基于 5 年年报数据生成 8 章结构化分析报告；模板填充生成分析文本（LLM 生成后续另开 13B）；输出 JSON → Markdown → PDF（pandoc）；使用现有 8 章模板；DeepSeek review 无 P0，P1×2 + P2×4 全部修复；5 passed。
+13B. LLM-generated chapter text：已 accepted；复用 8A/8B `DeepSeekLlmClient`，两阶段方案（程序生成数据表格 + LLM 只写定性分析）；hallucination 检测（`_contains_non_year_numbers`）+ 回退模板；8 章全覆盖；新增 `--llm` 标志；年份动态从 catalog 获取；业绩抽取逐年直接抽取跳过失败年份；DeepSeek review 无 P0，P1×3 全部修复，P2×4 暂不修；11 passed。
+14A. Template-aligned report generation：已 accepted；补充 Ch3（基金经理 `FundManagerInfo` + `_extract_fund_manager`）+ Ch5（规模明细 `ScaleInfo` + `_extract_scale_info` 多年回退）数据抽取；用现有数据组装 Ch2（R=A+B-C）；跳过 Ch4（投资者获得感）；按模板完全重做 8 章 prompt + 数据表格；第一轮 review P1×4 全部修复（死代码清理+措辞软化），第二轮 review 全 PASS；10 passed。
+14C. Chapter audit pipeline：实现中；基于 dayu write_pipeline 设计三层审计（程序审计+LLM审计+LLM复核）；4类22项违规分类（P/E/S/C）；评分体系（程序30%+LLM70%，≥80通过/50-79修复/<50重写）；PATCH/REGENERATE/NONE三策略修复（各最多3次）；Ch1-6全部通过后生成Ch0+Ch7；数据表格禁止修改；审计产物落盘。
 
 ## MVP Acceptance Matrix
 
