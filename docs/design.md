@@ -1,6 +1,6 @@
 # fund-checklist 设计真源初稿
 
-更新时间：2026-06-27  
+更新时间：2026-07-11
 文档状态：设计真源初稿，已可作为 MVP plan 输入；不得作为实现完成证据。  
 适用范围：基金年报阅读工具层。除非另有独立 gate，本文件不覆盖字段抽取、自动报告、投资判断或发布就绪。
 
@@ -1179,7 +1179,7 @@ Post-MVP 11C 裁决为 holdings multi-year tracking：
 - 失败语义：某年持仓表未找到时跳过继续，最终报告 missing_years。
 - allowed write set：`fund_agent/cli/main.py`、`fund_agent/service/reading_service.py`、测试文件、`docs/implementation-control.md`、`docs/design.md`。
 
-Post-MVP 14C 裁决为 chapter audit pipeline（详见 ）。
+Post-MVP 14C 裁决为 chapter audit pipeline（详见 `docs/reviews/14c-review-concise.md`）。
 - 审计分层：三层递进（程序审计+LLM审计+LLM复核）。
 - 违规分类：4类22项（P1-P4/E1-E5/S1-S7/C1-C6）。
 - 评分权重：程序审计30% + LLM审计70%。
@@ -1196,7 +1196,7 @@ Post-MVP 15A 裁决为 Ch7 口径裁决：
 - Ch7 禁止预测未来收益或市场走势。
 - Ch7 禁止超出公开披露信息的因果推断。
 - Ch7 禁止基金经理动机猜测。
-- 模板免责声明固定为："本文由 AI/大模型基于已公开披露的基金年报辅助生成，不构成投资建议。"
+- 免责声明使用模板原文（`docs/fund-analysis-template-draft.md` 第 3 行），不简化或改写。
 
 ## 10. 开发路线
 
