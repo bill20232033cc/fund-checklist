@@ -1179,10 +1179,47 @@ Post-MVP 11C 裁决为 holdings multi-year tracking：
 - 失败语义：某年持仓表未找到时跳过继续，最终报告 missing_years。
 - allowed write set：`fund_agent/cli/main.py`、`fund_agent/service/reading_service.py`、测试文件、`docs/implementation-control.md`、`docs/design.md`。
 
-## 10. 下一步最小可验证问题
+Post-MVP 14C 裁决为 chapter audit pipeline（详见 ）。
+- 审计分层：三层递进（程序审计+LLM审计+LLM复核）。
+- 违规分类：4类22项（P1-P4/E1-E5/S1-S7/C1-C6）。
+- 评分权重：程序审计30% + LLM审计70%。
+- 阈值：>=80分通过，50-79分需PATCH，<50分需REGENERATE。
+- 修复策略：PATCH/REGENERATE/NONE三策略，各最多3次。
+- Ch0/Ch7：Ch1-6全部通过后生成。
+- 审计产物落盘：phase_audit.json、phase_repair.json。
 
-下一步只应验证一个问题：
+Post-MVP 15A 裁决为 Ch7 口径裁决：
+- Ch7 保留模板原文三选一判断：🟢 值得持有 / 🟡 需要关注 / 🔴 建议替换。
+- AGENTS.md 禁的是"买入""卖出"等直接交易动作指令；"值得持有/需要关注/建议替换"是结构化信号评估，不是交易信号，不违反禁令。
+- Ch7 必须包含：最终判断、支撑依据（引用前 6 章数据）、最容易看错的地方、最小验证计划、升级/降级阈值。
+- Ch7 双向论证必须包含"为什么不选更积极的判断"和"为什么不选更保守的判断"。
+- Ch7 禁止预测未来收益或市场走势。
+- Ch7 禁止超出公开披露信息的因果推断。
+- Ch7 禁止基金经理动机猜测。
+- 模板免责声明固定为："本文由 AI/大模型基于已公开披露的基金年报辅助生成，不构成投资建议。"
 
-```text
-证据小节结构化已完成并提交（方案B：完整 citation 追踪）。DeepSeek review 9 项全部修复（P0×2 + P1×2 + P2×5），死代码清理完成。已 push d1375fa + 7433803。
-```
+## 10. 开发路线
+
+### Phase 1：稳定化
+
+- **Slice 15A**：提交遗留 + 清理 smoke work-dirs + full regression。目标：main 干净可复现。
+- **Slice 15B**：拆分 （5533 行 →  +  + ）。目标：单一职责，后续 slice 维护成本可控。
+
+### Phase 2：Ch7 结构化信号 + 模板区块补齐
+
+- **Slice 16A**：Ch7 结构化信号分析实现。基于 15A 裁决，从已有业绩/持仓/费率/规模数据构建信号判断 + 双向论证 + 验证计划 + 阈值事件。
+- **Slice 16B**：Ch6 风险清单表 + 压力测试表。按基金类型选阈值，从年报取规模/净值数据填充。
+- **Slice 16C**：Ch0 升级/降级阈值事件 + 一句话产品定义。从 Ch7 信号反推 Ch0 封面。
+
+### Phase 3：报告质量 + 可用性
+
+- **Slice 17A**：报告 Markdown 持久化 + metadata sidecar（fund_code, year, audit_score, generation_time）。
+- **Slice 17B**：citation 验证工具（给定 citation locator → 定位年报原文 → 返回上下文片段）。
+- **Slice 17C**： CLI 端到端 smoke（真实 PDF → 完整报告 → 审计产物落盘 → exit code 验证）。
+
+### Phase 4：分析能力扩展
+
+- **Slice 18A**：风格漂移检测（多年度持仓重叠率 → 风格稳定性信号）。
+- **Slice 18B**：换手率追踪（年报 §8 换手率 → 多年度趋势）。
+- **Slice 18C**：份额变动 + 盈利投资者占比（年报 §10 + 2026 新规字段）。
+- **Slice 18D**：费率影响估算（管理费+托管费+销售服务费 → 年度持有成本估算）。

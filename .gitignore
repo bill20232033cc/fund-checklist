@@ -30,3 +30,14 @@ docling_cache/
 .cache/docling/
 tmp/
 temp/
+
+# CLI smoke test work directories
+.fund_checklist_cli_smoke*/
+.fund_checklist_cli_smoke_*/
+
+# Build artifacts
+fund_checklist.egg-info/
+
+# Generated review/audit artifacts
+CODE_WIKI.md
+REPO_AUDIT_REPORT.md

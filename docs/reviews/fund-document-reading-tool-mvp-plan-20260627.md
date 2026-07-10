@@ -1,7 +1,7 @@
 # Fund Document Reading Tool MVP Plan
 
-日期：2026-06-28  
-状态：MVP plan accepted；Dependency preflight added by controller裁决  
+日期：2026-06-28
+状态：MVP plan accepted；Dependency preflight added by controller裁决
 流程：CIC-lite；不使用 gateflow / phaseflow
 
 ## 1. Scope

@@ -1,9 +1,31 @@
 # fund-checklist implementation-control
 
-更新时间：2026-07-10
-当前阶段：`POST_MVP_SLICE_EVIDENCE_IN_PROGRESS`
+更新时间：2026-07-11
+当前阶段：`PHASE1_SLICE_15A_STABILIZE`
 当前角色：control / CIC-lite controller
-当前目标：证据小节结构化已完成，待 DeepSeek review 通过后提交。
+当前目标：Phase 1 稳定化——提交遗留、清理 smoke work-dirs、full regression、拆分 reading_service.py。
+
+## 开发路线
+
+### Phase 1：稳定化
+- **Slice 15A**：提交遗留 + 清理 smoke work-dirs + full regression
+- **Slice 15B**：拆分 reading_service.py（extraction_service / chapter_generator / evidence_builder）
+
+### Phase 2：Ch7 结构化判断 + 模板区块补齐
+- **Slice 16A**：Ch7 结构化判断实现（值得持有/需要关注/建议替换 + 双向论证 + 验证计划 + 阈值）
+- **Slice 16B**：Ch6 风险清单表 + 压力测试表
+- **Slice 16C**：Ch0 升级/降级阈值事件 + 一句话产品定义
+
+### Phase 3：报告质量 + 可用性
+- **Slice 17A**：报告 Markdown 持久化 + metadata sidecar
+- **Slice 17B**：citation 验证工具
+- **Slice 17C**：generate CLI 端到端 smoke
+
+### Phase 4：分析能力扩展
+- **Slice 18A**：风格漂移检测（多年度持仓重叠率）
+- **Slice 18B**：换手率追踪
+- **Slice 18C**：份额变动 + 盈利投资者占比
+- **Slice 18D**：费率影响估算
 
 14C 裁决已确认（基于 dayu write_pipeline 设计）：
 - 审计分层：三层递进（程序审计+LLM审计+LLM复核）
@@ -564,11 +586,10 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## Next Action
 
-证据小节结构化已完成。DeepSeek review 9 项全部修复并提交推送（d1375fa + 7433803）。
+14C 已 accepted。证据小节结构化已完成（方案B：完整 citation 追踪）。DeepSeek review 9 项修复全部通过，已提交推送（`d1375fa` + `7433803`）。
 
 下一步：
-1. 证据小节回归验收（8/8 章有证据）
-2. 后续报告/字段抽取/投资判断路径（需另开 gate）
+1. 等待用户指示下一步方向
 
 禁止事项：
 - 换手率保持禁止
