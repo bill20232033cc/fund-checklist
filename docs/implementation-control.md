@@ -1,9 +1,9 @@
 # fund-checklist implementation-control
 
 更新时间：2026-07-11
-当前阶段：`PHASE1_SLICE_15A_STABILIZE`
+当前阶段：`PHASE2_SLICE_16A_CH7_SIGNAL`
 当前角色：control / CIC-lite controller
-当前目标：Phase 1 稳定化——提交遗留、清理 smoke work-dirs、full regression、拆分 reading_service.py。
+当前目标：Phase 2 Slice 16A——Ch7 确定性信号判断 + Ch6 风险清单表。
 
 ## 开发路线
 
@@ -12,8 +12,8 @@
 - **Slice 15B**：拆分 reading_service.py（extraction_service / chapter_generator / evidence_builder）
 
 ### Phase 2：Ch7 结构化判断 + 模板区块补齐
-- **Slice 16A**：Ch7 结构化判断实现（值得持有/需要关注/建议替换 + 双向论证 + 验证计划 + 阈值）
-- **Slice 16B**：Ch6 风险清单表 + 压力测试表
+- **Slice 16A**：Ch7 确定性信号判断 + Ch6 风险清单表（评分模型 6 指标 → 三选一信号 + 双向论证 + 验证计划 + 阈值；Ch6 风险 6 项 🟢🟡🔴）
+- **Slice 16B**：Ch6 压力测试表（按基金类型分 3 档跌幅 × 3 场景）
 - **Slice 16C**：Ch0 升级/降级阈值事件 + 一句话产品定义
 
 ### Phase 3：报告质量 + 可用性
@@ -583,6 +583,87 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - Review Agent 只 review diff + tests，不产出新 plan，不开新路线。
 - 禁止用文档更新代替可运行代码。
 - 没有 diff，不算实现；没有测试命令和输出，不算完成；没有 review agent 独立检查，不算 accepted。
+
+
+## Slice 16A 实施规格
+
+### 目标
+Ch7 确定性信号判断 + Ch6 风险清单表。
+
+### 评分模型
+
+总分 135，归一化到 100。
+
+| # | 指标 | 权重 | 满分 | 评分规则 |
+|---|------|------|------|---------|
+| 1 | 超额收益趋势 | 高 | 25 | 连续 2+ 年正超额 → 25；有正有负 → 15；连续负 → 5；无数据 → 0 |
+| 2 | 费率水平 | 高 | 25 | 管理+托管+销售服务 <1.0% → 25；1.0-1.5% → 15；>1.5% → 5；无数据 → 0 |
+| 3 | 风格漂移 | 高 | 25 | 年度持仓重叠率 >70% → 25；50-70% → 15；<50% → 5；不足 2 年 → 0 |
+| 4 | 规模风险 | 高 | 25 | >2 亿 → 25；0.5-2 亿 → 15；<5000 万 → 0；无数据 → 0 |
+| 5 | 基金经理变更 | 高 | 20 | tenure_start 年份 < report_year → 20；>= report_year → 0；无数据 → 0 |
+| 6 | 持仓集中度 | 中 | 15 | 前 10 占比 <50% → 15；50-70% → 10；>70% → 5；无数据 → 0 |
+
+信号映射：
+- normalized_score >= 75 → 🟢 值得持有
+- 50 <= normalized_score < 75 → 🟡 需要关注
+- normalized_score < 50 → 🔴 建议替换
+
+数据不足（可计算指标 < 3/6）→ 默认 🟡 需要关注 + warnings。
+
+### Ch6 风险清单表
+
+6 项检查，与评分模型共享数据源：
+
+| 风险项 | 🟢 | 🟡 | 🔴 |
+|--------|---|---|---|
+| 清盘风险 | >2 亿 | 0.5-2 亿 | <5000 万 |
+| 基金经理变更 | tenure < report_year | — | tenure >= report_year |
+| 风格漂移 | 重叠率 >70% | 50-70% | <50% |
+| 费率远超同类 | <1.0% | 1.0-1.5% | >1.5% |
+| 换手率异常 | 数据暂不可用 | — | — |
+| 持仓过度集中 | <50% | 50-70% | >70% |
+
+### Ch7 结构化输出
+
+必须包含：
+1. 信号判断 + 得分
+2. 评分详情表（6 指标 × 得分/满分/说明）
+3. 支撑判断的核心依据（最高分指标）
+4. 为什么不选更积极的判断（最低分指标）
+5. 为什么不选更保守的判断（最高分指标）
+6. 当前最容易看错的地方（数据最薄弱指标）
+7. 最小验证计划（1-2 条）
+8. 阈值事件（升级/降级各 1 条）
+
+### 数据解析边界
+
+- 百分比："0.60%" → 0.6；"不收取" → 0；"N/A" → 跳过
+- 规模："2.99亿元" → 2.99；"2,990,000元" → 0.0299（亿元）
+- 持仓重叠率：按股票代码交集/并集计算，取多年平均
+- 基金经理变更：tenire_start 解析年份，与 report_year 比较
+
+### allowed write set
+
+- `fund_agent/service/models.py`
+- `fund_agent/service/extraction.py`
+- `fund_agent/service/chapter_generator.py`
+- `tests/fund/service/test_extraction.py`
+- `tests/fund/service/test_llm_chapter_generation.py`
+- `docs/implementation-control.md`
+- `docs/design.md`
+
+### 验证命令
+
+```bash
+uv run pytest tests/fund/service/test_extraction.py tests/fund/service/test_llm_chapter_generation.py tests/fund/cli/test_cli.py -v --tb=short
+```
+
+### stop conditions
+
+- 评分模型必须可离线测试（不依赖 LLM）
+- Ch7 输出禁止预测未来收益、禁止基金经理动机猜测
+- 数据不足时默认 🟡 + warnings，不抛异常
+- 旧 `_generate_ch7_risks()` 和 Ch7 一行话模板必须被替换，不留死代码
 
 ## Next Action
 
