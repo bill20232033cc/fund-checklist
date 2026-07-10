@@ -3120,7 +3120,7 @@ class FundReadingService:
             fund_manager, fund_manager_citation = self._extract_fund_manager_with_citation(
                 request.fund_code, annual_docs, request.work_dir, request.fund_name,
             )
-            scale_info, scale_citation = self._extract_scale_info(request.fund_code, annual_docs, request.work_dir)
+            scale_info, scale_citation = self._extract_scale_info(request.fund_code, annual_docs, request.work_dir, request.fund_name)
 
             # 构建证据来源汇总
             evidence = ChapterEvidence(
@@ -3477,6 +3477,7 @@ class FundReadingService:
         fund_code: str,
         annual_docs: list[AnnualReportDocument],
         work_dir: Path,
+        fund_name: str = "",
     ) -> tuple[ScaleInfo | None, Citation | None]:
         """从年报提取规模信息及 citation（从最新年份开始尝试，回退到更早年份）。
 
@@ -3521,7 +3522,7 @@ class FundReadingService:
                     scale_citation = Citation(
                         document_id=doc_id,
                         fund_code=fund_code,
-                        fund_name="",
+                        fund_name=fund_name,
                         year=doc.year,
                         report_type="annual_report",
                         locator=hit.locator if hasattr(hit, "locator") else Locator(
