@@ -223,7 +223,7 @@ Post-MVP Slice 9D controlled query profile routing 测试范围：
 Slice 9D 验证命令：
 
 ```bash
-uv run pytest tests/fund/service/test_reading_service.py tests/fund/cli/test_cli.py
+uv run pytest tests/fund/service/test_extraction.py tests/fund/cli/test_cli.py
 uv run pytest tests/fund/agent/test_minimal_tool_loop.py tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_service.py
 git diff --check
 ```
@@ -241,7 +241,7 @@ Post-MVP Slice 9E Service routing attempts audit 测试范围：
 Slice 9E 验证命令：
 
 ```bash
-uv run pytest tests/fund/service/test_reading_service.py tests/fund/cli/test_cli.py
+uv run pytest tests/fund/service/test_extraction.py tests/fund/cli/test_cli.py
 uv run pytest tests/fund/agent/test_minimal_tool_loop.py tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_service.py
 git diff --check
 ```
@@ -263,7 +263,7 @@ Post-MVP Slice 10A controlled disclosure target contract 测试范围：
 Slice 10A 验证命令：
 
 ```bash
-uv run pytest tests/fund/service/test_reading_service.py tests/fund/cli/test_cli.py
+uv run pytest tests/fund/service/test_extraction.py tests/fund/cli/test_cli.py
 uv run pytest tests/fund/agent/test_minimal_tool_loop.py tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_service.py
 git diff --check
 ```
@@ -289,7 +289,7 @@ Post-MVP Slice 10B fee_rates reading locator 测试范围：
 Slice 10B 验证命令：
 
 ```bash
-uv run pytest tests/fund/service/test_reading_service.py tests/fund/cli/test_cli.py
+uv run pytest tests/fund/service/test_extraction.py tests/fund/cli/test_cli.py
 uv run pytest tests/fund/agent/test_minimal_tool_loop.py tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_service.py
 git diff --check
 ```
@@ -315,7 +315,7 @@ Post-MVP Slice 10C fee_rates value extraction contract 测试范围：
 Slice 10C 验证命令：
 
 ```bash
-uv run pytest tests/fund/service/test_reading_service.py tests/fund/cli/test_cli.py
+uv run pytest tests/fund/service/test_extraction.py tests/fund/cli/test_cli.py
 uv run pytest tests/fund/agent/test_minimal_tool_loop.py tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_service.py
 git diff --check
 ```
@@ -340,7 +340,7 @@ Post-MVP Slice 11A performance disclosure locator 测试范围：
 Slice 11A 验证命令：
 
 ```bash
-uv run pytest tests/fund/service/test_reading_service.py tests/fund/cli/test_cli.py
+uv run pytest tests/fund/service/test_extraction.py tests/fund/cli/test_cli.py
 uv run pytest tests/fund/agent/test_minimal_tool_loop.py tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_service.py
 git diff --check
 ```
@@ -363,7 +363,7 @@ Post-MVP Slice 11B disclosure locator contract registry 测试范围：
 Slice 11B 验证命令：
 
 ```bash
-uv run pytest tests/fund/service/test_reading_service.py tests/fund/cli/test_cli.py
+uv run pytest tests/fund/service/test_extraction.py tests/fund/cli/test_cli.py
 uv run pytest tests/fund/agent/test_minimal_tool_loop.py tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_service.py
 git diff --check
 ```
@@ -394,7 +394,7 @@ Post-MVP Slice 10D performance return fields extraction contract 测试范围：
 Slice 10D 验证命令：
 
 ```bash
-uv run pytest tests/fund/service/test_reading_service.py tests/fund/cli/test_cli.py
+uv run pytest tests/fund/service/test_extraction.py tests/fund/cli/test_cli.py
 uv run pytest tests/fund/agent/test_minimal_tool_loop.py tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_service.py
 git diff --check
 ```
@@ -423,7 +423,7 @@ Post-MVP Slice 10F annual performance table extraction 测试范围：
 Slice 10F 验证命令：
 
 ```bash
-uv run pytest tests/fund/service/test_reading_service.py tests/fund/cli/test_cli.py
+uv run pytest tests/fund/service/test_extraction.py tests/fund/cli/test_cli.py
 uv run pytest tests/fund/agent/test_minimal_tool_loop.py tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_service.py
 git diff --check
 ```
