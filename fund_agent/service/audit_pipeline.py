@@ -1492,8 +1492,8 @@ class ReportGenerationCoordinator:
             return None
 
         # 生成数据表格
-        from fund_agent.service.reading_service import _generate_data_table
-        data_table = _generate_data_table(
+        from fund_agent.service.chapter_generator import generate_data_table
+        data_table = generate_data_table(
             chapter_id, fund_code, fund_name, report_year,
             performance, holdings, allocation, fees,
             fund_manager, scale_info, evidence,
@@ -1660,9 +1660,9 @@ class ReportGenerationCoordinator:
     ) -> str | None:
         """生成章节内容。"""
 
-        from fund_agent.service.reading_service import _LLM_ANALYSIS_PROMPTS, _LLM_CHAPTER_SYSTEM_PROMPT
+        from fund_agent.service.chapter_generator import LLM_ANALYSIS_PROMPTS, LLM_CHAPTER_SYSTEM_PROMPT
 
-        analysis_prompt = _LLM_ANALYSIS_PROMPTS.get(chapter_id)
+        analysis_prompt = LLM_ANALYSIS_PROMPTS.get(chapter_id)
         if not analysis_prompt:
             return None
 
@@ -1699,14 +1699,14 @@ class ReportGenerationCoordinator:
 
         try:
             llm_analysis = self._llm_client.generate_text(
-                system_prompt=_LLM_CHAPTER_SYSTEM_PROMPT,
+                system_prompt=LLM_CHAPTER_SYSTEM_PROMPT,
                 user_prompt=user_prompt,
             )
 
             # 检查 hallucination
             allowed_numbers = set(re.findall(r'\d+\.?\d*', data_table))
-            from fund_agent.service.reading_service import _contains_non_year_numbers
-            if _contains_non_year_numbers(llm_analysis, allowed_numbers):
+            from fund_agent.service.chapter_generator import contains_non_year_numbers
+            if contains_non_year_numbers(llm_analysis, allowed_numbers):
                 return None
 
             return f"{data_table}\n\n## 分析\n\n{llm_analysis}"
@@ -1786,8 +1786,8 @@ class ReportGenerationCoordinator:
             base_content = ""
 
         # 追加证据来源小节
-        from fund_agent.service.reading_service import _generate_evidence_section
-        evidence_section = _generate_evidence_section(chapter_id, evidence)
+        from fund_agent.service.chapter_generator import generate_evidence_section
+        evidence_section = generate_evidence_section(chapter_id, evidence)
         if evidence_section:
             return base_content + "\n" + evidence_section
         return base_content

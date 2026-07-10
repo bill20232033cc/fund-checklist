@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-import fund_agent.service.reading_service as reading_service_module
+import fund_agent.service.extraction as reading_service_module
 from fund_agent.agent import AgentRunResult, ToolTraceEntry
 from fund_agent.fund.document_tools.constants import DOCLING_JSON_SUFFIX, FailureCode, LocatorKind, ToolName
 from fund_agent.fund.document_tools.errors import DocumentToolError

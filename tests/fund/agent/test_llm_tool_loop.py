@@ -12,7 +12,7 @@ from fund_agent.fund.document_tools.constants import FailureCode, LocatorKind, R
 from fund_agent.fund.document_tools.docling_store import DoclingDocumentStore
 from fund_agent.fund.document_tools.models import Citation, Locator, ReportIdentity, SearchResult, TableSummary, ToolFailure
 from fund_agent.fund.document_tools.service import FundDocumentToolService
-from fund_agent.service.reading_service import (
+from fund_agent.service.extraction import (
     AggregateMultiYearAnnualPerformanceResult,
     AnnualPerformanceFieldCitation,
     MultiYearAnnualPerformanceRow,

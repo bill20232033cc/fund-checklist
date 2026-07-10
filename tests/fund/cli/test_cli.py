@@ -25,7 +25,7 @@ from fund_agent.fund.document_tools.persistent_repository import CATALOG_FILENAM
 from fund_agent.service import ReadLocalReportResult
 
 cli_module = importlib.import_module("fund_agent.cli.main")
-service_module = importlib.import_module("fund_agent.service.reading_service")
+service_module = importlib.import_module("fund_agent.service.extraction")
 
 REAL_SMOKE_PDF = Path("基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf")
 REAL_SMOKE_FUND_CODE = "004393"
@@ -1379,7 +1379,7 @@ def test_holdings_deduplicates_same_year_entries(monkeypatch, tmp_path: Path) ->
 def test_holdings_column_indexes_recognizes_standard_header() -> None:
     """_holdings_column_indexes 必须识别标准持仓表头。"""
 
-    from fund_agent.service.reading_service import _holdings_column_indexes
+    from fund_agent.service.extraction import _holdings_column_indexes
 
     rows = (
         ("序号", "股票代码", "股票名称", "数量（股）", "公允价值（元）", "占基金资产净值比例（%）"),
@@ -1397,7 +1397,7 @@ def test_holdings_column_indexes_recognizes_standard_header() -> None:
 def test_holdings_column_indexes_returns_none_for_non_holdings_header() -> None:
     """_holdings_column_indexes 对非持仓表头必须返回 None。"""
 
-    from fund_agent.service.reading_service import _holdings_column_indexes
+    from fund_agent.service.extraction import _holdings_column_indexes
 
     rows = (
         ("项目", "本期", "上期"),
@@ -1410,7 +1410,7 @@ def test_holdings_column_indexes_returns_none_for_non_holdings_header() -> None:
 def test_holdings_column_indexes_returns_none_for_empty_rows() -> None:
     """_holdings_column_indexes 对空行必须返回 None。"""
 
-    from fund_agent.service.reading_service import _holdings_column_indexes
+    from fund_agent.service.extraction import _holdings_column_indexes
 
     indexes = _holdings_column_indexes(())
     assert indexes is None
@@ -1419,7 +1419,7 @@ def test_holdings_column_indexes_returns_none_for_empty_rows() -> None:
 def test_is_continuation_row_recognizes_numbered_rows() -> None:
     """_is_continuation_row 必须识别以序号开头的续表行。"""
 
-    from fund_agent.service.reading_service import _is_continuation_row
+    from fund_agent.service.extraction import _is_continuation_row
 
     rows = (
         ("5", "00688", "中国海外发展", "237,000", "3,054,626.09", "6.17"),
@@ -1431,7 +1431,7 @@ def test_is_continuation_row_recognizes_numbered_rows() -> None:
 def test_is_continuation_row_rejects_non_numbered_rows() -> None:
     """_is_continuation_row 对非序号行必须返回 False。"""
 
-    from fund_agent.service.reading_service import _is_continuation_row
+    from fund_agent.service.extraction import _is_continuation_row
 
     rows = (
         ("项目", "本期", "上期"),
@@ -1443,7 +1443,7 @@ def test_is_continuation_row_rejects_non_numbered_rows() -> None:
 def test_is_continuation_row_rejects_empty_rows() -> None:
     """_is_continuation_row 对空行必须返回 False。"""
 
-    from fund_agent.service.reading_service import _is_continuation_row
+    from fund_agent.service.extraction import _is_continuation_row
 
     assert _is_continuation_row(()) is False
     assert _is_continuation_row(((),)) is False
@@ -1672,7 +1672,7 @@ def test_fees_json_output_on_success(monkeypatch, tmp_path: Path) -> None:
 def test_is_asset_allocation_table_recognizes_standard_header() -> None:
     """_is_asset_allocation_table 必须识别标准资产配置表头。"""
 
-    from fund_agent.service.reading_service import _is_asset_allocation_table
+    from fund_agent.service.extraction import _is_asset_allocation_table
 
     rows = (
         ("序号", "项目", "金额", "占基金总资产的比例（%）"),
@@ -1684,7 +1684,7 @@ def test_is_asset_allocation_table_recognizes_standard_header() -> None:
 def test_is_asset_allocation_table_rejects_non_asset_table() -> None:
     """_is_asset_allocation_table 对非资产配置表必须返回 False。"""
 
-    from fund_agent.service.reading_service import _is_asset_allocation_table
+    from fund_agent.service.extraction import _is_asset_allocation_table
 
     rows = (
         ("序号", "股票代码", "股票名称", "数量（股）"),
@@ -1696,7 +1696,7 @@ def test_is_asset_allocation_table_rejects_non_asset_table() -> None:
 def test_is_industry_allocation_table_recognizes_standard_header() -> None:
     """_is_industry_allocation_table 必须识别标准行业配置表头。"""
 
-    from fund_agent.service.reading_service import _is_industry_allocation_table
+    from fund_agent.service.extraction import _is_industry_allocation_table
 
     rows = (
         ("代码", "行业类别", "公允价值（元）", "占基金资产净值比例（%）"),
@@ -1708,7 +1708,7 @@ def test_is_industry_allocation_table_recognizes_standard_header() -> None:
 def test_is_industry_allocation_table_rejects_non_industry_table() -> None:
     """_is_industry_allocation_table 对非行业配置表必须返回 False。"""
 
-    from fund_agent.service.reading_service import _is_industry_allocation_table
+    from fund_agent.service.extraction import _is_industry_allocation_table
 
     rows = (
         ("序号", "项目", "金额", "占基金总资产的比例（%）"),

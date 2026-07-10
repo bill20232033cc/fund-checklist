@@ -8,15 +8,17 @@ from typing import Any
 
 import pytest
 
-from fund_agent.service.reading_service import (
+from fund_agent.service.models import (
     AssetAllocationItem,
     FeeRateItem,
-    FundReadingService,
     GenerateReportRequest,
     HoldingExtraction,
+)
+from fund_agent.service.extraction import FundReadingService
+from fund_agent.service.chapter_generator import (
     LlmChapterGenerator,
-    _contains_non_year_numbers,
-    _generate_data_table,
+    contains_non_year_numbers,
+    generate_data_table,
 )
 from fund_agent.fund.document_tools.constants import FailureCode
 from fund_agent.fund.document_tools.models import ToolFailure
@@ -95,7 +97,7 @@ def _sample_fees() -> dict[int, tuple[FeeRateItem, ...]]:
 def test_generate_data_table_ch2_performance() -> None:
     """Ch2 R=A+B-C 表格必须包含真实业绩和费率数字。"""
 
-    table = _generate_data_table(2, "004393", "测试基金", 2024, _sample_performance(), {}, {}, _sample_fees())
+    table = generate_data_table(2, "004393", "测试基金", 2024, _sample_performance(), {}, {}, _sample_fees())
 
     assert "12.34%" in table
     assert "8.76%" in table
@@ -105,7 +107,7 @@ def test_generate_data_table_ch2_performance() -> None:
 def test_generate_data_table_ch3_holdings() -> None:
     """Ch3 基金经理画像表格必须包含真实持仓数据。"""
 
-    table = _generate_data_table(3, "004393", "测试基金", 2024, {}, _sample_holdings(), {}, {})
+    table = generate_data_table(3, "004393", "测试基金", 2024, {}, _sample_holdings(), {}, {})
 
     assert "600519" in table
     assert "贵州茅台" in table
@@ -115,7 +117,7 @@ def test_generate_data_table_ch3_holdings() -> None:
 def test_generate_data_table_ch5_scale() -> None:
     """Ch5 当前阶段表格必须包含资产配置数据。"""
 
-    table = _generate_data_table(5, "004393", "测试基金", 2024, {}, {}, _sample_allocation(), {})
+    table = generate_data_table(5, "004393", "测试基金", 2024, {}, {}, _sample_allocation(), {})
 
     assert "股票投资" in table
     assert "85.23%" in table
@@ -124,21 +126,21 @@ def test_generate_data_table_ch5_scale() -> None:
 def test_contains_non_year_numbers_detects() -> None:
     """非年份数字必须被检测到。"""
 
-    assert _contains_non_year_numbers("净值增长率为12.34%") is True
-    assert _contains_non_year_numbers("占比8.52%") is True
+    assert contains_non_year_numbers("净值增长率为12.34%") is True
+    assert contains_non_year_numbers("占比8.52%") is True
 
 
 def test_contains_non_year_numbers_allows_years() -> None:
     """年份数字不应被视为 hallucination。"""
 
-    assert _contains_non_year_numbers("据2024年报数据显示") is False
-    assert _contains_non_year_numbers("从2022年到2024年") is False
+    assert contains_non_year_numbers("据2024年报数据显示") is False
+    assert contains_non_year_numbers("从2022年到2024年") is False
 
 
 def test_contains_non_year_numbers_allows_text() -> None:
     """纯文本不应触发 hallucination 检测。"""
 
-    assert _contains_non_year_numbers("基金表现稳健，超额收益持续为正") is False
+    assert contains_non_year_numbers("基金表现稳健，超额收益持续为正") is False
 
 
 def test_llm_chapter_generator_success() -> None:

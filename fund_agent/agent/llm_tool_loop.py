@@ -295,7 +295,7 @@ class LlmToolLoopRunner:
     ) -> ToolResult | ToolFailure:
         """校验并执行单次 LLM 工具请求。"""
 
-        from fund_agent.service.reading_service import AggregateMultiYearAnnualPerformanceResult
+        from fund_agent.service.extraction import AggregateMultiYearAnnualPerformanceResult
 
         tool_name = _coerce_tool_name(call.tool_name)
         trace_arguments = _trace_arguments(call)
@@ -423,7 +423,7 @@ def _final_result(
 def _tool_result_from_output(tool_name: ToolName, result: ControlledToolOutput) -> ToolResult:
     """从 public tool result 中提取 citations 和 evidence_text。"""
 
-    from fund_agent.service.reading_service import AggregateMultiYearAnnualPerformanceResult
+    from fund_agent.service.extraction import AggregateMultiYearAnnualPerformanceResult
 
     if isinstance(result, AggregateMultiYearAnnualPerformanceResult):
         return ToolResult(
