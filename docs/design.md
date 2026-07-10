@@ -1184,5 +1184,5 @@ Post-MVP 11C 裁决为 holdings multi-year tracking：
 下一步只应验证一个问题：
 
 ```text
-14C 裁决已确认。下一步进入 14C 实现：基于 dayu write_pipeline 设计三层审计架构，4类22项违规分类，评分体系（程序30%+LLM70%，≥80通过/50-79修复/<50重写），PATCH/REGENERATE/NONE三策略修复。
+证据小节结构化已完成并提交（方案B：完整 citation 追踪）。DeepSeek review 9 项全部修复（P0×2 + P1×2 + P2×5），死代码清理完成。已 push d1375fa + 7433803。
 ```

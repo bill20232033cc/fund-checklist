@@ -1,9 +1,9 @@
 # fund-checklist implementation-control
 
-更新时间：2026-07-09
-当前阶段：`POST_MVP_SLICE_14A_ACCEPTED`
+更新时间：2026-07-10
+当前阶段：`POST_MVP_SLICE_EVIDENCE_IN_PROGRESS`
 当前角色：control / CIC-lite controller
-当前目标：Slice 14A Template-aligned report generation 已 accepted。下一步裁决 14C。
+当前目标：证据小节结构化已完成，待 DeepSeek review 通过后提交。
 
 14C 裁决已确认（基于 dayu write_pipeline 设计）：
 - 审计分层：三层递进（程序审计+LLM审计+LLM复核）
@@ -564,16 +564,11 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## Next Action
 
-14A 已 accepted。14C 裁决已确认。下一步进入 14C 代码实现。
+证据小节结构化已完成。DeepSeek review 9 项全部修复并提交推送（d1375fa + 7433803）。
 
-14C 实现计划：
-1. ChapterContract 定义（从模板提取 must_answer/must_not_cover/required_output_items）
-2. 违规分类体系（4类22项 P/E/S/C）
-3. ProgrammaticAuditor（规则审计）
-4. LlmAuditor（LLM审计）
-5. ChapterRepairer（PATCH/REGENERATE修复）
-6. ReportGenerationCoordinator（Ch1-6 → 审计 → Ch0+Ch7 流程控制）
-7. ProcessState + ArtifactStore（可观测性）
+下一步：
+1. 证据小节回归验收（8/8 章有证据）
+2. 后续报告/字段抽取/投资判断路径（需另开 gate）
 
 禁止事项：
 - 换手率保持禁止
