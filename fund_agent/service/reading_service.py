@@ -6,7 +6,7 @@ import json
 import re
 import subprocess
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Literal
@@ -23,6 +23,8 @@ from fund_agent.fund.document_tools.docling_store import DoclingDocumentStore
 from fund_agent.fund.document_tools.errors import DocumentToolError
 from fund_agent.fund.document_tools.local_pdf_source import LocalPdfSourceProvider
 from fund_agent.fund.document_tools.models import (
+    Citation,
+    Locator,
     PdfImportRequest,
     PdfImportResult,
     ReportSummary,
@@ -659,6 +661,7 @@ class ScaleInfo:
         total_shares_c: C类份额总数。
         individual_investor_ratio: 个人投资者持有比例。
         management_holds: 管理人从业人员持有比例。
+        estimated_aum: 估算资产净值（如"2.99亿元"）。
 
     返回:
         不可变规模信息 DTO。
@@ -668,6 +671,7 @@ class ScaleInfo:
     total_shares_c: str
     individual_investor_ratio: str
     management_holds: str
+    estimated_aum: str = ""
 
 
 @dataclass(frozen=True)
@@ -959,6 +963,30 @@ class FundReport:
 
 
 @dataclass(frozen=True)
+class ChapterEvidence:
+    """章节证据来源汇总。
+
+    参数:
+        holdings_citations: 持仓数据 citation（按年份）。
+        fee_citations: 费率数据 citation（按年份）。
+        allocation_citations: 资产配置 citation（按年份）。
+        performance_citations: 业绩数据 citation（按年份）。
+        fund_manager_citation: 基金经理信息 citation。
+        scale_citation: 规模信息 citation。
+
+    返回:
+        不可变证据来源 DTO。
+    """
+
+    holdings_citations: dict[int, Citation | None] = field(default_factory=dict)
+    fee_citations: dict[int, Citation | None] = field(default_factory=dict)
+    allocation_citations: dict[int, Citation | None] = field(default_factory=dict)
+    performance_citations: dict[int, Citation | None] = field(default_factory=dict)
+    fund_manager_citation: Citation | None = None
+    scale_citation: Citation | None = None
+
+
+@dataclass(frozen=True)
 class GenerateReportRequest:
     """报告生成请求。
 
@@ -1086,6 +1114,7 @@ def _generate_data_table(
     fees: dict[int, tuple[FeeRateItem, ...]],
     fund_manager: FundManagerInfo | None = None,
     scale_info: ScaleInfo | None = None,
+    evidence: ChapterEvidence | None = None,
 ) -> str:
     """程序化生成数据表格（数字 100% 从数据 dict 提取，不经过 LLM）。
 
@@ -1095,10 +1124,13 @@ def _generate_data_table(
         performance/holdings/allocation/fees: 多年度数据。
         fund_manager: 基金经理信息。
         scale_info: 规模信息。
+        evidence: 证据来源汇总（可选）。
 
     返回:
-        Markdown 格式的数据表格文本。
+        Markdown 格式的数据表格文本（含证据来源小节）。
     """
+
+    base_content = ""
 
     # Ch0: 投资要点概览 — 汇总关键指标
     if chapter_id == 0:
@@ -1143,7 +1175,7 @@ def _generate_data_table(
         if excess_trend:
             lines.append("")
             lines.append(f"**超额收益趋势**：{excess_trend}")
-        return "\n".join(lines)
+        base_content = "\n".join(lines)
 
     # Ch1: 产品定义 — 基本信息 + 基金经理
     if chapter_id == 1:
@@ -1167,7 +1199,7 @@ def _generate_data_table(
                 lines.append("## 基金经理投资策略（原文摘录）")
                 lines.append("")
                 lines.append(fund_manager.investment_strategy[:400])
-        return "\n".join(lines)
+        base_content = "\n".join(lines)
 
     # Ch2: R=A+B-C 收益归因
     if chapter_id == 2:
@@ -1196,7 +1228,7 @@ def _generate_data_table(
                 elif "托管" in f.fee_name:
                     cust = f.rate
             lines.append(f"| {year} | {mgmt} | {cust} |")
-        return "\n".join(lines)
+        base_content = "\n".join(lines)
 
     # Ch3: 基金经理画像
     if chapter_id == 3:
@@ -1223,11 +1255,11 @@ def _generate_data_table(
             lines.append("|------|---------|---------|---------|")
             for h in holdings[year][:10]:
                 lines.append(f"| {h.rank} | {h.stock_code} | {h.stock_name} | {h.percentage} |")
-        return "\n".join(lines)
+        base_content = "\n".join(lines)
 
     # Ch4: 投资者获得感 — 暂不可用
     if chapter_id == 4:
-        return "## 投资者获得感\n\n投资者实际收益数据暂不可用，详见原始年报。"
+        base_content = "## 投资者获得感\n\n投资者实际收益数据暂不可用，详见原始年报。"
 
     # Ch5: 当前阶段与关键变化
     if chapter_id == 5:
@@ -1242,6 +1274,8 @@ def _generate_data_table(
                 f"| 个人投资者持有比例 | {scale_info.individual_investor_ratio} |",
                 f"| 管理人从业人员持有比例 | {scale_info.management_holds} |",
             ])
+            if scale_info.estimated_aum:
+                lines.append(f"| 估算资产净值 | {scale_info.estimated_aum} |")
         # 资产配置变化
         lines.extend(["", "## 资产配置变化"])
         for year in sorted(allocation.keys()):
@@ -1250,7 +1284,7 @@ def _generate_data_table(
             lines.append("|---------|------|---------|")
             for a in allocation[year][:8]:
                 lines.append(f"| {a.category} | {a.amount} | {a.percentage_of_net} |")
-        return "\n".join(lines)
+        base_content = "\n".join(lines)
 
     # Ch6: 核心风险与否决项
     if chapter_id == 6:
@@ -1266,7 +1300,7 @@ def _generate_data_table(
         for year in sorted(performance.keys()):
             p = performance[year]
             lines.append(f"| {year} | {p.get('nav_growth_rate', 'N/A')} | {p.get('excess_return', 'N/A')} |")
-        return "\n".join(lines)
+        base_content = "\n".join(lines)
 
     # Ch7: 最终判断 — 汇总数据
     if chapter_id == 7:
@@ -1283,9 +1317,121 @@ def _generate_data_table(
         latest_fees = fees.get(report_year, [])
         for f in latest_fees:
             lines.append(f"- {f.fee_name}: {f.rate}")
-        return "\n".join(lines)
+        base_content = "\n".join(lines)
 
-    return ""
+    # 追加证据来源小节
+    evidence_section = _generate_evidence_section(chapter_id, evidence)
+    if evidence_section:
+        return base_content + "\n" + evidence_section
+    return base_content
+
+
+def _format_citation(citation: Citation | None) -> str:
+    """格式化单个 citation 为可读文本。
+
+    参数:
+        citation: Citation 对象或 None。
+
+    返回:
+        格式化的 citation 文本。
+    """
+
+    if citation is None:
+        return ""
+
+    locator = citation.locator
+    parts = []
+    if locator.section_ref:
+        parts.append(f"§{locator.section_ref}")
+    if locator.table_ref:
+        parts.append(f"表{locator.table_ref}")
+    if locator.page_no:
+        parts.append(f"p.{locator.page_no}")
+
+    ref_str = ", ".join(parts) if parts else "位置未知"
+    return f"{citation.year}年报 ({ref_str})"
+
+
+def _generate_evidence_section(
+    chapter_id: int,
+    evidence: ChapterEvidence | None,
+) -> str:
+    """生成章节证据来源小节。
+
+    参数:
+        chapter_id: 章节编号。
+        evidence: 证据来源汇总。
+
+    返回:
+        Markdown 格式的证据来源小节。
+    """
+
+    if evidence is None:
+        return ""
+
+    lines = ["\n### 证据与出处\n"]
+
+    # 根据章节类型列出相关证据来源
+    if chapter_id in (0, 2, 7):  # 业绩相关
+        if evidence.performance_citations:
+            cit_lines = []
+            for year, cit in sorted(evidence.performance_citations.items()):
+                formatted = _format_citation(cit)
+                if formatted:
+                    cit_lines.append(f"- {year}年: {formatted}")
+            if cit_lines:
+                lines.append("**业绩数据来源**：")
+                lines.extend(cit_lines)
+
+    if chapter_id in (0, 3, 6, 7):  # 持仓相关
+        if evidence.holdings_citations:
+            cit_lines = []
+            for year, cit in sorted(evidence.holdings_citations.items()):
+                formatted = _format_citation(cit)
+                if formatted:
+                    cit_lines.append(f"- {year}年: {formatted}")
+            if cit_lines:
+                lines.append("**持仓数据来源**：")
+                lines.extend(cit_lines)
+
+    if chapter_id in (2, 5, 7):  # 费率相关
+        if evidence.fee_citations:
+            cit_lines = []
+            for year, cit in sorted(evidence.fee_citations.items()):
+                formatted = _format_citation(cit)
+                if formatted:
+                    cit_lines.append(f"- {year}年: {formatted}")
+            if cit_lines:
+                lines.append("**费率数据来源**：")
+                lines.extend(cit_lines)
+
+    if chapter_id in (4, 5):  # 资产配置相关
+        if evidence.allocation_citations:
+            cit_lines = []
+            for year, cit in sorted(evidence.allocation_citations.items()):
+                formatted = _format_citation(cit)
+                if formatted:
+                    cit_lines.append(f"- {year}年: {formatted}")
+            if cit_lines:
+                lines.append("**资产配置数据来源**：")
+                lines.extend(cit_lines)
+
+    if chapter_id in (1, 3):  # 基金经理相关
+        if evidence.fund_manager_citation:
+            formatted = _format_citation(evidence.fund_manager_citation)
+            if formatted:
+                lines.append(f"**基金经理信息来源**：{formatted}")
+
+    if chapter_id in (0, 5, 7):  # 规模相关
+        if evidence.scale_citation:
+            formatted = _format_citation(evidence.scale_citation)
+            if formatted:
+                lines.append(f"**规模数据来源**：{formatted}")
+
+    if len(lines) <= 1:
+        return ""
+
+    return "\n".join(lines)
 
 
 class LlmChapterGenerator:
@@ -1321,6 +1467,7 @@ class LlmChapterGenerator:
         fees: dict[int, tuple[FeeRateItem, ...]],
         fund_manager: FundManagerInfo | None = None,
         scale_info: ScaleInfo | None = None,
+        evidence: ChapterEvidence | None = None,
     ) -> str | None:
         """生成单个章节（程序表格 + LLM 分析）。
 
@@ -1330,6 +1477,7 @@ class LlmChapterGenerator:
             performance/holdings/allocation/fees: 多年度数据。
             fund_manager: 基金经理信息。
             scale_info: 规模信息。
+            evidence: 证据来源汇总（可选）。
 
         返回:
             完整的章节 Markdown；LLM 失败时返回 None（调用方应回退模板）。
@@ -1339,7 +1487,7 @@ class LlmChapterGenerator:
         data_table = _generate_data_table(
             chapter_id, fund_code, fund_name, report_year,
             performance, holdings, allocation, fees,
-            fund_manager, scale_info,
+            fund_manager, scale_info, evidence,
         )
 
         # 阶段 2：LLM 生成定性分析
@@ -2956,13 +3104,33 @@ class FundReadingService:
                     failure=ToolFailure(code=FailureCode.NOT_FOUND, message=f"未找到 {request.fund_code} 的年报数据"),
                 )
 
-            # 2. 提取各项数据
-            holdings_data = self._extract_report_holdings(request.fund_code, annual_docs, request.work_dir)
-            fee_data = self._extract_report_fees(request.fund_code, annual_docs, request.work_dir)
-            performance_data = self._extract_report_performance(request.fund_code, annual_docs, request.work_dir)
-            allocation_data = self._extract_report_allocation(request.fund_code, annual_docs, request.work_dir)
-            fund_manager = self._extract_fund_manager(request.fund_code, annual_docs, request.work_dir)
-            scale_info = self._extract_scale_info(request.fund_code, annual_docs, request.work_dir)
+            # 2. 提取各项数据（带 citation）
+            holdings_data, holdings_citations = self._extract_report_holdings_with_citations(
+                request.fund_code, annual_docs, request.work_dir,
+            )
+            fee_data, fee_citations = self._extract_report_fees_with_citations(
+                request.fund_code, annual_docs, request.work_dir,
+            )
+            performance_data, performance_citations = self._extract_report_performance_with_citations(
+                request.fund_code, annual_docs, request.work_dir,
+            )
+            allocation_data, allocation_citations = self._extract_report_allocation_with_citations(
+                request.fund_code, annual_docs, request.work_dir,
+            )
+            fund_manager, fund_manager_citation = self._extract_fund_manager_with_citation(
+                request.fund_code, annual_docs, request.work_dir, request.fund_name,
+            )
+            scale_info, scale_citation = self._extract_scale_info(request.fund_code, annual_docs, request.work_dir)
+
+            # 构建证据来源汇总
+            evidence = ChapterEvidence(
+                holdings_citations=holdings_citations,
+                fee_citations=fee_citations,
+                allocation_citations=allocation_citations,
+                performance_citations=performance_citations,
+                fund_manager_citation=fund_manager_citation,
+                scale_citation=scale_citation,
+            )
 
             # 3. 生成报告章节
             llm_warnings: list[str] = []
@@ -2983,6 +3151,7 @@ class FundReadingService:
                     fees=fee_data,
                     fund_manager=fund_manager,
                     scale_info=scale_info,
+                    evidence=evidence,
                 )
                 llm_warnings.extend(coordinator_warnings)
 
@@ -3024,6 +3193,7 @@ class FundReadingService:
                     allocation=allocation_data,
                     fund_manager=fund_manager,
                     scale_info=scale_info,
+                    evidence=evidence,
                 )
 
             report = FundReport(
@@ -3062,13 +3232,17 @@ class FundReadingService:
         except Exception as exc:
             return GenerateReportResult(failure=ToolFailure(code=FailureCode.UNAVAILABLE, message=f"报告生成暂不可用: {exc}"))
 
-    def _extract_report_holdings(
+    def _extract_report_holdings_with_citations(
         self,
         fund_code: str,
         annual_docs: list[AnnualReportDocument],
         work_dir: Path,
-    ) -> dict[int, tuple[HoldingExtraction, ...]]:
-        """提取多年度持仓数据。"""
+    ) -> tuple[dict[int, tuple[HoldingExtraction, ...]], dict[int, Citation | None]]:
+        """提取多年度持仓数据及 citation。
+
+        返回:
+            (持仓数据字典, citation 字典)。
+        """
 
         result = self.extract_multi_year_holdings(ExtractHoldingsRequest(
             fund_code=fund_code,
@@ -3077,16 +3251,22 @@ class FundReadingService:
             work_dir=work_dir,
         ))
         if result.series is None:
-            return {}
-        return {h.year: h.holdings for h in result.series.annual_holdings}
+            return {}, {}
+        holdings = {h.year: h.holdings for h in result.series.annual_holdings}
+        citations = {h.year: h.citation for h in result.series.annual_holdings}
+        return holdings, citations
 
-    def _extract_report_fees(
+    def _extract_report_fees_with_citations(
         self,
         fund_code: str,
         annual_docs: list[AnnualReportDocument],
         work_dir: Path,
-    ) -> dict[int, tuple[FeeRateItem, ...]]:
-        """提取多年度费率数据。"""
+    ) -> tuple[dict[int, tuple[FeeRateItem, ...]], dict[int, Citation | None]]:
+        """提取多年度费率数据及 citation。
+
+        返回:
+            (费率数据字典, citation 字典)。
+        """
 
         result = self.extract_multi_year_fee_rates(ExtractFeeRatesMultiYearRequest(
             fund_code=fund_code,
@@ -3095,30 +3275,26 @@ class FundReadingService:
             work_dir=work_dir,
         ))
         if result.series is None:
-            return {}
-        return {f.year: f.fees for f in result.series.annual_fees}
+            return {}, {}
+        fees = {f.year: f.fees for f in result.series.annual_fees}
+        citations = {f.year: f.citation for f in result.series.annual_fees}
+        return fees, citations
 
-    def _extract_report_performance(
+    def _extract_report_performance_with_citations(
         self,
         fund_code: str,
         annual_docs: list[AnnualReportDocument],
         work_dir: Path,
-    ) -> dict[int, dict[str, str]]:
-        """提取多年度业绩数据（逐年抽取，跳过失败年份）。
-
-        直接调用单年抽取，绕过 aggregate_multi_year_annual_performance 的 3 年最低要求。
-
-        参数:
-            fund_code: 基金代码。
-            annual_docs: 年报文档列表。
-            work_dir: 工作目录。
+    ) -> tuple[dict[int, dict[str, str]], dict[int, Citation | None]]:
+        """提取多年度业绩数据及 citation。
 
         返回:
-            年份到业绩数据的映射；失败年份自动跳过。
+            (业绩数据字典, citation 字典)。
         """
 
         repository = _repository(Path(work_dir))
         performance: dict[int, dict[str, str]] = {}
+        citations: dict[int, Citation | None] = {}
 
         for doc in annual_docs:
             try:
@@ -3135,14 +3311,15 @@ class FundReadingService:
                 continue
             nav = ""
             bench = ""
+            citation = None
             for f in result.fields:
                 if f.field_name == "annual_nav_growth_rate":
                     nav = f.decimal_percent_text
+                    citation = f.citation
                 elif f.field_name == "annual_benchmark_return_rate":
                     bench = f.decimal_percent_text
             if nav:
                 excess = ""
-                # 尝试抽取超额收益
                 excess_result = self._extract_annual_excess_return_from_store(
                     document_id=doc.document_id,
                     store=store,
@@ -3156,16 +3333,21 @@ class FundReadingService:
                     "benchmark_return_rate": bench,
                     "excess_return": excess,
                 }
+                citations[doc.year] = citation
 
-        return performance
+        return performance, citations
 
-    def _extract_report_allocation(
+    def _extract_report_allocation_with_citations(
         self,
         fund_code: str,
         annual_docs: list[AnnualReportDocument],
         work_dir: Path,
-    ) -> dict[int, tuple[AssetAllocationItem, ...]]:
-        """提取多年度资产配置数据。"""
+    ) -> tuple[dict[int, tuple[AssetAllocationItem, ...]], dict[int, Citation | None]]:
+        """提取多年度资产配置数据及 citation。
+
+        返回:
+            (资产配置数据字典, citation 字典)。
+        """
 
         result = self.extract_multi_year_allocation(ExtractAllocationRequest(
             fund_code=fund_code,
@@ -3174,35 +3356,45 @@ class FundReadingService:
             work_dir=work_dir,
         ))
         if result.series is None:
-            return {}
-        return {a.year: a.asset_allocation for a in result.series.annual_allocations}
+            return {}, {}
+        allocation = {a.year: a.asset_allocation for a in result.series.annual_allocations}
+        citations = {a.year: a.citation for a in result.series.annual_allocations}
+        return allocation, citations
 
     def _extract_fund_manager(
         self,
         fund_code: str,
         annual_docs: list[AnnualReportDocument],
         work_dir: Path,
+        fund_name: str = "",
     ) -> FundManagerInfo | None:
-        """从最新年报提取基金经理信息。
+        """从最新年报提取基金经理信息（仅数据，不含 citation）。"""
 
-        参数:
-            fund_code: 基金代码。
-            annual_docs: 年报文档列表。
-            work_dir: 工作目录。
+        result, _ = self._extract_fund_manager_with_citation(fund_code, annual_docs, work_dir, fund_name)
+        return result
+
+    def _extract_fund_manager_with_citation(
+        self,
+        fund_code: str,
+        annual_docs: list[AnnualReportDocument],
+        work_dir: Path,
+        fund_name: str = "",
+    ) -> tuple[FundManagerInfo | None, Citation | None]:
+        """从最新年报提取基金经理信息及 citation。
 
         返回:
-            FundManagerInfo；未找到时返回 None。
+            (FundManagerInfo, Citation)；未找到时返回 (None, None)。
         """
 
         if not annual_docs:
-            return None
+            return None, None
 
         latest_doc = max(annual_docs, key=lambda d: d.year)
         repository = _repository(Path(work_dir))
         try:
             store = repository.load_store(latest_doc.document_id)
         except Exception:
-            return None
+            return None, None
 
         tool_service = FundDocumentToolService({latest_doc.document_id: store})
         doc_id = latest_doc.document_id
@@ -3211,18 +3403,30 @@ class FundReadingService:
         name = ""
         tenure_start = ""
         years_of_service = ""
+        manager_citation = None
         search_results = tool_service.search_document(doc_id, "基金经理")
         for hit in search_results:
             if isinstance(hit, ToolFailure):
                 continue
             if "简介" in (hit.title or "") and hit.section_ref:
+                # 保存 citation
+                manager_citation = Citation(
+                    document_id=doc_id,
+                    fund_code=fund_code,
+                    fund_name=fund_name,
+                    year=latest_doc.year,
+                    report_type="annual_report",
+                    locator=hit.locator if hasattr(hit, "locator") else Locator(
+                        document_id=doc_id,
+                        locator_kind=LocatorKind.SECTION,
+                        section_ref=hit.section_ref,
+                    ),
+                )
                 tables = tool_service.list_tables(doc_id)
                 for t in tables:
                     if hasattr(t, "section_ref") and t.section_ref == hit.section_ref:
                         table = tool_service.read_table(doc_id, t.table_ref, max_rows=5)
                         if hasattr(table, "rows") and len(table.rows) >= 3:
-                            # 表头: row[0]=('姓名','职务','任职日期','','从业年限','说明')
-                            # 数据: row[2]=('张明', '本基金的基金经理...', '2022年8月8日', '-', '13年', '...')
                             data_row = table.rows[2] if len(table.rows) > 2 else table.rows[1]
                             if len(data_row) >= 5:
                                 name = str(data_row[0]).strip()
@@ -3239,7 +3443,6 @@ class FundReadingService:
             if hit.section_ref:
                 section = tool_service.read_section(doc_id, hit.section_ref)
                 if hasattr(section, "text") and len(section.text) > 50:
-                    # 取前500字符
                     investment_strategy = section.text[:500].strip()
                     break
 
@@ -3252,16 +3455,14 @@ class FundReadingService:
                 for row in table.rows:
                     row_str = " ".join(str(cell) for cell in row)
                     if "基金经理持有" in row_str and "开放式基金" in row_str:
-                        # 找到持有区间
                         for cell in row:
                             cell_str = str(cell).strip()
                             if "~" in cell_str or "万份" in cell_str:
                                 holds_fund = cell_str
                                 break
-                        break
 
         if not name:
-            return None
+            return None, manager_citation
 
         return FundManagerInfo(
             name=name,
@@ -3269,15 +3470,18 @@ class FundReadingService:
             years_of_service=years_of_service,
             investment_strategy=investment_strategy,
             holds_fund=holds_fund,
-        )
+        ), manager_citation
 
     def _extract_scale_info(
         self,
         fund_code: str,
         annual_docs: list[AnnualReportDocument],
         work_dir: Path,
-    ) -> ScaleInfo | None:
-        """从年报提取规模信息（从最新年份开始尝试，回退到更早年份）。
+    ) -> tuple[ScaleInfo | None, Citation | None]:
+        """从年报提取规模信息及 citation（从最新年份开始尝试，回退到更早年份）。
+
+        从份额变动表提取份额数，从"主要财务指标"文本提取单位净值，
+        两者相乘估算 AUM。
 
         参数:
             fund_code: 基金代码。
@@ -3285,11 +3489,11 @@ class FundReadingService:
             work_dir: 工作目录。
 
         返回:
-            ScaleInfo；未找到时返回 None。
+            (ScaleInfo, Citation)；未找到时返回 (None, None)。
         """
 
         if not annual_docs:
-            return None
+            return None, None
 
         repository = _repository(Path(work_dir))
         sorted_docs = sorted(annual_docs, key=lambda d: d.year, reverse=True)
@@ -3306,12 +3510,26 @@ class FundReadingService:
             total_shares_a = ""
             total_shares_c = ""
             individual_investor_ratio = ""
+            scale_citation = None
 
             # 搜索份额变动表（§10），包含持有人结构数据
             search_results = tool_service.search_document(doc_id, "开放式基金份额变动")
             for hit in search_results:
                 if isinstance(hit, ToolFailure) or not hit.section_ref:
                     continue
+                if scale_citation is None:
+                    scale_citation = Citation(
+                        document_id=doc_id,
+                        fund_code=fund_code,
+                        fund_name="",
+                        year=doc.year,
+                        report_type="annual_report",
+                        locator=hit.locator if hasattr(hit, "locator") else Locator(
+                            document_id=doc_id,
+                            locator_kind=LocatorKind.SECTION,
+                            section_ref=hit.section_ref,
+                        ),
+                    )
                 tables = tool_service.list_tables(doc_id)
                 for t in tables:
                     if not (hasattr(t, "section_ref") and t.section_ref == hit.section_ref):
@@ -3330,15 +3548,48 @@ class FundReadingService:
                         elif "合计" in row_str:
                             individual_investor_ratio = str(row[4]).strip() if len(row) > 4 else ""
 
-            if total_shares_a or total_shares_c:
-                return ScaleInfo(
-                    total_shares_a=total_shares_a,
-                    total_shares_c=total_shares_c,
-                    individual_investor_ratio=individual_investor_ratio,
-                    management_holds="",
-                )
+            if not (total_shares_a or total_shares_c):
+                continue
 
-        return None
+            # 从"主要财务指标"文本提取单位净值，估算 AUM
+            estimated_aum = ""
+            nav_results = tool_service.search_document(doc_id, "基金份额净值")
+            for hit in nav_results:
+                if isinstance(hit, ToolFailure) or not hit.section_ref:
+                    continue
+                section = tool_service.read_section(doc_id, hit.section_ref)
+                if not hasattr(section, "text"):
+                    continue
+                text = section.text
+                nav_pattern = re.compile(r"(?:混合[AC]|A类|C类).*?基金份额净值\s*(?:为)?\s*([\d.]+)\s*元")
+                nav_matches = nav_pattern.findall(text)
+                shares_list = [total_shares_a, total_shares_c]
+                total_aum = 0.0
+                for i, nav_str in enumerate(nav_matches[:2]):
+                    try:
+                        nav = float(nav_str)
+                        shares = float(shares_list[i]) if i < len(shares_list) and shares_list[i] else 0.0
+                        total_aum += nav * shares
+                    except (ValueError, IndexError):
+                        continue
+                if total_aum > 0:
+                    if total_aum >= 1e8:
+                        estimated_aum = f"{total_aum / 1e8:.2f}亿元"
+                    elif total_aum >= 1e4:
+                        estimated_aum = f"{total_aum / 1e4:.2f}万元"
+                    else:
+                        estimated_aum = f"{total_aum:.2f}元"
+                break
+
+            return ScaleInfo(
+                total_shares_a=total_shares_a,
+                total_shares_c=total_shares_c,
+                individual_investor_ratio=individual_investor_ratio,
+                management_holds="",
+                estimated_aum=estimated_aum,
+            ), scale_citation
+
+        return None, None
 
     def _generate_chapters(
         self,
@@ -3352,6 +3603,7 @@ class FundReadingService:
         allocation: dict[int, tuple[AssetAllocationItem, ...]],
         fund_manager: FundManagerInfo | None = None,
         scale_info: ScaleInfo | None = None,
+        evidence: ChapterEvidence | None = None,
     ) -> list[ReportChapter]:
         """生成 8 章报告内容（模板对齐版）。"""
 
@@ -3372,7 +3624,7 @@ class FundReadingService:
             content = self._generate_template_chapter(
                 chapter_id, fund_code, fund_name, report_year,
                 performance, holdings, allocation, fees,
-                fund_manager, scale_info,
+                fund_manager, scale_info, evidence,
             )
             chapters.append(ReportChapter(
                 chapter_id=chapter_id,
@@ -3500,6 +3752,7 @@ class FundReadingService:
         fees: dict[int, tuple[FeeRateItem, ...]],
         fund_manager: FundManagerInfo | None = None,
         scale_info: ScaleInfo | None = None,
+        evidence: ChapterEvidence | None = None,
     ) -> str:
         """回退用的模板章节生成（模板对齐版）。
 
@@ -3511,6 +3764,7 @@ class FundReadingService:
             performance/holdings/allocation/fees: 多年度数据。
             fund_manager: 基金经理信息。
             scale_info: 规模信息。
+            evidence: 证据来源汇总（可选）。
 
         返回:
             模板生成的 Markdown 文本。
@@ -3518,7 +3772,7 @@ class FundReadingService:
 
         if chapter_id == 0:
             latest = performance.get(report_year, {})
-            return (
+            base_content = (
                 f"## 一眼看懂\n\n"
                 f"- **基金名称**：{fund_name}\n"
                 f"- **基金代码**：{fund_code}\n"
@@ -3536,9 +3790,9 @@ class FundReadingService:
             ]
             if fund_manager:
                 lines.append(f"- 基金经理：{fund_manager.name}（从业{fund_manager.years_of_service}）")
-            return "\n".join(lines) + "\n"
+            base_content = "\n".join(lines) + "\n"
         elif chapter_id == 2:
-            return self._generate_ch2_performance(performance)
+            base_content = self._generate_ch2_performance(performance)
         elif chapter_id == 3:
             lines = ["## 基金经理信息"]
             if fund_manager:
@@ -3550,9 +3804,9 @@ class FundReadingService:
                 ])
             else:
                 lines.append("基金经理信息暂不可用。")
-            return "\n".join(lines) + "\n"
+            base_content = "\n".join(lines) + "\n"
         elif chapter_id == 4:
-            return "## 投资者获得感\n\n投资者实际收益数据暂不可用，详见原始年报。\n"
+            base_content = "## 投资者获得感\n\n投资者实际收益数据暂不可用，详见原始年报。\n"
         elif chapter_id == 5:
             lines = ["## 当前阶段与关键变化"]
             if scale_info:
@@ -3561,17 +3815,24 @@ class FundReadingService:
                     f"- C类份额总数：{scale_info.total_shares_c}",
                     f"- 管理人持有比例：{scale_info.management_holds}",
                 ])
-            return "\n".join(lines) + "\n"
+            base_content = "\n".join(lines) + "\n"
         elif chapter_id == 6:
-            return self._generate_ch7_risks(fund_name)
+            base_content = self._generate_ch7_risks(fund_name)
         elif chapter_id == 7:
             latest = performance.get(report_year, {})
-            return (
+            base_content = (
                 f"## 综合评估\n\n"
                 f"基于 {report_year} 年报数据，该基金最新净值增长率为 {latest.get('nav_growth_rate', 'N/A')}，"
                 f"超额收益为 {latest.get('excess_return', 'N/A')}。详见前6章分析。\n"
             )
-        return ""
+        else:
+            base_content = ""
+
+        # 追加证据来源小节
+        evidence_section = _generate_evidence_section(chapter_id, evidence)
+        if evidence_section:
+            return base_content + "\n" + evidence_section
+        return base_content
 
     def _export_markdown(self, report: FundReport, work_dir: Path) -> str:
         """导出 Markdown 文件。"""

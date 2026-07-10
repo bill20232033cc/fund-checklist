@@ -1381,6 +1381,7 @@ class ReportGenerationCoordinator:
         fees: dict[int, tuple[Any, ...]],
         fund_manager: Any = None,
         scale_info: Any = None,
+        evidence: Any = None,
     ) -> tuple[dict[int, str], list[str]]:
         """生成报告。
 
@@ -1391,6 +1392,7 @@ class ReportGenerationCoordinator:
             performance/holdings/allocation/fees: 多年度数据。
             fund_manager: 基金经理信息。
             scale_info: 规模信息。
+            evidence: 证据来源汇总。
 
         返回:
             (章节内容字典, 警告列表)。
@@ -1412,6 +1414,7 @@ class ReportGenerationCoordinator:
                 fees=fees,
                 fund_manager=fund_manager,
                 scale_info=scale_info,
+                evidence=evidence,
             )
             if content:
                 chapter_contents[chapter_id] = content
@@ -1427,8 +1430,8 @@ class ReportGenerationCoordinator:
         if not all_passed:
             warnings.append("Ch1-6 未全部通过，Ch0+Ch7 使用模板生成")
             # 使用模板生成 Ch0+Ch7
-            chapter_contents[0] = self._generate_template_chapter(0, fund_name, report_year, performance)
-            chapter_contents[7] = self._generate_template_chapter(7, fund_name, report_year, performance)
+            chapter_contents[0] = self._generate_template_chapter(0, fund_name, report_year, performance, evidence)
+            chapter_contents[7] = self._generate_template_chapter(7, fund_name, report_year, performance, evidence)
             return chapter_contents, warnings
 
         # 3. Ch1-6 全部通过，生成 Ch0+Ch7
@@ -1466,6 +1469,7 @@ class ReportGenerationCoordinator:
         fees: dict[int, tuple[Any, ...]],
         fund_manager: Any = None,
         scale_info: Any = None,
+        evidence: Any = None,
         use_chapter_summaries: bool = False,
         chapter_summaries: dict[int, str] | None = None,
     ) -> str | None:
@@ -1492,7 +1496,7 @@ class ReportGenerationCoordinator:
         data_table = _generate_data_table(
             chapter_id, fund_code, fund_name, report_year,
             performance, holdings, allocation, fees,
-            fund_manager, scale_info,
+            fund_manager, scale_info, evidence,
         )
 
         # 生成章节内容（LLM 或模板）
@@ -1746,12 +1750,24 @@ class ReportGenerationCoordinator:
         fund_name: str,
         report_year: int,
         performance: dict[int, dict[str, str]],
+        evidence: Any = None,
     ) -> str:
-        """生成模板章节（fallback）。"""
+        """生成模板章节（fallback）。
+
+        参数:
+            chapter_id: 章节编号。
+            fund_name: 基金名称。
+            report_year: 报告年份。
+            performance: 多年度业绩数据。
+            evidence: 证据来源汇总（可选）。
+
+        返回:
+            模板生成的 Markdown 文本（含证据来源小节）。
+        """
 
         if chapter_id == 0:
             latest = performance.get(report_year, {})
-            return (
+            base_content = (
                 f"## 一眼看懂\n\n"
                 f"- **基金名称**：{fund_name}\n"
                 f"- **报告年份**：{report_year}\n"
@@ -1761,12 +1777,20 @@ class ReportGenerationCoordinator:
             )
         elif chapter_id == 7:
             latest = performance.get(report_year, {})
-            return (
+            base_content = (
                 f"## 综合评估\n\n"
                 f"基于 {report_year} 年报数据，该基金最新净值增长率为 {latest.get('nav_growth_rate', 'N/A')}。"
                 f"详见前6章分析。\n"
             )
-        return ""
+        else:
+            base_content = ""
+
+        # 追加证据来源小节
+        from fund_agent.service.reading_service import _generate_evidence_section
+        evidence_section = _generate_evidence_section(chapter_id, evidence)
+        if evidence_section:
+            return base_content + "\n" + evidence_section
+        return base_content
 
     def get_process_states(self) -> dict[int, ChapterProcessState]:
         """获取所有章节的过程状态。"""

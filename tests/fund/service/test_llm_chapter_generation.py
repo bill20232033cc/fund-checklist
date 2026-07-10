@@ -239,12 +239,13 @@ def test_generate_report_with_llm_uses_data_tables(monkeypatch, tmp_path: Path) 
 
     service = FundReadingService()
 
-    monkeypatch.setattr(service, "_extract_report_holdings", lambda *a, **k: _sample_holdings())
-    monkeypatch.setattr(service, "_extract_report_fees", lambda *a, **k: _sample_fees())
-    monkeypatch.setattr(service, "_extract_report_performance", lambda *a, **k: _sample_performance())
-    monkeypatch.setattr(service, "_extract_report_allocation", lambda *a, **k: _sample_allocation())
+    monkeypatch.setattr(service, "_extract_report_holdings_with_citations", lambda *a, **k: (_sample_holdings(), {}))
+    monkeypatch.setattr(service, "_extract_report_fees_with_citations", lambda *a, **k: (_sample_fees(), {}))
+    monkeypatch.setattr(service, "_extract_report_performance_with_citations", lambda *a, **k: (_sample_performance(), {}))
+    monkeypatch.setattr(service, "_extract_report_allocation_with_citations", lambda *a, **k: (_sample_allocation(), {}))
     monkeypatch.setattr(service, "_extract_fund_manager", lambda *a, **k: None)
-    monkeypatch.setattr(service, "_extract_scale_info", lambda *a, **k: None)
+    monkeypatch.setattr(service, "_extract_fund_manager_with_citation", lambda *a, **k: (None, None))
+    monkeypatch.setattr(service, "_extract_scale_info", lambda *a, **k: (None, None))
 
     result = service.generate_report(
         GenerateReportRequest(
@@ -310,12 +311,13 @@ def test_generate_report_llm_fallback_to_template(monkeypatch, tmp_path: Path) -
 
     service = FundReadingService()
 
-    monkeypatch.setattr(service, "_extract_report_holdings", lambda *a, **k: _sample_holdings())
-    monkeypatch.setattr(service, "_extract_report_fees", lambda *a, **k: _sample_fees())
-    monkeypatch.setattr(service, "_extract_report_performance", lambda *a, **k: _sample_performance())
-    monkeypatch.setattr(service, "_extract_report_allocation", lambda *a, **k: _sample_allocation())
+    monkeypatch.setattr(service, "_extract_report_holdings_with_citations", lambda *a, **k: (_sample_holdings(), {}))
+    monkeypatch.setattr(service, "_extract_report_fees_with_citations", lambda *a, **k: (_sample_fees(), {}))
+    monkeypatch.setattr(service, "_extract_report_performance_with_citations", lambda *a, **k: (_sample_performance(), {}))
+    monkeypatch.setattr(service, "_extract_report_allocation_with_citations", lambda *a, **k: (_sample_allocation(), {}))
     monkeypatch.setattr(service, "_extract_fund_manager", lambda *a, **k: None)
-    monkeypatch.setattr(service, "_extract_scale_info", lambda *a, **k: None)
+    monkeypatch.setattr(service, "_extract_fund_manager_with_citation", lambda *a, **k: (None, None))
+    monkeypatch.setattr(service, "_extract_scale_info", lambda *a, **k: (None, None))
 
     result = service.generate_report(
         GenerateReportRequest(
