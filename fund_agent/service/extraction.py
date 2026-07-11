@@ -545,24 +545,47 @@ def _holdings_overlap_rate(
     holdings_a: tuple[HoldingExtraction, ...],
     holdings_b: tuple[HoldingExtraction, ...],
 ) -> float:
-    """按股票代码交集/并集计算两个年度持仓重叠率。
+    """按加权 Jaccard 计算两个年度持仓重叠率。
+
+    使用占基金资产净值比例作为权重，权重变化会被感知：
+    同一批股票但权重从 30% 调整为 5% 时，重叠率不会是 100%。
+
+    公式：sum(min(w_a, w_b)) / sum(max(w_a, w_b))
+    不在该年度持仓中的股票权重视为 0。
 
     参数:
         holdings_a: 年度 A 的持仓记录。
         holdings_b: 年度 B 的持仓记录。
 
     返回:
-        重叠率（0.0 ~ 1.0）；任一为空时返回 0.0。
+        加权重叠率（0.0 ~ 1.0）；任一为空时返回 0.0。
     """
     if not holdings_a or not holdings_b:
         return 0.0
-    codes_a = {h.stock_code for h in holdings_a if h.stock_code}
-    codes_b = {h.stock_code for h in holdings_b if h.stock_code}
-    if not codes_a or not codes_b:
+
+    def _parse_pct(h: HoldingExtraction) -> float:
+        """解析百分比字符串为 float；无法解析时返回 0.0。"""
+        try:
+            return float(h.percentage.rstrip("%")) if h.percentage else 0.0
+        except (ValueError, AttributeError):
+            return 0.0
+
+    weights_a: dict[str, float] = {}
+    weights_b: dict[str, float] = {}
+    for h in holdings_a:
+        if h.stock_code:
+            weights_a[h.stock_code] = weights_a.get(h.stock_code, 0.0) + _parse_pct(h)
+    for h in holdings_b:
+        if h.stock_code:
+            weights_b[h.stock_code] = weights_b.get(h.stock_code, 0.0) + _parse_pct(h)
+
+    if not weights_a or not weights_b:
         return 0.0
-    intersection = codes_a & codes_b
-    union = codes_a | codes_b
-    return len(intersection) / len(union) if union else 0.0
+
+    all_codes = set(weights_a) | set(weights_b)
+    numerator = sum(min(weights_a.get(c, 0.0), weights_b.get(c, 0.0)) for c in all_codes)
+    denominator = sum(max(weights_a.get(c, 0.0), weights_b.get(c, 0.0)) for c in all_codes)
+    return numerator / denominator if denominator > 0 else 0.0
 
 
 

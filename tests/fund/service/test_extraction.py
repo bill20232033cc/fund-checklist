@@ -3080,3 +3080,50 @@ def test_compute_risk_checklist_red_flags():
     assert any(item.name == "基金经理变更" and item.status == "🔴" for item in result)
     assert any(item.name == "风格漂移" and item.status == "🔴" for item in result)
     assert any(item.name == "费率远超同类" and item.status == "🔴" for item in result)
+
+def test_holdings_overlap_rate_weighted_jaccard():
+    """同一批股票但权重大幅调整时，加权 Jaccard 不返回 1.0。"""
+    # 年度 A：10 只股票各占 10%
+    holdings_a = tuple(
+        HoldingExtraction(rank=i, stock_code=f"00000{i}", stock_name=f"股票{i}",
+                          quantity="100", fair_value="1000", percentage="10.0%")
+        for i in range(1, 11)
+    )
+    # 年度 B：同一批股票，但第一只占 50%，其余各占 5.56%
+    holdings_b = [
+        HoldingExtraction(rank=1, stock_code="000001", stock_name="股票1",
+                          quantity="500", fair_value="5000", percentage="50.0%"),
+    ]
+    for i in range(2, 11):
+        holdings_b.append(
+            HoldingExtraction(rank=i, stock_code=f"00000{i}", stock_name=f"股票{i}",
+                              quantity="50", fair_value="500", percentage="5.56%")
+        )
+    holdings_b = tuple(holdings_b)
+
+    rate = _holdings_overlap_rate(holdings_a, holdings_b)
+    # 加权 Jaccard：分子 = sum(min) ≈ 10*5.56 = 55.6，分母 = sum(max) ≈ 50 + 9*10 = 140
+    # 率 ≈ 0.40，远低于 1.0
+    assert rate < 0.7, f"加权重叠率应 < 0.7，实际 {rate}"
+    assert rate > 0.2, f"加权重叠率应 > 0.2，实际 {rate}"
+
+
+def test_holdings_overlap_rate_identical_weights():
+    """相同比重的相同持仓，加权 Jaccard 返回 1.0。"""
+    holdings = tuple(
+        HoldingExtraction(rank=i, stock_code=f"00000{i}", stock_name=f"股票{i}",
+                          quantity="100", fair_value="1000", percentage="10.0%")
+        for i in range(1, 11)
+    )
+    rate = _holdings_overlap_rate(holdings, holdings)
+    assert rate == 1.0
+
+
+def test_holdings_overlap_rate_no_overlap():
+    """完全不同的持仓，加权 Jaccard 返回 0.0。"""
+    holdings_a = (HoldingExtraction(rank=1, stock_code="000001", stock_name="A",
+                                    quantity="100", fair_value="1000", percentage="10.0%"),)
+    holdings_b = (HoldingExtraction(rank=1, stock_code="600001", stock_name="B",
+                                    quantity="100", fair_value="1000", percentage="10.0%"),)
+    rate = _holdings_overlap_rate(holdings_a, holdings_b)
+    assert rate == 0.0
