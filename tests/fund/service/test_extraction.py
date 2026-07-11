@@ -2892,3 +2892,191 @@ def test_real_pdf_controlled_profiles_apply_disclosure_target_contract(tmp_path:
     assert performance_fields.fields == ()
     assert performance_fields.failure is not None
     assert performance_fields.failure.code is FailureCode.NOT_FOUND
+
+
+# --- Slice 16A: 确定性信号判断 + 风险清单 ---
+
+from fund_agent.service.extraction import (
+    _parse_percent,
+    _parse_aum_yi,
+    _holdings_overlap_rate,
+)
+from fund_agent.service.models import (
+    FeeRateItem,
+    FundManagerInfo,
+    HoldingExtraction,
+    RiskChecklistItem,
+    ScaleInfo,
+    SignalIndicator,
+    SignalJudgment,
+)
+
+
+def test_parse_percent_boundary():
+    """百分比解析边界测试：正常值、不收取、N/A。"""
+    assert _parse_percent("0.60%") == 0.6
+    assert _parse_percent("1.20%") == 1.2
+    assert _parse_percent("不收取") == 0.0
+    assert _parse_percent("免收") == 0.0
+    assert _parse_percent("N/A") is None
+    assert _parse_percent("—") is None
+    assert _parse_percent("") is None
+    assert _parse_percent("  1.50%  ") == 1.5
+
+
+def test_parse_aum_boundary():
+    """规模解析边界测试：亿元、万元、元。"""
+    assert _parse_aum_yi("2.99亿元") == 2.99
+    assert _parse_aum_yi("2,990,000元") == pytest.approx(0.0299, abs=1e-4)
+    assert _parse_aum_yi("5000万元") == pytest.approx(0.5, abs=1e-4)
+    assert _parse_aum_yi("") is None
+    assert _parse_aum_yi("N/A") is None
+
+
+def test_compute_signal_judgment_full_data():
+    """所有指标有数据且表现良好时，输出 🟢。"""
+    service = FundReadingService()
+    # 构造完整数据：2 年正超额、低费率、高重叠率、大规模、未变更、低集中度
+    perf = {
+        2023: {"nav_growth_rate": "10.00%", "benchmark_return_rate": "7.00%", "excess_return": "3.00%"},
+        2024: {"nav_growth_rate": "12.00%", "benchmark_return_rate": "8.00%", "excess_return": "4.00%"},
+    }
+    fees = {
+        2024: (FeeRateItem("基金管理费", "0.60%"), FeeRateItem("基金托管费", "0.15%")),
+    }
+    holdings_2023 = tuple(
+        HoldingExtraction(rank=i, stock_code=f"00000{i}", stock_name=f"股票{i}", quantity="1000", fair_value="10000", percentage="5.0%")
+        for i in range(1, 11)
+    )
+    holdings_2024 = tuple(
+        HoldingExtraction(rank=i, stock_code=f"00000{i}", stock_name=f"股票{i}", quantity="1000", fair_value="10000", percentage="5.0%")
+        for i in range(1, 11)
+    )
+    holdings = {2023: holdings_2023, 2024: holdings_2024}
+    manager = FundManagerInfo("张三", "2020-01-01", "10年", "价值投资", "10~50万份")
+    scale = ScaleInfo("100000000", "50000000", "95%", "", "5.00亿元")
+
+    result = service.compute_signal_judgment(
+        performance=perf, fees=fees, holdings=holdings,
+        fund_manager=manager, scale_info=scale, report_year=2024,
+    )
+
+    assert result.signal == "🟢 值得持有"
+    assert result.normalized_score >= 75
+    assert len(result.indicators) == 6
+    assert result.data_completeness == "6/6"
+    # 所有指标都有正分
+    assert all(ind.score > 0 for ind in result.indicators)
+
+
+def test_compute_signal_judgment_low_score():
+    """低分数据时，输出 🔴。"""
+    service = FundReadingService()
+    # 构造差数据：负超额、高费率、低重叠率、小规模、已变更、高集中度
+    perf = {
+        2023: {"nav_growth_rate": "-5.00%", "benchmark_return_rate": "2.00%", "excess_return": "-7.00%"},
+        2024: {"nav_growth_rate": "-3.00%", "benchmark_return_rate": "1.00%", "excess_return": "-4.00%"},
+    }
+    fees = {
+        2024: (FeeRateItem("基金管理费", "1.50%"), FeeRateItem("基金托管费", "0.30%")),
+    }
+    # 持仓完全不同 → 重叠率 0
+    holdings_2023 = tuple(
+        HoldingExtraction(rank=i, stock_code=f"00000{i}", stock_name=f"股票A{i}", quantity="100", fair_value="1000", percentage="10.0%")
+        for i in range(1, 11)
+    )
+    holdings_2024 = tuple(
+        HoldingExtraction(rank=i, stock_code=f"60000{i}", stock_name=f"股票B{i}", quantity="100", fair_value="1000", percentage="10.0%")
+        for i in range(1, 11)
+    )
+    holdings = {2023: holdings_2023, 2024: holdings_2024}
+    manager = FundManagerInfo("李四", "2024-06-01", "5年", "成长投资", "")
+    scale = ScaleInfo("1000000", "500000", "80%", "", "0.03亿元")
+
+    result = service.compute_signal_judgment(
+        performance=perf, fees=fees, holdings=holdings,
+        fund_manager=manager, scale_info=scale, report_year=2024,
+    )
+
+    assert result.signal == "🔴 建议替换"
+    assert result.normalized_score < 50
+
+
+def test_compute_signal_judgment_insufficient_data():
+    """数据不足（可计算指标 < 3）时，默认 🟡 + warnings。"""
+    service = FundReadingService()
+    # 空数据 → 所有指标 0 分，可计算 0 项
+    result = service.compute_signal_judgment(
+        performance={}, fees={}, holdings={},
+        fund_manager=None, scale_info=None, report_year=2024,
+    )
+
+    assert result.signal == "🟡 需要关注"
+    assert result.normalized_score == 0.0
+    assert result.data_completeness == "0/6"
+    assert len(result.warnings) > 0
+    assert any("数据不足" in w for w in result.warnings)
+
+
+def test_compute_risk_checklist_all_green():
+    """所有指标安全时，全部 🟢。"""
+    service = FundReadingService()
+    fees = {
+        2024: (FeeRateItem("基金管理费", "0.60%"), FeeRateItem("基金托管费", "0.15%")),
+    }
+    holdings_2023 = tuple(
+        HoldingExtraction(rank=i, stock_code=f"00000{i}", stock_name=f"股票{i}", quantity="1000", fair_value="10000", percentage="3.0%")
+        for i in range(1, 11)
+    )
+    holdings_2024 = tuple(
+        HoldingExtraction(rank=i, stock_code=f"00000{i}", stock_name=f"股票{i}", quantity="1000", fair_value="10000", percentage="3.0%")
+        for i in range(1, 11)
+    )
+    holdings = {2023: holdings_2023, 2024: holdings_2024}
+    manager = FundManagerInfo("张三", "2020-01-01", "10年", "价值投资", "10~50万份")
+    scale = ScaleInfo("100000000", "50000000", "95%", "", "5.00亿元")
+
+    result = service.compute_risk_checklist(
+        fees=fees, holdings=holdings,
+        fund_manager=manager, scale_info=scale, report_year=2024,
+    )
+
+    assert len(result) == 6
+    green_count = sum(1 for item in result if item.status == "🟢")
+    # 清盘风险、风格漂移、费率、持仓集中度应为绿；换手率固定绿；经理变更绿
+    assert green_count == 6
+    assert not any(item.status == "🔴" for item in result)
+
+
+def test_compute_risk_checklist_red_flags():
+    """有 🔴 指标时，正确标记。"""
+    service = FundReadingService()
+    fees = {
+        2024: (FeeRateItem("基金管理费", "1.50%"), FeeRateItem("基金托管费", "0.30%")),
+    }
+    # 持仓完全不同 → 重叠率 0
+    holdings_2023 = tuple(
+        HoldingExtraction(rank=i, stock_code=f"00000{i}", stock_name=f"股票A{i}", quantity="100", fair_value="1000", percentage="10.0%")
+        for i in range(1, 11)
+    )
+    holdings_2024 = tuple(
+        HoldingExtraction(rank=i, stock_code=f"60000{i}", stock_name=f"股票B{i}", quantity="100", fair_value="1000", percentage="10.0%")
+        for i in range(1, 11)
+    )
+    holdings = {2023: holdings_2023, 2024: holdings_2024}
+    manager = FundManagerInfo("李四", "2024-06-01", "5年", "成长投资", "")
+    scale = ScaleInfo("1000000", "500000", "80%", "", "0.03亿元")
+
+    result = service.compute_risk_checklist(
+        fees=fees, holdings=holdings,
+        fund_manager=manager, scale_info=scale, report_year=2024,
+    )
+
+    assert len(result) == 6
+    red_items = [item for item in result if item.status == "🔴"]
+    # 清盘风险🔴、经理变更🔴、风格漂移🔴、费率🔴、持仓集中度🔴
+    assert len(red_items) == 5
+    assert any(item.name == "清盘风险" and item.status == "🔴" for item in result)
+    assert any(item.name == "基金经理变更" and item.status == "🔴" for item in result)
+    assert any(item.name == "风格漂移" and item.status == "🔴" for item in result)
+    assert any(item.name == "费率远超同类" and item.status == "🔴" for item in result)

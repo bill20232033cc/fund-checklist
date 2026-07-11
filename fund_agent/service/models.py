@@ -972,3 +972,72 @@ class GenerateReportResult:
     output_path: str | None = None
     warnings: tuple[str, ...] = ()
     failure: ToolFailure | None = None
+
+
+@dataclass(frozen=True)
+class SignalIndicator:
+    """信号判断单项指标评分。
+
+    参数:
+        name: 指标名称（如"超额收益趋势"）。
+        score: 本指标得分。
+        max_score: 本指标满分。
+        detail: 评分说明（如"连续 2+ 年正超额"）。
+
+    返回:
+        不可变指标评分 DTO。
+
+    异常:
+        本模型不执行 I/O，不抛出业务异常。
+    """
+
+    name: str
+    score: int
+    max_score: int
+    detail: str
+
+
+@dataclass(frozen=True)
+class SignalJudgment:
+    """基金综合信号判断结果。
+
+    参数:
+        signal: 三选一信号（🟢 值得持有 / 🟡 需要关注 / 🔴 建议替换）。
+        normalized_score: 归一化总分（0-100）。
+        indicators: 6 项指标评分明细。
+        data_completeness: 数据完整度描述（如"6/6"）。
+        warnings: 数据不足或其他警告。
+
+    返回:
+        不可变信号判断 DTO。
+
+    异常:
+        本模型不执行 I/O，不抛出业务异常。
+    """
+
+    signal: str
+    normalized_score: float
+    indicators: tuple[SignalIndicator, ...]
+    data_completeness: str
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RiskChecklistItem:
+    """风险清单单条检查项。
+
+    参数:
+        name: 风险项名称（如"清盘风险"）。
+        status: 三色状态（🟢 / 🟡 / 🔴）。
+        detail: 状态说明。
+
+    返回:
+        不可变风险检查项 DTO。
+
+    异常:
+        本模型不执行 I/O，不抛出业务异常。
+    """
+
+    name: str
+    status: str
+    detail: str
