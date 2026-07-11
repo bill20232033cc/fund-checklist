@@ -3102,8 +3102,8 @@ def test_holdings_overlap_rate_weighted_jaccard():
     holdings_b = tuple(holdings_b)
 
     rate = _holdings_overlap_rate(holdings_a, holdings_b)
-    # 加权 Jaccard：分子 = sum(min) ≈ 10*5.56 = 55.6，分母 = sum(max) ≈ 50 + 9*10 = 140
-    # 率 ≈ 0.40，远低于 1.0
+    # 加权 Jaccard：分子 = min(10,50) + 9*min(10,5.56) = 10 + 50 ≈ 60，分母 = max(10,50) + 9*max(10,5.56) = 50 + 90 = 140
+    # 率 ≈ 60/140 ≈ 0.43
     assert rate < 0.7, f"加权重叠率应 < 0.7，实际 {rate}"
     assert rate > 0.2, f"加权重叠率应 > 0.2，实际 {rate}"
 
