@@ -2582,7 +2582,7 @@ class FundReadingService:
                 lines = [
                     f"## 综合评估与跟踪建议\n",
                     f"### 信号判断\n",
-                    f"**{sj.signal}**（归一化得分：{sj.normalized_score:.1f}/100，数据完整度：{sj.data_completeness}）\n",
+                    f"**{sj.signal}**（归一化得分：{sj.normalized_score:.1f}/100，数据完整度：{int(sj.data_completeness * 6)}/6）\n",
                     "### 评分详情\n",
                     "| 指标 | 得分 | 满分 | 说明 |",
                     "|------|------|------|------|",

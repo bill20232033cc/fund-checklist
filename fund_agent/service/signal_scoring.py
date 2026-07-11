@@ -51,8 +51,10 @@ def _parse_percent(text: str) -> float | None:
     if not text or not text.strip():
         return None
     text = text.strip()
-    if text.upper() in ("N/A", "—", "-", "暂无数据", "不收取", "免收", "免收管理费", "免收托管费"):
-        return 0.0 if text in ("不收取", "免收", "免收管理费", "免收托管费") else None
+    if "不收取" in text or "免收" in text:
+        return 0.0
+    if text.upper() in ("N/A", "—", "-", "暂无数据"):
+        return None
     m = re.search(r"([\d.]+)\s*%", text)
     if m:
         return float(m.group(1))

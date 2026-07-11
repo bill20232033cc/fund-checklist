@@ -1005,7 +1005,7 @@ class SignalJudgment:
         signal: 三选一信号（🟢 值得持有 / 🟡 需要关注 / 🔴 建议替换）。
         normalized_score: 归一化总分（0-100）。
         indicators: 6 项指标评分明细。
-        data_completeness: 数据完整度描述（如"6/6"）。
+        data_completeness: 数据完整度比例（0.0-1.0，如 1.0 表示 6/6）。
         warnings: 数据不足或其他警告。
 
     返回:
@@ -1018,7 +1018,7 @@ class SignalJudgment:
     signal: str
     normalized_score: float
     indicators: tuple[SignalIndicator, ...]
-    data_completeness: str
+    data_completeness: float
     warnings: tuple[str, ...] = ()
 
 
