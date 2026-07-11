@@ -1,9 +1,9 @@
 # fund-checklist implementation-control
 
 更新时间：2026-07-11
-当前阶段：`TECH_DEBT_SPLIT_EXTRACTION`
+当前阶段：`PHASE_2_16B`
 当前角色：control / CIC-lite controller
-当前目标：技术债——extraction.py 二次拆分（提取共享评分 helper + signal/risk 模块），然后继续 16B。
+当前目标：技术债拆分已完成（signal_scoring.py），继续 16B：Ch6 压力测试表。
 
 ## 开发路线
 
@@ -28,8 +28,8 @@
 - **Slice 18C**：份额变动 + 盈利投资者占比（低优先级）
 
 ### 技术债
-- P1-3：提取共享评分 helper（消除 compute_signal_judgment / compute_risk_checklist 重复逻辑）
-- extraction.py 二次拆分：提取 signal_scoring.py / risk_assessment.py
+- ~~P1-3：提取共享评分 helper~~ ✅ 已完成（signal_scoring.py）
+- ~~extraction.py 二次拆分：提取 signal_scoring.py~~ ✅ 已完成（signal_scoring.py 282行，6个评分helper）
 
 14C 裁决已确认（基于 dayu write_pipeline 设计）：
 - 审计分层：三层递进（程序审计+LLM审计+LLM复核）
@@ -1169,3 +1169,15 @@ Slice 10L targeted: 8 passed
 Slice 10L review: MiMo ACCEPTED
 Slice 10L git diff --check: passed
 ```
+
+## 技术债拆分补充：signal_scoring.py + DS review 修复（2026-07-11）
+
+**commit f03030b**: fix: data_completeness type mismatch and _parse_percent substring match
+
+修复 DS review 指出的 2 个问题：
+1. P0: `models.py` 声明 `data_completeness: str`，但 `extraction.py` 传 `float` → 统一为 `float`，显示用 `int(completeness*6)/6`
+2. P1: `signal_scoring.py` 的 `_parse_percent` 丢失子字符串匹配 → 恢复 `if "不收取" in text or "免收" in text`
+
+**DS review 结论**: ACCEPTED — 两个修复都正确且完整，没有发现遗漏点或回归风险。
+
+测试: 268 passed, 1 skipped, 3 warnings
