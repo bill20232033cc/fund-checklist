@@ -2964,7 +2964,7 @@ def test_compute_signal_judgment_full_data():
     assert result.signal == "🟢 值得持有"
     assert result.normalized_score >= 75
     assert len(result.indicators) == 6
-    assert result.data_completeness == "6/6"
+    assert result.data_completeness == 1.0
     # 所有指标都有正分
     assert all(ind.score > 0 for ind in result.indicators)
 
@@ -3013,7 +3013,7 @@ def test_compute_signal_judgment_insufficient_data():
 
     assert result.signal == "🟡 需要关注"
     assert result.normalized_score == 0.0
-    assert result.data_completeness == "0/6"
+    assert result.data_completeness == 0.0
     assert len(result.warnings) > 0
     assert any("数据不足" in w for w in result.warnings)
 

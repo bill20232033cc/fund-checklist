@@ -94,6 +94,19 @@ from .models import (
 )
 
 from .chapter_generator import LlmChapterGenerator, generate_evidence_section
+from .signal_scoring import (
+    _holdings_overlap_rate,
+    _parse_aum_yi,
+    _parse_percent,
+    score_concentration,
+    score_excess_returns,
+    score_fee_rate,
+    score_manager_change,
+    score_scale_risk,
+    score_style_drift,
+    to_risk_item,
+    to_signal_indicator,
+)
 
 
 HostFactory = Callable[[FundDocumentToolService], MinimalHost]
@@ -488,105 +501,6 @@ class _QueryRouteRun:
 
     agent_result: AgentRunResult
     routing_trace: tuple[QueryRouteAttempt, ...]
-
-
-def _parse_percent(text: str) -> float | None:
-    """解析百分比文本为数值。
-
-    参数:
-        text: 百分比文本，如 "0.60%"、"不收取"、"N/A"、""。
-
-    返回:
-        解析后的数值（0.60% → 0.6）；"不收取" → 0.0；无法解析时返回 None。
-    """
-    if not text or not text.strip():
-        return None
-    text = text.strip()
-    if text in ("N/A", "—", "-"):
-        return None
-    if "不收取" in text or "免收" in text:
-        return 0.0
-    m = re.search(r"([\d.]+)\s*%", text)
-    if m:
-        return float(m.group(1))
-    return None
-
-
-def _parse_aum_yi(text: str) -> float | None:
-    """解析规模文本为亿元数值。
-
-    参数:
-        text: 规模文本，如 "2.99亿元"、"2,990,000元"、""。
-
-    返回:
-        亿元数值；无法解析时返回 None。
-    """
-    if not text or not text.strip():
-        return None
-    text = text.strip().replace(",", "")
-    if text.upper() in ("N/A", "—", "-", "暂无数据"):
-        return None
-    if "亿元" in text:
-        m = re.search(r"([\d.]+)\s*亿元", text)
-        if m:
-            return float(m.group(1))
-    if "万元" in text:
-        m = re.search(r"([\d.]+)\s*万元", text)
-        if m:
-            return float(m.group(1)) / 10000.0
-    if "元" in text:
-        m = re.search(r"([\d.]+)\s*元", text)
-        if m:
-            return float(m.group(1)) / 1e8
-    return None
-
-
-def _holdings_overlap_rate(
-    holdings_a: tuple[HoldingExtraction, ...],
-    holdings_b: tuple[HoldingExtraction, ...],
-) -> float:
-    """按加权 Jaccard 计算两个年度持仓重叠率。
-
-    使用占基金资产净值比例作为权重，权重变化会被感知：
-    同一批股票但权重从 30% 调整为 5% 时，重叠率不会是 100%。
-
-    公式：sum(min(w_a, w_b)) / sum(max(w_a, w_b))
-    不在该年度持仓中的股票权重视为 0。
-
-    参数:
-        holdings_a: 年度 A 的持仓记录。
-        holdings_b: 年度 B 的持仓记录。
-
-    返回:
-        加权重叠率（0.0 ~ 1.0）；任一为空时返回 0.0。
-    """
-    if not holdings_a or not holdings_b:
-        return 0.0
-
-    def _parse_pct(h: HoldingExtraction) -> float:
-        """解析百分比字符串为 float；无法解析时返回 0.0。"""
-        try:
-            return float(h.percentage.rstrip("%")) if h.percentage else 0.0
-        except (ValueError, AttributeError):
-            return 0.0
-
-    weights_a: dict[str, float] = {}
-    weights_b: dict[str, float] = {}
-    for h in holdings_a:
-        if h.stock_code:
-            weights_a[h.stock_code] = weights_a.get(h.stock_code, 0.0) + _parse_pct(h)
-    for h in holdings_b:
-        if h.stock_code:
-            weights_b[h.stock_code] = weights_b.get(h.stock_code, 0.0) + _parse_pct(h)
-
-    if not weights_a or not weights_b:
-        return 0.0
-
-    all_codes = set(weights_a) | set(weights_b)
-    numerator = sum(min(weights_a.get(c, 0.0), weights_b.get(c, 0.0)) for c in all_codes)
-    denominator = sum(max(weights_a.get(c, 0.0), weights_b.get(c, 0.0)) for c in all_codes)
-    return numerator / denominator if denominator > 0 else 0.0
-
 
 
 class FundReadingService:
@@ -2371,164 +2285,38 @@ class FundReadingService:
         """计算确定性信号判断（6 指标评分模型，总分 135 归一化到 100）。
 
         参数:
-            performance: 多年度业绩数据（year → {nav_growth_rate, benchmark_return_rate, excess_return}）。
-            fees: 多年度费率数据（year → FeeRateItem 列表）。
-            holdings: 多年度持仓数据（year → HoldingExtraction 列表）。
+            performance: 多年度业绩数据。
+            fees: 多年度费率数据。
+            holdings: 多年度持仓数据。
             fund_manager: 基金经理信息（可选）。
             scale_info: 规模信息（可选）。
-            report_year: 报告年份，用于判断基金经理任期。
+            report_year: 报告年份。
 
         返回:
             SignalJudgment，包含信号、归一化分数、指标明细和警告。
         """
+        scored = [
+            score_excess_returns(performance),
+            score_fee_rate(fees, report_year),
+            score_style_drift(holdings),
+            score_scale_risk(scale_info),
+            score_manager_change(fund_manager, report_year),
+            score_concentration(holdings),
+        ]
 
-        indicators: list[SignalIndicator] = []
-        warnings: list[str] = []
-        calculable_count = 0
+        indicators = tuple(to_signal_indicator(s) for s in scored)
+        warnings = tuple(
+            f"{s.name}：{s.detail}" for s in scored if not s.calculable
+        )
+        calculable_count = sum(1 for s in scored if s.calculable)
 
-        # --- 指标 1: 超额收益趋势（满分 25） ---
-        excess_years = []
-        for year in sorted(performance.keys()):
-            excess_text = performance[year].get("excess_return", "")
-            val = _parse_percent(excess_text)
-            if val is not None:
-                excess_years.append((year, val))
+        total_score = sum(s.score for s in scored)
+        total_max = sum(s.max_score for s in scored)
+        normalized = round(total_score / total_max * 100) if total_max > 0 else 0
 
-        if len(excess_years) >= 2:
-            calculable_count += 1
-            positive_count = sum(1 for _, v in excess_years if v > 0)
-            negative_count = sum(1 for _, v in excess_years if v < 0)
-            if positive_count >= 2 and negative_count == 0:
-                indicators.append(SignalIndicator("超额收益趋势", 25, 25, "连续 2+ 年正超额"))
-            elif positive_count > 0 and negative_count > 0:
-                indicators.append(SignalIndicator("超额收益趋势", 15, 25, "有正有负"))
-            else:
-                indicators.append(SignalIndicator("超额收益趋势", 5, 25, "连续负超额"))
-        elif len(excess_years) == 1:
-            calculable_count += 1
-            val = excess_years[0][1]
-            if val > 0:
-                indicators.append(SignalIndicator("超额收益趋势", 15, 25, "仅 1 年数据且为正"))
-            else:
-                indicators.append(SignalIndicator("超额收益趋势", 5, 25, "仅 1 年数据且为负"))
-        else:
-            indicators.append(SignalIndicator("超额收益趋势", 0, 25, "无数据"))
-            warnings.append("超额收益趋势：无可用数据")
-
-        # --- 指标 2: 费率水平（满分 25） ---
-        latest_fees = fees.get(report_year) or (fees[max(y for y in fees if y <= report_year)] if fees and any(y <= report_year for y in fees) else None)
-        if latest_fees:
-            total_rate = 0.0
-            has_data = False
-            for fi in latest_fees:
-                parsed = _parse_percent(fi.rate)
-                if parsed is not None:
-                    total_rate += parsed
-                    has_data = True
-            if has_data:
-                calculable_count += 1
-                if total_rate < 1.0:
-                    indicators.append(SignalIndicator("费率水平", 25, 25, f"综合费率 {total_rate:.2f}% < 1.0%"))
-                elif total_rate <= 1.5:
-                    indicators.append(SignalIndicator("费率水平", 15, 25, f"综合费率 {total_rate:.2f}%（1.0-1.5%）"))
-                else:
-                    indicators.append(SignalIndicator("费率水平", 5, 25, f"综合费率 {total_rate:.2f}% > 1.5%"))
-            else:
-                indicators.append(SignalIndicator("费率水平", 0, 25, "费率数据不可解析"))
-                warnings.append("费率水平：费率数据不可解析")
-        else:
-            indicators.append(SignalIndicator("费率水平", 0, 25, "无数据"))
-            warnings.append("费率水平：无可用数据")
-
-        # --- 指标 3: 风格漂移（满分 25，基于多年度持仓重叠率） ---
-        sorted_years = sorted(holdings.keys())
-        overlap_rates: list[float] = []
-        for i in range(len(sorted_years) - 1):
-            y_a, y_b = sorted_years[i], sorted_years[i + 1]
-            rate = _holdings_overlap_rate(holdings[y_a], holdings[y_b])
-            overlap_rates.append(rate)
-
-        if len(overlap_rates) >= 1:
-            calculable_count += 1
-            avg_overlap = sum(overlap_rates) / len(overlap_rates)
-            if avg_overlap > 0.70:
-                indicators.append(SignalIndicator("风格漂移", 25, 25, f"持仓重叠率 {avg_overlap:.0%} > 70%，风格稳定"))
-            elif avg_overlap >= 0.50:
-                indicators.append(SignalIndicator("风格漂移", 15, 25, f"持仓重叠率 {avg_overlap:.0%}（50-70%）"))
-            else:
-                indicators.append(SignalIndicator("风格漂移", 5, 25, f"持仓重叠率 {avg_overlap:.0%} < 50%，风格漂移"))
-        else:
-            indicators.append(SignalIndicator("风格漂移", 0, 25, "不足 2 年持仓数据"))
-            warnings.append("风格漂移：不足 2 年持仓数据")
-
-        # --- 指标 4: 规模风险（满分 25） ---
-        if scale_info and scale_info.estimated_aum:
-            aum_yi = _parse_aum_yi(scale_info.estimated_aum)
-            if aum_yi is not None:
-                calculable_count += 1
-                if aum_yi > 2.0:
-                    indicators.append(SignalIndicator("规模风险", 25, 25, f"规模 {aum_yi:.2f} 亿 > 2 亿"))
-                elif aum_yi >= 0.5:
-                    indicators.append(SignalIndicator("规模风险", 15, 25, f"规模 {aum_yi:.2f} 亿（0.5-2 亿）"))
-                else:
-                    indicators.append(SignalIndicator("规模风险", 0, 25, f"规模 {aum_yi:.2f} 亿 < 5000 万"))
-            else:
-                indicators.append(SignalIndicator("规模风险", 0, 25, "规模数据不可解析"))
-                warnings.append("规模风险：规模数据不可解析")
-        else:
-            indicators.append(SignalIndicator("规模风险", 0, 25, "无数据"))
-            warnings.append("规模风险：无可用数据")
-
-        # --- 指标 5: 基金经理变更（满分 20） ---
-        if fund_manager and fund_manager.tenure_start:
-            calculable_count += 1
-            year_match = re.search(r"(\d{4})", fund_manager.tenure_start)
-            if year_match:
-                tenure_year = int(year_match.group(1))
-                if tenure_year < report_year:
-                    indicators.append(SignalIndicator("基金经理变更", 20, 20, f"任职 {tenure_year} 年 < 报告年份 {report_year}，未变更"))
-                else:
-                    indicators.append(SignalIndicator("基金经理变更", 0, 20, f"任职 {tenure_year} 年 >= 报告年份 {report_year}，已变更"))
-            else:
-                indicators.append(SignalIndicator("基金经理变更", 0, 20, "任职日期不可解析"))
-                warnings.append("基金经理变更：任职日期不可解析")
-        else:
-            indicators.append(SignalIndicator("基金经理变更", 0, 20, "无数据"))
-            warnings.append("基金经理变更：无可用数据")
-
-        # --- 指标 6: 持仓集中度（满分 15） ---
-        latest_holdings_year = max(holdings.keys()) if holdings else None
-        if latest_holdings_year is not None and holdings[latest_holdings_year]:
-            calculable_count += 1
-            top10 = holdings[latest_holdings_year][:10]
-            total_pct = 0.0
-            for h in top10:
-                pct_val = _parse_percent(h.percentage)
-                if pct_val is not None:
-                    total_pct += pct_val
-            if total_pct > 0:
-                if total_pct < 50.0:
-                    indicators.append(SignalIndicator("持仓集中度", 15, 15, f"前 10 占比 {total_pct:.1f}% < 50%"))
-                elif total_pct <= 70.0:
-                    indicators.append(SignalIndicator("持仓集中度", 10, 15, f"前 10 占比 {total_pct:.1f}%（50-70%）"))
-                else:
-                    indicators.append(SignalIndicator("持仓集中度", 5, 15, f"前 10 占比 {total_pct:.1f}% > 70%"))
-            else:
-                indicators.append(SignalIndicator("持仓集中度", 0, 15, "持仓占比数据不可解析"))
-                warnings.append("持仓集中度：持仓占比数据不可解析")
-        else:
-            indicators.append(SignalIndicator("持仓集中度", 0, 15, "无数据"))
-            warnings.append("持仓集中度：无可用数据")
-
-        # --- 汇总 ---
-        total_score = sum(ind.score for ind in indicators)
-        total_max = sum(ind.max_score for ind in indicators)
-        normalized = (total_score / total_max * 100) if total_max > 0 else 0.0
-
-        # 数据不足检查
         if calculable_count < 3:
             signal = "🟡 需要关注"
-            warnings.insert(0, f"数据不足（可计算指标 {calculable_count}/6 < 3），默认 🟡 需要关注")
+            warnings = (f"数据不足（可计算指标 {calculable_count}/6 < 3），默认 🟡 需要关注",) + warnings
         elif normalized >= 75:
             signal = "🟢 值得持有"
         elif normalized >= 50:
@@ -2538,10 +2326,10 @@ class FundReadingService:
 
         return SignalJudgment(
             signal=signal,
-            normalized_score=round(normalized, 1),
-            indicators=tuple(indicators),
-            data_completeness=f"{calculable_count}/6",
-            warnings=tuple(warnings),
+            normalized_score=normalized,
+            indicators=indicators,
+            data_completeness=calculable_count / 6,
+            warnings=warnings,
         )
 
     def compute_risk_checklist(
@@ -2565,103 +2353,26 @@ class FundReadingService:
         返回:
             6 项 RiskChecklistItem 的 tuple。
         """
+        scored = [
+            score_scale_risk(scale_info),
+            score_manager_change(fund_manager, report_year),
+            score_style_drift(holdings),
+            score_fee_rate(fees, report_year),
+            # 换手率暂不可用，固定绿
+            None,
+            score_concentration(holdings),
+        ]
+        risk_names = ["清盘风险", "基金经理变更", "风格漂移", "费率远超同类", "换手率异常", "持仓过度集中"]
 
-        items: list[RiskChecklistItem] = []
-
-        # 1. 清盘风险
-        if scale_info and scale_info.estimated_aum:
-            aum_yi = _parse_aum_yi(scale_info.estimated_aum)
-            if aum_yi is not None:
-                if aum_yi > 2.0:
-                    items.append(RiskChecklistItem("清盘风险", "🟢", f"规模 {aum_yi:.2f} 亿 > 2 亿"))
-                elif aum_yi >= 0.5:
-                    items.append(RiskChecklistItem("清盘风险", "🟡", f"规模 {aum_yi:.2f} 亿（0.5-2 亿）"))
-                else:
-                    items.append(RiskChecklistItem("清盘风险", "🔴", f"规模 {aum_yi:.2f} 亿 < 5000 万"))
+        items = []
+        for s, name in zip(scored, risk_names):
+            if s is None:
+                items.append(RiskChecklistItem(name, "🟢", "数据暂不可用"))
             else:
-                items.append(RiskChecklistItem("清盘风险", "🟡", "规模数据不可解析"))
-        else:
-            items.append(RiskChecklistItem("清盘风险", "🟡", "无规模数据"))
-
-        # 2. 基金经理变更
-        if fund_manager and fund_manager.tenure_start:
-            year_match = re.search(r"(\d{4})", fund_manager.tenure_start)
-            if year_match:
-                tenure_year = int(year_match.group(1))
-                if tenure_year < report_year:
-                    items.append(RiskChecklistItem("基金经理变更", "🟢", f"任职 {tenure_year} 年 < 报告年份，未变更"))
-                else:
-                    items.append(RiskChecklistItem("基金经理变更", "🔴", f"任职 {tenure_year} 年 >= 报告年份，已变更"))
-            else:
-                items.append(RiskChecklistItem("基金经理变更", "🟡", "任职日期不可解析"))
-        else:
-            items.append(RiskChecklistItem("基金经理变更", "🟡", "无基金经理数据"))
-
-        # 3. 风格漂移
-        sorted_years = sorted(holdings.keys())
-        overlap_rates: list[float] = []
-        for i in range(len(sorted_years) - 1):
-            y_a, y_b = sorted_years[i], sorted_years[i + 1]
-            rate = _holdings_overlap_rate(holdings[y_a], holdings[y_b])
-            overlap_rates.append(rate)
-        if overlap_rates:
-            avg_overlap = sum(overlap_rates) / len(overlap_rates)
-            if avg_overlap > 0.70:
-                items.append(RiskChecklistItem("风格漂移", "🟢", f"重叠率 {avg_overlap:.0%} > 70%，风格稳定"))
-            elif avg_overlap >= 0.50:
-                items.append(RiskChecklistItem("风格漂移", "🟡", f"重叠率 {avg_overlap:.0%}（50-70%）"))
-            else:
-                items.append(RiskChecklistItem("风格漂移", "🔴", f"重叠率 {avg_overlap:.0%} < 50%，风格漂移"))
-        else:
-            items.append(RiskChecklistItem("风格漂移", "🟡", "不足 2 年持仓数据"))
-
-        # 4. 费率远超同类
-        latest_fees = fees.get(report_year) or (fees[max(y for y in fees if y <= report_year)] if fees and any(y <= report_year for y in fees) else None)
-        if latest_fees:
-            total_rate = 0.0
-            has_data = False
-            for fi in latest_fees:
-                parsed = _parse_percent(fi.rate)
-                if parsed is not None:
-                    total_rate += parsed
-                    has_data = True
-            if has_data:
-                if total_rate < 1.0:
-                    items.append(RiskChecklistItem("费率远超同类", "🟢", f"综合费率 {total_rate:.2f}% < 1.0%"))
-                elif total_rate <= 1.5:
-                    items.append(RiskChecklistItem("费率远超同类", "🟡", f"综合费率 {total_rate:.2f}%（1.0-1.5%）"))
-                else:
-                    items.append(RiskChecklistItem("费率远超同类", "🔴", f"综合费率 {total_rate:.2f}% > 1.5%"))
-            else:
-                items.append(RiskChecklistItem("费率远超同类", "🟡", "费率数据不可解析"))
-        else:
-            items.append(RiskChecklistItem("费率远超同类", "🟡", "无费率数据"))
-
-        # 5. 换手率异常（数据暂不可用）
-        items.append(RiskChecklistItem("换手率异常", "🟢", "数据暂不可用"))
-
-        # 6. 持仓过度集中
-        latest_holdings_year = max(holdings.keys()) if holdings else None
-        if latest_holdings_year is not None and holdings[latest_holdings_year]:
-            top10 = holdings[latest_holdings_year][:10]
-            total_pct = 0.0
-            for h in top10:
-                pct_val = _parse_percent(h.percentage)
-                if pct_val is not None:
-                    total_pct += pct_val
-            if total_pct > 0:
-                if total_pct < 50.0:
-                    items.append(RiskChecklistItem("持仓过度集中", "🟢", f"前 10 占比 {total_pct:.1f}% < 50%"))
-                elif total_pct <= 70.0:
-                    items.append(RiskChecklistItem("持仓过度集中", "🟡", f"前 10 占比 {total_pct:.1f}%（50-70%）"))
-                else:
-                    items.append(RiskChecklistItem("持仓过度集中", "🔴", f"前 10 占比 {total_pct:.1f}% > 70%"))
-            else:
-                items.append(RiskChecklistItem("持仓过度集中", "🟡", "持仓占比数据不可解析"))
-        else:
-            items.append(RiskChecklistItem("持仓过度集中", "🟡", "无持仓数据"))
+                items.append(to_risk_item(s, risk_name=name))
 
         return tuple(items)
+
 
     def _generate_chapters_with_llm(
         self,
