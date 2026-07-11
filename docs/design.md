@@ -1220,11 +1220,11 @@ Post-MVP 16A 裁决为 Ch7 确定性信号判断 + Ch6 风险清单表：
 ### Phase 1：稳定化
 
 - **Slice 15A**：提交遗留 + 清理 smoke work-dirs + full regression。目标：main 干净可复现。
-- **Slice 15B**：拆分 （5533 行 →  +  + ）。目标：单一职责，后续 slice 维护成本可控。
+- **Slice 15B**：拆分 reading_service.py（5533 行 → models + chapter_generator + extraction）。✅ 已完成。
 
 ### Phase 2：Ch7 结构化信号 + 模板区块补齐
 
-- **Slice 16A**：Ch7 确定性信号判断 + Ch6 风险清单表。评分模型（6 指标）→ 三选一信号 + 双向论证 + 验证计划 + 阈值。Ch6 风险清单 6 项 🟢🟡🔴。
+- **Slice 16A**：Ch7 确定性信号判断 + Ch6 风险清单表。✅ 已完成。含加权 Jaccard 风格漂移检测。
 - **Slice 16B**：Ch6 压力测试表。按基金类型选阈值，从年报取规模/净值数据填充。
 - **Slice 16C**：Ch0 升级/降级阈值事件 + 一句话产品定义。从 Ch7 信号反推 Ch0 封面。
 
@@ -1234,9 +1234,14 @@ Post-MVP 16A 裁决为 Ch7 确定性信号判断 + Ch6 风险清单表：
 - **Slice 17B**：citation 验证工具（给定 citation locator → 定位年报原文 → 返回上下文片段）。
 - **Slice 17C**： CLI 端到端 smoke（真实 PDF → 完整报告 → 审计产物落盘 → exit code 验证）。
 
-### Phase 4：分析能力扩展
+### Phase 4：分析能力扩展（低优先级）
 
-- **Slice 18A**：风格漂移检测（多年度持仓重叠率 → 风格稳定性信号）。
-- **Slice 18B**：换手率追踪（年报 §8 换手率 → 多年度趋势）。
-- **Slice 18C**：份额变动 + 盈利投资者占比（年报 §10 + 2026 新规字段）。
-- **Slice 18D**：费率影响估算（管理费+托管费+销售服务费 → 年度持有成本估算）。
+- ~~**Slice 18A**：风格漂移检测~~ → 已在 16A 加权 Jaccard 实现，删除。
+- ~~**Slice 18D**：费率影响估算~~ → 已在 16A 费率评分覆盖，合并删除。
+- **Slice 18B**：换手率追踪（年报 §8 换手率 → 多年度趋势）。低优先级。
+- **Slice 18C**：份额变动 + 盈利投资者占比（年报 §10 + 2026 新规字段）。低优先级。
+
+### 技术债
+
+- **P1-3**：提取 compute_signal_judgment / compute_risk_checklist 共享评分 helper。
+- **extraction.py 二次拆分**：当前 4634 行，提取 signal_scoring.py / risk_assessment.py。

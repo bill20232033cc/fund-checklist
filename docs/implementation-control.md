@@ -1,9 +1,9 @@
 # fund-checklist implementation-control
 
 更新时间：2026-07-11
-当前阶段：`PHASE2_SLICE_16A_CH7_SIGNAL`
+当前阶段：`TECH_DEBT_SPLIT_EXTRACTION`
 当前角色：control / CIC-lite controller
-当前目标：Phase 2 Slice 16A——Ch7 确定性信号判断 + Ch6 风险清单表。
+当前目标：技术债——extraction.py 二次拆分（提取共享评分 helper + signal/risk 模块），然后继续 16B。
 
 ## 开发路线
 
@@ -12,7 +12,7 @@
 - **Slice 15B**：拆分 reading_service.py（extraction_service / chapter_generator / evidence_builder）
 
 ### Phase 2：Ch7 结构化判断 + 模板区块补齐
-- **Slice 16A**：Ch7 确定性信号判断 + Ch6 风险清单表（评分模型 6 指标 → 三选一信号 + 双向论证 + 验证计划 + 阈值；Ch6 风险 6 项 🟢🟡🔴）
+- **Slice 16A**：Ch7 确定性信号判断 + Ch6 风险清单表 ✅ 已完成（含加权 Jaccard）
 - **Slice 16B**：Ch6 压力测试表（按基金类型分 3 档跌幅 × 3 场景）
 - **Slice 16C**：Ch0 升级/降级阈值事件 + 一句话产品定义
 
@@ -21,11 +21,15 @@
 - **Slice 17B**：citation 验证工具
 - **Slice 17C**：generate CLI 端到端 smoke
 
-### Phase 4：分析能力扩展
-- **Slice 18A**：风格漂移检测（多年度持仓重叠率）
-- **Slice 18B**：换手率追踪
-- **Slice 18C**：份额变动 + 盈利投资者占比
-- **Slice 18D**：费率影响估算
+### Phase 4：分析能力扩展（低优先级）
+- ~~Slice 18A~~：已在 16A 实现，删除
+- ~~Slice 18D~~：已在 16A 覆盖，删除
+- **Slice 18B**：换手率追踪（低优先级）
+- **Slice 18C**：份额变动 + 盈利投资者占比（低优先级）
+
+### 技术债
+- P1-3：提取共享评分 helper（消除 compute_signal_judgment / compute_risk_checklist 重复逻辑）
+- extraction.py 二次拆分：提取 signal_scoring.py / risk_assessment.py
 
 14C 裁决已确认（基于 dayu write_pipeline 设计）：
 - 审计分层：三层递进（程序审计+LLM审计+LLM复核）
@@ -584,6 +588,20 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - 禁止用文档更新代替可运行代码。
 - 没有 diff，不算实现；没有测试命令和输出，不算完成；没有 review agent 独立检查，不算 accepted。
 
+
+## 最近完成
+
+- 8 commits 已推送至 origin/main（20e62ab）
+- Slice 15A：Ch7 裁决 + 开发路线 + git 清理
+- Slice 15B：reading_service.py → models + chapter_generator + extraction（3 模块）
+- Slice 16A：Ch7 确定性信号 + Ch6 风险清单 + 加权 Jaccard
+- Full regression: 268 passed, 1 skipped, 3 warnings
+
+## 裁决记录
+
+- 裁决 1：先推送后开发 ✅（8 commits 已 push）
+- 裁决 2：Phase 4 优先级调整——删除 18A/18D，保留 18B/18C 低优先级
+- 裁决 3：先拆分后开发——提取共享 helper + 二次拆分 extraction.py
 
 ## Slice 16A 实施规格
 
