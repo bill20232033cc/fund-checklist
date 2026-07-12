@@ -505,12 +505,40 @@ Slice 6 非目标：
 | `integrity_error` | PDF Content-Type、文件头或写入内容完整性失败 | fail-closed |
 | `docling_convert_failed` | PDF 到 Docling JSON 转换失败 | fail-closed |
 | `parser_health_failed` | Docling JSON 无可用章节/表格/文本定位 | fail-closed |
+| `llm_malformed_response` | 真实 LLM adapter response 结构不可解析 | fail-closed |
 
 新增实现约束：
 
 - fallback 必须由失败分类显式驱动。
 - 不得用 fallback 掩盖 `schema_drift`、`identity_mismatch`、`integrity_error`。
 - parser health 至少验证：存在可读文本、章节或可替代章节索引、表格索引可安全为空但不能破坏章节读取。
+
+## 6.5 审计管道架构概述
+
+审计管道采用三层递进架构：
+
+1. **程序审计（权重 30%）**：确定性规则检查，覆盖结构化字段完整性、数据一致性、格式合规。
+2. **LLM 审计（权重 70%）**：定性分析检查，覆盖论述逻辑、证据引用、结论合理性。
+3. **LLM 复核**：对修复后报告进行最终复核。
+
+违规分类覆盖 4 类 22 项：
+
+- **P1–P4**：程序性违规（Programmatic）—— 数据缺失、字段格式错误、计算错误、引用断裂
+- **E1–E5**：证据性违规（Evidential）—— 无 citation、citation 不匹配、证据不充分、数据源错误、引用过期
+- **S1–S7**：结构性违规（Structural）—— 章节缺失、章节顺序错误、标题不匹配、表格缺失、表格格式错误、段落重复、内容越界
+- **C1–C6**：内容性违规（Content）—— 事实错误、论述矛盾、逻辑跳跃、过度推断、遗漏关键信息、表述模糊
+
+评分与修复阈值：
+
+- **≥80 分**：通过，报告可交付
+- **50–79 分**：PATCH，程序性修复后重新审计
+- **<50 分**：REGENERATE，重新生成报告
+
+修复策略（每种最多 3 次）：
+
+- **PATCH**：针对性修复单项违规，不重新生成整章
+- **REGENERATE**：重新生成整章报告
+- **NONE**：标记为已知限制，不修复
 
 ## 7. dayu 可迁移部分
 
@@ -1147,72 +1175,7 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## 9. 已关闭裁决项
 
-MVP plan 已关闭。当前已完成到 Post-MVP Slice 10L；Slice 9F 因 keyword-level routing 无法证明 disclosure target success 被判定为 `BLOCKED_BY_DESIGN`；Slice 10A 已实现 Controlled disclosure target contract 并经 MiMo review `ACCEPTED`；Slice 10B 已实现 fee_rates reading locator 并经 MiMo review `ACCEPTED`；Slice 10C 已实现 fee_rates value extraction contract 并经 MiMo review `ACCEPTED`；Slice 11A 已实现 performance disclosure locator 并经 MiMo review `ACCEPTED`；Slice 11B 已实现 disclosure locator contract registry 并经 MiMo review `ACCEPTED`；Slice 10D 已实现 performance return fields extraction contract 并经 MiMo review `ACCEPTED`；Slice 10E 裁决年度业绩 deterministic source 选择 title-family matched performance comparison table；Slice 10F 已实现 annual performance table extraction 并经 MiMo review `ACCEPTED`；Slice 10G 已实现 annual excess return disclosed-field extraction 并经 MiMo review `ACCEPTED`；Slice 10H 已完成 multi-year annual performance source contract with bounded year coverage 并经 MiMo review `ACCEPTED`；Slice 10I 已实现 multi-year annual performance aggregation service 并经 MiMo review `ACCEPTED`；Slice 10J 已完成 docs-only multi-year performance service-to-agent exposure contract；Slice 10K 已实现 multi-year performance fake/injected Agent tool-loop 并经 ds review `ACCEPTED`；Slice 10L 已实现 multi-year performance CLI integration 并经 MiMo review `ACCEPTED`。
-
-Post-MVP 10L 裁决为 multi-year performance CLI integration：
-- 新增独立子命令 `fund-checklist multi-year`，不扩展现有 `read` 子命令。
-- catalog 模式：CLI 按 `fund_code` + `requested_years` 从已有 catalog 中查找已导入年报的 `document_id`；不做目录扫描、不做自动导入。
-- 给 `FilesystemReportRepository` 新增 `list_reports()` 方法，返回 catalog 中所有 completed report 的安全摘要。
-- 输出格式为 JSON：完整 `MultiYearAnnualPerformanceSeries` DTO dump。
-- `coverage_status=partial` exit code 为 0；少于 3 年匹配 exit code 为 2。
-- 暂不新增 `--share-class` CLI 参数；批量 PDF 导入另开 10M slice。
-- allowed write set：`fund_agent/cli/main.py`、`fund_agent/fund/document_tools/persistent_repository.py`、测试文件、`docs/implementation-control.md`、`docs/design.md`。
-
-Post-MVP 10M 裁决为 batch PDF import：
-- 新增独立子命令 `fund-checklist import`，不扩展 `read` 子命令。
-- 目录扫描：`--pdf-dir` 指定 PDF 目录，`--fund-code` 和 `--fund-name` 用户指定（共用），`--year-range 2020-2024` 指定年份范围。
-- 年份识别：从 PDF 文件名提取年份并过滤匹配 year-range 的文件；不使用 LLM 内容提取。
-- 重复处理：覆盖已有 catalog 条目，重新执行 Docling conversion。
-- 单文件失败：跳过继续，最终报告失败列表。
-- 输出：逐条进度 + 最终汇总（成功/跳过/失败）。
-- 复用现有 `FundReadingService.import_local_report()`，不新增 Service 方法。
-- allowed write set：`fund_agent/cli/main.py`、测试文件、`docs/implementation-control.md`、`docs/design.md`。
-
-Post-MVP 11C 裁决为 holdings multi-year tracking：
-- 新增独立子命令 `fund-checklist holdings`，不扩展 `read` 或 `multi-year` 子命令。
-- 目标披露表固定为前十大持仓表：`期末按公允价值占基金资产净值比例大小排序的所有股票投资明细`。
-- 抽取字段为完整字段：股票代码、股票名称、数量（股）、公允价值（元）、占基金资产净值比例（%）。
-- 多年度对比形态为年度列表：每年返回 Top 10 持仓，用户自行对比；不做股票追踪。
-- Top N 固定为 10；输出格式为 JSON；暂不新增 `--share-class` 参数。
-- 实现路径为新增 Service 方法，内部复用 Host/Agent 查询持仓表。
-- 失败语义：某年持仓表未找到时跳过继续，最终报告 missing_years。
-- allowed write set：`fund_agent/cli/main.py`、`fund_agent/service/reading_service.py`、测试文件、`docs/implementation-control.md`、`docs/design.md`。
-
-Post-MVP 14C 裁决为 chapter audit pipeline（详见 `docs/reviews/14c-review-concise.md`）。
-- 审计分层：三层递进（程序审计+LLM审计+LLM复核）。
-- 违规分类：4类22项（P1-P4/E1-E5/S1-S7/C1-C6）。
-- 评分权重：程序审计30% + LLM审计70%。
-- 阈值：>=80分通过，50-79分需PATCH，<50分需REGENERATE。
-- 修复策略：PATCH/REGENERATE/NONE三策略，各最多3次。
-- Ch0/Ch7：Ch1-6全部通过后生成。
-- 审计产物落盘：phase_audit.json、phase_repair.json。
-
-Post-MVP 15A 裁决为 Ch7 口径裁决：
-- Ch7 保留模板原文三选一判断：🟢 值得持有 / 🟡 需要关注 / 🔴 建议替换。
-- AGENTS.md 禁的是"买入""卖出"等直接交易动作指令；"值得持有/需要关注/建议替换"是结构化信号评估，不是交易信号，不违反禁令。
-- Ch7 必须包含：最终判断、支撑依据（引用前 6 章数据）、最容易看错的地方、最小验证计划、升级/降级阈值。
-- Ch7 双向论证必须包含"为什么不选更积极的判断"和"为什么不选更保守的判断"。
-- Ch7 禁止预测未来收益或市场走势。
-- Ch7 禁止超出公开披露信息的因果推断。
-- Ch7 禁止基金经理动机猜测。
-- 免责声明使用模板原文（`docs/fund-analysis-template-draft.md` 第 3 行），不简化或改写。
-
-
-Post-MVP 16A 裁决为 Ch7 确定性信号判断 + Ch6 风险清单表：
-- 信号判断使用确定性评分规则，不依赖 LLM。
-- 评分模型（总分 135，归一化到 100）：
-  - 超额收益趋势（高权重）：连续正超额 → 25；波动 → 15；转负 → 5
-  - 费率水平（高权重）：管理+托管+销售服务 <1.0% → 25；1.0-1.5% → 15；>1.5% → 5
-  - 风格漂移（高权重）：年度持仓重叠率 >70% → 25；50-70% → 15；<50% → 5
-  - 规模风险（高权重）：>2 亿 → 25；5000 万-2 亿 → 15；<5000 万 → 0
-  - 基金经理变更（高权重）：未变更 → 20；已变更 → 0
-  - 持仓集中度（中权重）：前 10 占比 <50% → 15；50-70% → 10；>70% → 5
-- 信号映射：≥75 → 🟢 值得持有；50-74 → 🟡 需要关注；<50 → 🔴 建议替换
-- 数据不足（可计算指标 <60%）→ 默认 🟡 需要关注 + warnings 说明缺失项
-- LLM 只负责定性分析文本（"为什么不选更积极/更保守"等叙事），不参与信号判断
-- 16A scope 同时包含 Ch6 风险清单表（清盘风险/经理变更/风格漂移/费率/换手率/集中度 6 项 🟢🟡🔴）
-- Ch6 压力测试表留 16B
-- allowed write set：`fund_agent/service/models.py`、`fund_agent/service/extraction.py`、`fund_agent/service/chapter_generator.py`、`tests/fund/service/test_extraction.py`、`tests/fund/service/test_llm_chapter_generation.py`、`docs/implementation-control.md`、`docs/design.md`
+详细裁决记录见 docs/implementation-control.md。
 
 ## 10. 开发路线
 

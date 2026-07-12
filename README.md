@@ -1,14 +1,18 @@
 # fund-checklist
 
-基金年报阅读工具层。
+基金分析助手。
 
 当前成功路径：
 
 ```text
-local PDF
- -> Docling conversion/store
+PDF
+ -> Docling conversion
  -> FundDocumentToolService reading tools
- -> MinimalHost / deterministic Agent loop
+ -> 结构化字段抽取
+ -> 多年度聚合
+ -> 信号评分
+ -> 报告生成
+ -> 审计管道
 ```
 
 已实现能力：
@@ -28,6 +32,11 @@ local PDF
 - 本地 persistent repository：completed report 写入 filesystem JSON catalog，后续同 `document_id` 可恢复并复用。
 - 受控 query profile routing：`holdings_top10`、`asset_allocation`、`fee_rates`、`performance_returns`。
 - 多年度业绩聚合与持仓追踪。
+- 结构化字段抽取（费率、业绩、持仓、资产配置）。
+- 确定性信号评分（6 指标）。
+- 8 章分析报告生成。
+- 三层审计管道（程序 + LLM + 复核，4 类 22 项）。
+- CLI 9 个子命令（read / multi-year / import / holdings / allocation / fees / audit / deep-audit / generate）。
 
 安装命令：
 
@@ -76,10 +85,9 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 非目标：
 
-- 不接真实 LLM。
 - 不实现 UI。
 - 不实现 downloader 或 batch queue。
-- 不做字段抽取、自动报告或投资判断。
+- 不做投资判断。
 - 不声明 release ready。
 
 本地样本 PDF、`.fund_checklist/` 工作目录、Docling/model cache、虚拟环境和测试 cache 不纳入 git。
