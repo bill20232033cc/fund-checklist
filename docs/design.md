@@ -136,8 +136,8 @@ report / judgment contract
 
 ### 2.2 非目标
 
-- 不做字段抽取。
-- 不做自动报告生成。
+- 不做超出已裁决 slice 范围的字段抽取。
+- 不做未经裁决的自动报告生成。
 - 不做投资判断。
 - 不做报告渲染。
 - 不做最终投资结论。
@@ -572,12 +572,15 @@ Slice 6 非目标：
 
 ### 8.2 Runtime 范围
 
-当前同时覆盖两条验证路径：
+当前覆盖以下验证路径：
 
-- `FundDocumentToolService` 离线工具验证。
-- 最小 Host / Agent tool loop 内化验证。
-
-其中离线工具验证用于证明 Fund 文档边界和工具契约；最小 Host / Agent tool loop 用于证明阅读工具能被 Agent 路径稳定调用。二者都不允许扩展为自动报告或投资判断。
+- 离线工具验证（FundDocumentToolService）
+- Agent loop 验证
+- Service 层受控 profile routing
+- 多年度聚合（3-5 年 bounded coverage）
+- 确定性信号评分（6 指标，135→100 归一化）
+- 8 章分析报告生成
+- 三层审计管道（程序+LLM+复核，4 类 22 项）
 
 不允许只以 `FundDocumentToolService` 离线测试通过收口。验收必须同时通过：
 

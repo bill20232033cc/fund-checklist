@@ -595,9 +595,11 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 ## 最近完成
 
 - 8 commits 已推送至 origin/main（20e62ab）
+- Slice 14C：三层审计管道已 accepted
 - Slice 15A：Ch7 裁决 + 开发路线 + git 清理
 - Slice 15B：reading_service.py → models + chapter_generator + extraction（3 模块）
 - Slice 16A：Ch7 确定性信号 + Ch6 风险清单 + 加权 Jaccard
+- 当前阶段：基金分析助手持续迭代
 - Full regression: 268 passed, 1 skipped, 3 warnings
 
 ## 裁决记录
@@ -821,7 +823,7 @@ uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值
 10L. multi-year performance CLI integration：已 accepted；新增独立子命令 `fund-checklist multi-year`，给 Repository 新增 `list_reports()` 方法，从 catalog 按 fund_code + year 查找已导入年报，调用 10I Service 聚合多年度收益，JSON 格式输出；批量导入另开 10M；不改 Service / Host / Agent 核心逻辑。
 10M. batch PDF import：已 accepted；新增独立子命令 `fund-checklist import`，从目录批量导入 PDF 到 catalog，用户指定 fund_code + fund_name + year-range，从文件名提取年份并过滤匹配的 PDF；覆盖已存在条目；单文件失败跳过继续；逐条进度 + 最终汇总输出；复用现有 `import_local_report()`，不新增 Service 方法；24 passed。
 11C. holdings multi-year tracking：已 accepted；新增独立子命令 `fund-checklist holdings`，从已导入年报中抽取前十大持仓表（完整字段：股票代码、股票名称、数量、公允价值、占净值比），按年度列表返回 Top 10 持仓，JSON 格式输出；支持跨页表格合并；58 passed。
-11D. asset allocation + fee rates multi-year tracking：实现中；新增 `fund-checklist allocation` 和 `fund-checklist fees` 子命令，补齐资产配置和费率多年度追踪能力；资产配置目标披露表为 `期末基金资产组合情况` 和 `期末按行业分类的股票投资组合`；费率目标披露表为 `基金管理费`、`基金托管费`、`销售服务费`；JSON 输出；某年披露表未找到时跳过继续。
+11D. asset allocation + fee rates multi-year tracking：已 accepted；新增 `fund-checklist allocation` 和 `fund-checklist fees` 子命令，补齐资产配置和费率多年度追踪能力；资产配置目标披露表为 `期末基金资产组合情况` 和 `期末按行业分类的股票投资组合`；费率目标披露表为 `基金管理费`、`基金托管费`、`销售服务费`；JSON 输出；某年披露表未找到时跳过继续。
 12A. Host lifecycle basics：已 accepted；引入 HostRunResult（扩展封装：AgentRunResult + 耗时 + 事件列表 + tool_trace 统计）、HostRunEvent（完整事件类型）和简单 timeout（默认 300 秒）；新增 Service 方法；CLI 展示耗时和事件统计。
 12B. Disclosure completeness audit：已 accepted；新增 `fund-checklist audit` 子命令，检查年报是否覆盖核心披露项（持仓、资产配置、费率、业绩）+ 基金经理 + 分红；审计深度为章节+表格+字段存在性检查（结构性规则审计）；JSON 格式输出；LLM 审计后续另开裁决。
 12C. Deep disclosure audit：已 accepted；新增 `fund-checklist deep-audit` 子命令，基于 search + read_section 的深度披露完整性审计，覆盖完整披露项（持仓、资产配置、费率、业绩、基金经理、分红）；检查 ToolFailure、内容长度、表格引用；输出带原文引用的审计文本；JSON 格式输出。
