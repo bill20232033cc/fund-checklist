@@ -44,10 +44,11 @@ PDF
 当前已知能力差距（来自 dayu-agent 对标研究，2026-07-11），以下能力当前不存在，Agent 不得假装具备：
 - **多轮对话**：无 interactive mode，无会话记忆
 - **LLM 自主工具调用**：Agent loop 仍为确定性序列，非 LLM-driven
-- **多模型支持**：已支持 DeepSeek 与 Mimo（OpenAI-compatible adapter）；暂不需要接入 Gemini/OpenAI/Anthropic 等
 - **Streaming**：无流式输出
 - **上下文治理**：无 budget/truncation/compaction
 - **联网搜索**：无法获取实时市场数据
+
+LLM provider 已支持 DeepSeek 与 Mimo（OpenAI-compatible adapter）；暂不需要接入 Gemini/OpenAI/Anthropic 等其他 provider。
 
 这些差距将在后续 phase 中按优先级解决，不影响当前已实现功能的使用。
 
