@@ -716,16 +716,6 @@ uv run pytest tests/fund/service/test_extraction.py tests/fund/service/test_llm_
 - 数据表格禁止修改
 - 不改现有子命令核心逻辑
 
-13B 裁决：
-
-1. LLM 用途：复用 8A/8B tool-loop 架构（`LlmToolLoopRunner` + `LlmClientProtocol`），LLM 作为 Agent 通过 tool call 读取数据。
-2. 章节粒度：逐章独立 prompt，8 次 LLM 调用，每次生成 1 章；单章失败不影响其他章节。
-3. 输出约束：prompt 约束（要求引用数据来源）+ 后验证（校验输出中的数字是否在输入数据中出现过）。
-4. 失败回退：LLM 调用失败的章节回退到 13A 模板填充，其余章节正常。
-5. 章节范围：全部 8 章用 LLM 生成（包括基金概况和分红）。
-
-13B 不得改现有子命令核心逻辑，不做投资判断，不新增 CLI 子命令（复用 `generate`）。
-
 禁止事项：
 
 - 禁止把 10D 扩成计算、报告或投资判断。

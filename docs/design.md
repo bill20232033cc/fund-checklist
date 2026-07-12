@@ -1,6 +1,6 @@
 # fund-checklist 设计真源
 
-更新时间：2026-07-11
+更新时间：2026-07-12
 文档状态：设计真源，覆盖基金分析助手完整链路；不得作为实现完成证据。
 适用范围：基金分析助手，覆盖年报导入 → 结构化抽取 → 多年度追踪 → 信号评分 → 报告生成 → 审计管道。
 关联文档：AGENTS.md（执行规则）、docs/implementation-control.md（当前执行面板）
@@ -114,6 +114,13 @@ report / judgment contract
 - `fee_rates value extraction contract` 属于 extraction contract。
 - `performance disclosure locator` 属于 reading contract。
 - `performance return fields extraction contract`、turnover calculation、`R=A+B-C`、报告章节生成均后置，不得混入 11A。
+- `annual performance table extraction` 属于 extraction contract（10F）。
+- `annual excess return disclosed-field extraction` 属于 extraction contract（10G）。
+- `multi-year annual performance source contract` 属于 reading contract（10H）。
+- `multi-year annual performance aggregation service` 属于 calculation contract（10I）。
+- `multi-year performance Agent tool-loop` 属于 agent contract（10K）。
+- `disclosure locator contract registry` 属于 reading contract（11B）。
+- `batch PDF import` 属于 service contract（10M）。
 
 ## 2. 当前设计目标
 
@@ -205,6 +212,7 @@ report / judgment contract
 - Post-MVP Slice 8A 已实现 fake/injected LLM tool-loop contract：LLM adapter 只能通过受控 reading tools 取得事实，不得直接读取 repository/private loader、raw Docling JSON 或本地路径。
 - Post-MVP Slice 8B 已实现为 DeepSeek real LLM adapter behind existing contract：真实 provider 只能实现 `LlmClientProtocol`，所有输出仍经 8A runner/enforcement；Mimo 已通过 OpenAI-compatible adapter 准入。
 - Post-MVP Slice 8C 已实现 opt-in live DeepSeek smoke：默认 pytest no-network，只在 `FUND_CHECKLIST_RUN_LIVE_DEEPSEEK=1` 且存在 `DEEPSEEK_API_KEY` 时验证一次真实 provider 输出。
+- 后续 Slice 10K 已实现多年度聚合受控工具（aggregate_multi_year_annual_performance）；Slice 13B 已实现 LLM 章节生成 tool-loop（逐章独立 prompt + hallucination 检测 + 模板回退）；Slice 14C 已实现三层审计管道（程序审计 + LLM 审计 + LLM 复核）。
 - `AgentRunResult` 至少包含 `answer`、`citations`、`tool_trace`、`failure`。
 - `ToolTraceEntry` 至少包含 `tool_name`、`arguments`、`result_kind`、`failure_code`。
 - `search_document` 无命中时不猜测章节，返回 `AgentRunResult.failure`。
@@ -1183,9 +1191,31 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## 10. 开发路线
 
+### 已接受的 Slice（按时间顺序）
+
+- **Slice 10F**：annual performance table extraction from title-family matched table。✅ 已完成。
+- **Slice 10G**：annual excess return disclosed-field extraction。✅ 已完成。
+- **Slice 10H**：multi-year annual performance source contract with bounded year coverage。✅ 已完成。
+- **Slice 10I**：multi-year annual performance aggregation service。✅ 已完成。
+- **Slice 10J**：multi-year performance service-to-agent exposure contract（docs-only）。✅ 已完成。
+- **Slice 10K**：multi-year performance fake/injected Agent tool-loop。✅ 已完成。
+- **Slice 11A**：performance disclosure locator，插入 10D 之前。✅ 已完成。
+- **Slice 11B**：disclosure locator contract registry。✅ 已完成。
+- **Slice 10L**：multi-year performance CLI integration。✅ 已完成。
+- **Slice 10M**：batch PDF import。✅ 已完成。
+- **Slice 11C**：holdings multi-year tracking。✅ 已完成。
+- **Slice 11D**：asset allocation + fee rates multi-year tracking。✅ 已完成。
+- **Slice 12A**：Host lifecycle basics。✅ 已完成。
+- **Slice 12B**：Disclosure completeness audit。✅ 已完成。
+- **Slice 12C**：Deep disclosure audit。✅ 已完成。
+- **Slice 13A**：Fund report generation。✅ 已完成。
+- **Slice 13B**：LLM-generated chapter text。✅ 已完成。
+- **Slice 14A**：Template-aligned report generation。✅ 已完成。
+- **Slice 14C**：Chapter audit pipeline。✅ 已完成。
+
 ### Phase 1：稳定化
 
-- **Slice 15A**：提交遗留 + 清理 smoke work-dirs + full regression。目标：main 干净可复现。
+- **Slice 15A**：提交遗留 + 清理 smoke work-dirs + full regression。目标：main 干净可复现。✅ 已完成。
 - **Slice 15B**：拆分 reading_service.py（5533 行 → models + chapter_generator + extraction）。✅ 已完成。
 
 ### Phase 2：Ch7 结构化信号 + 模板区块补齐
