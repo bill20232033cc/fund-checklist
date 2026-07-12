@@ -4,6 +4,7 @@
 当前阶段：`FUND_ANALYSIS_ASSISTANT`
 当前角色：control / CIC-lite controller
 当前目标：基金分析助手持续迭代；14C 审计管道实现中。
+关联文档：AGENTS.md（执行规则）、docs/design.md（设计决策）
 
 ## 已完成研究报告
 

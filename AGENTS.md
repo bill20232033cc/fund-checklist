@@ -177,7 +177,7 @@ implement -> tests -> diff review
 - fake fixture 只能测试边界和错误；不得用于证明 production conversion path。
 - 最小验证命令固定为：
 ```bash
-uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.py
+uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.py tests/fund/cli/test_cli.py
 ```
 
 ## 代码与文档同步

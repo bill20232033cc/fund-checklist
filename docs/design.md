@@ -3,6 +3,7 @@
 更新时间：2026-07-11
 文档状态：设计真源，覆盖基金分析助手完整链路；不得作为实现完成证据。
 适用范围：基金分析助手，覆盖年报导入 → 结构化抽取 → 多年度追踪 → 信号评分 → 报告生成 → 审计管道。
+关联文档：AGENTS.md（执行规则）、docs/implementation-control.md（当前执行面板）
 
 ## 0. 证据口径
 
@@ -1068,7 +1069,7 @@ Slice 11B 已经 MiMo review `ACCEPTED`：
 
 ### 8.4 Docling production path admission
 
-Docling is accepted as production path after PDF integrity + Docling conversion + parser_health checks; field extraction correctness benchmark is out of scope.
+Docling 在通过 PDF integrity + Docling conversion + parser_health 校验后即视为 production path；字段抽取 correctness benchmark 不在当前范围内。
 
 具体范围：
 
