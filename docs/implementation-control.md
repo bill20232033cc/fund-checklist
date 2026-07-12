@@ -1,9 +1,13 @@
 # fund-checklist implementation-control
 
-更新时间：2026-07-11
-当前阶段：`PHASE_2_16B`
+更新时间：2026-07-12
+当前阶段：`FUND_ANALYSIS_ASSISTANT`
 当前角色：control / CIC-lite controller
-当前目标：技术债拆分已完成（signal_scoring.py），继续 16B：Ch6 压力测试表。
+当前目标：基金分析助手持续迭代；14C 审计管道实现中。
+
+## 已完成研究报告
+
+- **dayu-agent vs fund-checklist 能力对标研究**（2026-07-11）：完整对比报告已生成至 `docs/research/dayu-agent-vs-fund-checklist-analysis.md`，覆盖 Agent 问答、分析报告生成、架构层面三大维度，含优先级修复建议。报告确认：fc 的 reading tools 已对齐 Dayu；Agent 自主决策、多轮对话、Streaming 为当前最大差距；信号评分与审计管道为 fc 独有优势。
 
 ## 开发路线
 
@@ -83,15 +87,14 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ## Accepted Decisions
 
-- 产品方向：基金年报阅读工具层，不是字段抽取、自动报告、投资判断或发布就绪。
-- MVP source：仅本地 PDF 导入。
-- Docling admission：local-PDF MVP 中，PDF 通过 integrity check 后进入 `DoclingConverter`，Docling JSON 通过 parser_health 后进入 `DoclingDocumentStore`。
-- 禁止路线：Docling candidate-only、benchmark-before-admission、`pdfplumber` fallback、字段抽取 correctness benchmark。
-- Runtime：MVP closeout 必须同时通过离线 `FundDocumentToolService` smoke 和最小 Host / Agent tool loop smoke。
+- 产品方向：基金分析助手，覆盖年报导入 → 结构化抽取 → 多年度追踪 → 信号评分 → 报告生成 → 审计管道；已脱离 MVP 阅读工具层阶段。
+- 数据源：仅本地 PDF 导入。
+- Docling admission：PDF 通过 integrity check 后进入 `DoclingConverter`，Docling JSON 通过 parser_health 后进入 `DoclingDocumentStore`。
+- 禁止路线：Docling candidate-only、benchmark-before-admission、`pdfplumber` fallback。
 - `document_id`：ASCII-only，格式 `fund_code-year-report_type-fingerprint_prefix`；`fingerprint_prefix` 为 `content_fingerprint` 前 16 位 hex。
 - `local_import_id`：导入事件身份，仅用于审计 metadata，不作为 public tool 输入。
-- `share_class`：MVP 可选 metadata，不强制解析，不参与 `document_id`；无法明确则为 `null`。
-- `report_type`：MVP 首批仅 `annual_report`。
+- `share_class`：可选 metadata，不强制解析，不参与 `document_id`；无法明确则为 `null`。
+- `report_type`：首批仅 `annual_report`。
 - Locator：必须返回 `document_id`、`locator_kind`、section/table ref；page/page_range/internal_ref 可得时透传；`bbox` 仅增强。
 - GitHub 仓库：public。
 - Dependency preflight：`pyproject.toml` / `uv.lock` 是正式 Slice 0 产物。
@@ -112,11 +115,11 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - Slice 8A 最终回答必须只来自 tool result；`citations` 必须非空；每个关键事实至少有 section 或 table citation。
 - Slice 8A 不新增用户 CLI 参数或 `fund-checklist ask`；CLI 暴露 LLM 模式需另行裁决。
 - Post-MVP Slice 8B 已实现为 DeepSeek real LLM adapter behind existing contract；真实 provider 只能实现 `LlmClientProtocol`，不得绕过 8A runner/enforcement。
-- Slice 8B 只接 DeepSeek OpenAI-compatible API；Mimo / MiMo 与多 provider 后置。
+- Slice 8B 当前支持 DeepSeek 与 Mimo（OpenAI-compatible adapter）；暂不需要接入 Gemini/OpenAI/Anthropic 等其他 provider。
 - Slice 8B 不新增 SDK 依赖，使用 adapter + injected transport；若实现必须使用官方 SDK，需先停止并申请允许修改 `pyproject.toml` / `uv.lock`。
-- Slice 8B 环境变量裁决为 `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL`；`DEEPSEEK_BASE_URL` 默认 `https://api.deepseek.com`，测试不得依赖真实 model 值。
+- Slice 8B 环境变量裁决为 `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL`（Mimo 复用同组环境变量，通过 `DEEPSEEK_BASE_URL` 指向 Mimo endpoint）；默认值测试不得依赖。
 - Slice 8B 单元测试默认不联网；live provider smoke 必须显式 opt-in，并且不得作为默认 pytest gate。
-- Slice 8B 不新增 `fund-checklist ask`、streaming、多 provider matrix、prompt framework、richer QA/eval、自动报告或投资判断。
+- Slice 8B 不新增 `fund-checklist ask`、streaming、prompt framework、richer QA/eval、自动报告或投资判断。
 - Post-MVP Slice 8C 裁决为 opt-in live DeepSeek smoke；默认 pytest 仍 no-network。
 - Slice 8C 只由 `FUND_CHECKLIST_RUN_LIVE_DEEPSEEK=1` 触发；未设置时 live test 自动 skip。
 - Slice 8C API key 来源为 `DEEPSEEK_API_KEY`；缺失时 skip，不失败。
@@ -131,7 +134,7 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - Slice 8C 默认验证结果：`uv run pytest tests/fund/agent/test_deepseek_live_smoke.py tests/fund/agent/test_real_llm_adapter.py tests/fund/agent/test_llm_tool_loop.py tests/fund/agent/test_minimal_tool_loop.py tests/fund/cli/test_cli.py` -> `43 passed, 1 skipped`。
 - Slice 8C `git diff --check` 通过。
 - MiMo review 已按 Slice 8C 口径输出 `ACCEPTED`；MiMo 未重跑命令，review 基于 ProCodex 已报告结果与当前 diff。
-- MVP closeout accepted 只表示本地阅读工具 MVP 已通过固定测试；不表示 release ready、CI ready、真实 LLM ready、CLI/UI ready、batch queue ready 或字段抽取 ready。
+- MVP closeout 已 accepted；项目已进入基金分析助手阶段，不再受 MVP 范围约束。
 - Slice 9A 已实现 Service 层 use case boundary；现有 CLI 不再直接装配 PDF provider、repository、converter、tool service 或 Host。
 - Slice 9A 最小验证结果：`uv run pytest tests/fund/service tests/fund/cli/test_cli.py tests/fund/agent/test_minimal_tool_loop.py` -> `21 passed`。
 - Slice 9A 真实 CLI smoke 结果：exit code `0`，输出包含 `股票投资明细`、section/table citations 和 `search_document -> read_section -> list_tables -> read_table` trace。
@@ -687,6 +690,20 @@ uv run pytest tests/fund/service/test_extraction.py tests/fund/service/test_llm_
 
 14C 已 accepted。证据小节结构化已完成（方案B：完整 citation 追踪）。DeepSeek review 9 项修复全部通过，已提交推送（`d1375fa` + `7433803`）。
 
+## 产品方向升级裁决（2026-07-12）
+
+基于 dayu-agent 对标研究报告，裁决如下：
+- 产品方向从"基金年报阅读工具层"升级为**基金分析助手**，`AGENTS.md` 与本文档同步修订。
+- MVP 禁止条款（禁止字段抽取/自动报告/信号评分）正式废止；已实现的分析能力（10C/10F/10G/11C/11D/13A/13B/14A/14C）纳入正式产品范围。
+- LLM provider 支持范围：DeepSeek + Mimo（OpenAI-compatible adapter）；暂不需要 Gemini/OpenAI/Anthropic。
+- 多轮对话、LLM 自主工具调用、Streaming、上下文治理、联网搜索为已知能力差距，后续按优先级裁决。
+
+## 14C 当前进度
+
+- **裁决**：基于 dayu write_pipeline 设计，三层审计（程序+LLM+复核），4 类 22 项违规分类，评分体系（程序 30%+LLM 70%，≥80 通过），PATCH/REGENERATE/NONE 三策略修复。
+- **已 accepted**：证据小节结构化（方案 B：完整 citation 追踪），DeepSeek review 9 项修复全部通过，已提交推送（`d1375fa` + `7433803`）。
+- **状态**：14C 主体已 accepted。
+
 下一步：
 1. 等待用户指示下一步方向
 
@@ -811,9 +828,9 @@ uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值
 13A. Fund report generation：已 accepted；新增 `fund-checklist generate` 子命令，基于 5 年年报数据生成 8 章结构化分析报告；模板填充生成分析文本（LLM 生成后续另开 13B）；输出 JSON → Markdown → PDF（pandoc）；使用现有 8 章模板；DeepSeek review 无 P0，P1×2 + P2×4 全部修复；5 passed。
 13B. LLM-generated chapter text：已 accepted；复用 8A/8B `DeepSeekLlmClient`，两阶段方案（程序生成数据表格 + LLM 只写定性分析）；hallucination 检测（`_contains_non_year_numbers`）+ 回退模板；8 章全覆盖；新增 `--llm` 标志；年份动态从 catalog 获取；业绩抽取逐年直接抽取跳过失败年份；DeepSeek review 无 P0，P1×3 全部修复，P2×4 暂不修；11 passed。
 14A. Template-aligned report generation：已 accepted；补充 Ch3（基金经理 `FundManagerInfo` + `_extract_fund_manager`）+ Ch5（规模明细 `ScaleInfo` + `_extract_scale_info` 多年回退）数据抽取；用现有数据组装 Ch2（R=A+B-C）；跳过 Ch4（投资者获得感）；按模板完全重做 8 章 prompt + 数据表格；第一轮 review P1×4 全部修复（死代码清理+措辞软化），第二轮 review 全 PASS；10 passed。
-14C. Chapter audit pipeline：实现中；基于 dayu write_pipeline 设计三层审计（程序审计+LLM审计+LLM复核）；4类22项违规分类（P/E/S/C）；评分体系（程序30%+LLM70%，≥80通过/50-79修复/<50重写）；PATCH/REGENERATE/NONE三策略修复（各最多3次）；Ch1-6全部通过后生成Ch0+Ch7；数据表格禁止修改；审计产物落盘。
+14C. Chapter audit pipeline：已 accepted；基于 dayu write_pipeline 设计三层审计（程序审计+LLM审计+LLM复核）；4类22项违规分类（P/E/S/C）；评分体系（程序30%+LLM70%，≥80通过/50-79修复/<50重写）；PATCH/REGENERATE/NONE三策略修复（各最多3次）；Ch1-6全部通过后生成Ch0+Ch7；数据表格禁止修改；审计产物落盘。
 
-## MVP Acceptance Matrix
+## Acceptance Matrix (closed)
 
 - local PDF import
 - PDF integrity failure classification
@@ -1035,7 +1052,7 @@ Slice 8C 不做：
 - 需要复制或改写 dayu 代码但没有 license/compliance gate。
 - 需要引入外部网络来源策略。
 - 计划把 Docling 改回 candidate-only、benchmark-before-admission 或 `pdfplumber` fallback。
-- 计划把阅读工具扩大为字段抽取、自动报告、投资判断、数据仓库晋升或发布就绪。
+- 计划新增投资判断、数据仓库晋升或发布就绪（超出基金分析助手范围）。
 - 计划只用 fake fixture 证明 production conversion path。
 - 文档声称当前未实现能力已完成。
 - Slice 8A 实现计划直接接真实 LLM provider、增加 CLI ask、或让 LLM adapter 读取 repository/private loader。
@@ -1168,16 +1185,6 @@ Slice 8C git diff --check: passed
 Slice 10L targeted: 8 passed
 Slice 10L review: MiMo ACCEPTED
 Slice 10L git diff --check: passed
-```
-
-## 技术债拆分补充：signal_scoring.py + DS review 修复（2026-07-11）
-
-**commit f03030b**: fix: data_completeness type mismatch and _parse_percent substring match
-
-修复 DS review 指出的 2 个问题：
-1. P0: `models.py` 声明 `data_completeness: str`，但 `extraction.py` 传 `float` → 统一为 `float`，显示用 `int(completeness*6)/6`
-2. P1: `signal_scoring.py` 的 `_parse_percent` 丢失子字符串匹配 → 恢复 `if "不收取" in text or "免收" in text`
-
-**DS review 结论**: ACCEPTED — 两个修复都正确且完整，没有发现遗漏点或回归风险。
-
+技术债修复 f03030b: data_completeness type mismatch + _parse_percent substring match — ACCEPTED
 测试: 268 passed, 1 skipped, 3 warnings
+```
