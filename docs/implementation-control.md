@@ -3,7 +3,7 @@
 更新时间：2026-07-12
 当前阶段：`FUND_ANALYSIS_ASSISTANT`
 当前角色：control / CIC-lite controller
-当前目标：基金分析助手持续迭代；14C 审计管道已 accepted。
+当前目标：Slice 16B Ch6 压力测试表实现中。
 关联文档：AGENTS.md（执行规则）、docs/design.md（设计决策）
 
 ## 已完成研究报告
@@ -707,8 +707,117 @@ uv run pytest tests/fund/service/test_extraction.py tests/fund/service/test_llm_
 - **已 accepted**：证据小节结构化（方案 B：完整 citation 追踪），DeepSeek review 9 项修复全部通过，已提交推送（`d1375fa` + `7433803`）。
 - **状态**：14C 主体已 accepted。
 
-下一步：
-1. 等待用户指示下一步方向
+## Slice 16B 实施规格
+
+### 目标
+
+Ch6 压力测试表：按基金类型选择阈值，从年报取规模/净值数据填充，计算三种场景下的损失金额。
+
+### 基金类型判定
+
+基于 `fund_name` 关键词匹配（确定性规则，不依赖 LLM）：
+
+- 名称含 "指数" → `index_fund`
+- 名称含 "债券" 或 "债" → `bond_fund`
+- 其他 → `active_fund`
+
+无 `fund_name` 时默认 `active_fund`，输出附 `fund_type_inferred=true` 警告。后续可扩展更多类型（enhanced_index / qdii / fof），本 slice 不实现。
+
+### 压力测试阈值
+
+| 基金类型 | 正常 | 极端 | 历史最差 |
+|---------|------|------|---------|
+| `index_fund` | -30% | -50% | -70% |
+| `bond_fund` | -5% | -10% | -20% |
+| `active_fund` | -25% | -45% | -65% |
+
+阈值来源：`docs/fund-analysis-template-draft.md` 各基金类型定义。本 slice 固定使用上述 3 类阈值，不做可配置。
+
+### 数据来源
+
+- 规模：`ScaleInfo.total_scale`（亿元），来自 `_extract_scale_info()`
+- 净值增长率：`annual_nav_growth_rate`，来自 `_extract_report_performance()`
+- 基准收益率：`annual_benchmark_return_rate`，来自 `_extract_report_performance()`
+
+### 计算逻辑
+
+1. 损失金额（场景模拟）：`stress_loss = current_scale * |threshold|`，按三档固定阈值计算
+2. 质量评估（benchmark 对比）：`excess_return = annual_nav_growth_rate - annual_benchmark_return_rate`，按阈值判定 `stress_level`
+3. 无规模数据时跳过损失计算，只输出 stress_level
+4. 无净值增长率或无基准收益率时，stress_level 为 null，只输出损失金额
+
+### stress_level 取值全集（基于超额收益 vs benchmark）
+
+| 取值 | 含义 | 判定条件 |
+|------|------|---------|
+| `outperform` | 跑赢基准 | `excess_return > 0` |
+| `inline` | 基本持平 | `-2% <= excess_return <= 0` |
+| `underperform` | 跑输基准 | `-5% < excess_return < -2%` |
+| `severe_underperform` | 严重跑输 | `excess_return <= -5%` |
+| `null` | 无数据 | 净值增长率或基准收益率缺失 |
+
+其中 `excess_return = annual_nav_growth_rate - annual_benchmark_return_rate`。
+
+### 输出形态
+
+JSON 结构化 + Markdown 表格双输出。
+
+JSON 示例：
+```json
+{
+  "fund_type": "active_fund",
+  "fund_type_inferred": false,
+  "current_scale_billion": 2.99,
+  "stress_test": {
+    "normal": {"threshold": -0.25, "loss_billion": 0.7475},
+    "extreme": {"threshold": -0.45, "loss_billion": 1.3455},
+    "worst": {"threshold": -0.65, "loss_billion": 1.9435}
+  },
+  "current_performance": {
+    "nav_growth_rate": 0.087,
+    "benchmark_return_rate": 0.053,
+    "excess_return": 0.034,
+    "stress_level": "outperform"
+  }
+}
+```
+
+### 与 Ch6 的关系
+
+追加到 Ch6 内，作为压力测试子表，与风险清单表并列。不独立章节。
+
+`chapter_generator.py` 的 Ch6 prompt 更新：
+- 新增压力测试数据段
+- LLM 定性分析要求引用压力测试结论
+
+### 数据解析边界
+
+- 规模："2.99亿元" → 2.99；"2,990,000,000元" → 29.9（亿元）
+- 净值增长率："8.70%" → 0.087；"-3.50%" → -0.035
+- 百分比格式与 16A 的 `_parse_percent` 复用
+
+### allowed write set
+
+- `fund_agent/service/models.py`
+- `fund_agent/service/extraction.py`
+- `fund_agent/service/chapter_generator.py`
+- `tests/fund/service/test_extraction.py`
+- `tests/fund/service/test_llm_chapter_generation.py`
+- `docs/implementation-control.md`
+- `docs/design.md`
+
+### 验证命令
+
+```bash
+uv run pytest tests/fund/service/test_extraction.py tests/fund/service/test_llm_chapter_generation.py tests/fund/cli/test_cli.py
+```
+
+### 非目标
+
+- 不实现 enhanced_index / qdii / fof 类型判定（后续扩展）
+- 不实现可配置阈值
+- 不修改 Ch7 信号评分逻辑
+- 不修改 CLI 子命令
 
 禁止事项：
 - 换手率保持禁止

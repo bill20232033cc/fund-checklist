@@ -1221,7 +1221,7 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 ### Phase 2：Ch7 结构化信号 + 模板区块补齐
 
 - **Slice 16A**：Ch7 确定性信号判断 + Ch6 风险清单表。✅ 已完成。含加权 Jaccard 风格漂移检测。
-- **Slice 16B**：Ch6 压力测试表。按基金类型选阈值，从年报取规模/净值数据填充。
+- **Slice 16B**：Ch6 压力测试表。✅ 裁决已确认。按基金类型选阈值（index_fund/bond_fund/active_fund），从年报取规模+净值增长率+基准收益率，计算三档场景损失金额 + 超额收益 stress_level。
 - **Slice 16C**：Ch0 升级/降级阈值事件 + 一句话产品定义。从 Ch7 信号反推 Ch0 封面。
 
 ### Phase 3：报告质量 + 可用性
