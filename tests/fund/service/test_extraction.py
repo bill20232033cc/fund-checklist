@@ -23,6 +23,10 @@ from fund_agent.service import (
     ListReportsRequest,
     QueryRouteAttempt,
     ReadLocalReportRequest,
+    ScaleInfo,
+    StressTestResult,
+    compute_stress_test,
+    infer_fund_type,
 )
 
 REAL_SMOKE_PDF = Path("基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf")
@@ -3127,3 +3131,150 @@ def test_holdings_overlap_rate_no_overlap():
                                     quantity="100", fair_value="1000", percentage="10.0%"),)
     rate = _holdings_overlap_rate(holdings_a, holdings_b)
     assert rate == 0.0
+
+
+# ── Slice 16B 压力测试 ──────────────────────────────────────────────
+
+
+class TestInferFundType:
+    """infer_fund_type 关键词匹配测试。"""
+
+    def test_index_fund(self):
+        fund_type, inferred = infer_fund_type("沪深300指数证券投资基金")
+        assert fund_type == "index_fund"
+        assert inferred is True
+
+    def test_bond_fund_by_bond(self):
+        fund_type, inferred = infer_fund_type("某某债券型证券投资基金")
+        assert fund_type == "bond_fund"
+        assert inferred is True
+
+    def test_bond_fund_by_zhai(self):
+        fund_type, inferred = infer_fund_type("某某纯债基金")
+        assert fund_type == "bond_fund"
+        assert inferred is True
+
+    def test_active_fund_default(self):
+        fund_type, inferred = infer_fund_type("安信企业价值优选混合型证券投资基金")
+        assert fund_type == "active_fund"
+        assert inferred is True
+
+    def test_empty_name(self):
+        fund_type, inferred = infer_fund_type("")
+        assert fund_type == "active_fund"
+        assert inferred is True
+
+
+class TestComputeStressTest:
+    """compute_stress_test 计算逻辑测试。"""
+
+    def test_active_fund_full_data(self):
+        scale = ScaleInfo(
+            total_shares_a="1亿", total_shares_c="",
+            individual_investor_ratio="80%", management_holds="",
+            estimated_aum="2.99亿元",
+        )
+        result = compute_stress_test(scale, 0.087, 0.053, "安信企业价值优选混合")
+        assert result.fund_type == "active_fund"
+        assert result.fund_type_inferred is True
+        assert result.current_scale_billion == 2.99
+        assert result.stress_scenarios["normal"]["loss_billion"] == 0.7475
+        assert result.stress_scenarios["extreme"]["loss_billion"] == 1.3455
+        assert result.stress_scenarios["worst"]["loss_billion"] == 1.9435
+        assert result.excess_return == 0.034
+        assert result.stress_level == "outperform"
+
+    def test_index_fund_thresholds(self):
+        scale = ScaleInfo(
+            total_shares_a="1亿", total_shares_c="",
+            individual_investor_ratio="", management_holds="",
+            estimated_aum="10.0亿元",
+        )
+        result = compute_stress_test(scale, 0.05, 0.10, "沪深300指数基金")
+        assert result.fund_type == "index_fund"
+        assert result.stress_scenarios["normal"]["threshold"] == -0.30
+        assert result.stress_scenarios["normal"]["loss_billion"] == 3.0
+        assert result.stress_scenarios["extreme"]["threshold"] == -0.50
+        assert result.stress_scenarios["extreme"]["loss_billion"] == 5.0
+        assert result.stress_scenarios["worst"]["threshold"] == -0.70
+        assert result.stress_scenarios["worst"]["loss_billion"] == 7.0
+
+    def test_bond_fund_thresholds(self):
+        scale = ScaleInfo(
+            total_shares_a="", total_shares_c="",
+            individual_investor_ratio="", management_holds="",
+            estimated_aum="5.0亿元",
+        )
+        result = compute_stress_test(scale, 0.02, 0.015, "某某债券基金")
+        assert result.fund_type == "bond_fund"
+        assert result.stress_scenarios["normal"]["loss_billion"] == 0.25
+        assert result.stress_scenarios["extreme"]["loss_billion"] == 0.5
+        assert result.stress_scenarios["worst"]["loss_billion"] == 1.0
+
+    def test_no_scale_missing_loss(self):
+        """无规模数据时跳过损失计算，只输出 stress_level。"""
+        result = compute_stress_test(None, 0.05, 0.08, "某基金")
+        assert result.current_scale_billion is None
+        assert result.stress_scenarios["normal"]["loss_billion"] == 0.0
+        assert result.stress_level == "underperform"
+
+    def test_no_performance_missing_stress_level(self):
+        """无净值增长率或基准收益率时 stress_level 为 None。"""
+        scale = ScaleInfo(
+            total_shares_a="", total_shares_c="",
+            individual_investor_ratio="", management_holds="",
+            estimated_aum="2.0亿元",
+        )
+        result = compute_stress_test(scale, None, None, "某基金")
+        assert result.excess_return is None
+        assert result.stress_level is None
+        assert result.stress_scenarios["normal"]["loss_billion"] == 0.5
+
+    def test_partial_performance_nav_only(self):
+        """只有净值增长率无基准收益率时 stress_level 应为 None。"""
+        result = compute_stress_test(None, 0.05, None, "某基金")
+        assert result.excess_return is None
+        assert result.stress_level is None
+
+    def test_partial_performance_bench_only(self):
+        """只有基准收益率无净值增长率时 stress_level 应为 None。"""
+        result = compute_stress_test(None, None, 0.03, "某基金")
+        assert result.excess_return is None
+        assert result.stress_level is None
+
+
+class TestStressLevel:
+    """stress_level 判定测试。"""
+
+    def test_outperform(self):
+        result = compute_stress_test(None, 0.10, 0.05, "某基金")
+        assert result.stress_level == "outperform"
+
+    def test_inline_zero(self):
+        result = compute_stress_test(None, 0.05, 0.05, "某基金")
+        assert result.stress_level == "inline"
+
+    def test_inline_minus_one_percent(self):
+        result = compute_stress_test(None, 0.04, 0.05, "某基金")
+        assert result.excess_return == -0.01
+        assert result.stress_level == "inline"
+
+    def test_inline_minus_two_percent_boundary(self):
+        result = compute_stress_test(None, 0.03, 0.05, "某基金")
+        assert result.excess_return == -0.02
+        assert result.stress_level == "inline"
+
+    def test_underperform(self):
+        result = compute_stress_test(None, 0.02, 0.05, "某基金")
+        assert result.excess_return == -0.03
+        assert result.stress_level == "underperform"
+
+    def test_severe_underperform_boundary(self):
+        result = compute_stress_test(None, 0.0, 0.05, "某基金")
+        assert result.excess_return == -0.05
+        assert result.stress_level == "severe_underperform"
+
+    def test_severe_underperform(self):
+        result = compute_stress_test(None, 0.0, 0.10, "某基金")
+        assert result.excess_return == -0.10
+        assert result.stress_level == "severe_underperform"

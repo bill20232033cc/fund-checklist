@@ -1041,3 +1041,34 @@ class RiskChecklistItem:
     name: str
     status: str
     detail: str
+
+
+@dataclass(frozen=True)
+class StressTestResult:
+    """Ch6 压力测试结果。
+
+    参数:
+        fund_type: 基金类型（index_fund / bond_fund / active_fund）。
+        fund_type_inferred: 类型是否由关键词推断。
+        current_scale_billion: 当前规模（亿元），无数据时为 None。
+        stress_scenarios: 三档压力场景（normal/extreme/worst），各含 threshold 和 loss_billion。
+        nav_growth_rate: 净值增长率（小数形式），无数据时为 None。
+        benchmark_return_rate: 基准收益率（小数形式），无数据时为 None。
+        excess_return: 超额收益（小数形式），无数据时为 None。
+        stress_level: 压力等级（outperform/inline/underperform/severe_underperform/None）。
+
+    返回:
+        不可变压力测试结果 DTO。
+
+    异常:
+        本模型不执行 I/O，不抛出业务异常。
+    """
+
+    fund_type: str
+    fund_type_inferred: bool
+    current_scale_billion: float | None
+    stress_scenarios: dict[str, dict[str, float]]
+    nav_growth_rate: float | None
+    benchmark_return_rate: float | None
+    excess_return: float | None
+    stress_level: str | None

@@ -90,6 +90,7 @@ from .models import (
     _ROUTE_RESULT_SUCCESS,
     ReportChapter,
     ScaleInfo,
+    StressTestResult,
     _DisclosureLocatorContract,
 )
 
@@ -2235,6 +2236,8 @@ class FundReadingService:
 
         chapters: list[ReportChapter] = []
 
+        stress_test = _compute_ch6_stress_test(performance, report_year, scale_info, fund_name)
+
         chapter_specs = [
             (0, "投资要点概览", ("performance", "holdings", "fees")),
             (1, "这只基金到底是什么产品", ("basic_info",)),
@@ -2252,6 +2255,7 @@ class FundReadingService:
                 performance, holdings, allocation, fees,
                 fund_manager, scale_info, evidence,
                 signal_judgment, risk_checklist,
+                stress_test=stress_test if chapter_id == 6 else None,
             )
             chapters.append(ReportChapter(
                 chapter_id=chapter_id,
@@ -2414,6 +2418,9 @@ class FundReadingService:
         warnings: list[str] = []
         chapters: list[ReportChapter] = []
 
+        # 计算压力测试
+        stress_test = _compute_ch6_stress_test(performance, report_year, scale_info, fund_name)
+
         chapter_specs = [
             (0, "投资要点概览", ("performance", "holdings", "fees")),
             (1, "这只基金到底是什么产品", ("basic_info",)),
@@ -2437,6 +2444,7 @@ class FundReadingService:
                 fees=fees,
                 fund_manager=fund_manager,
                 scale_info=scale_info,
+                stress_test=stress_test if chapter_id == 6 else None,
             )
 
             if content is None:
@@ -2503,6 +2511,7 @@ class FundReadingService:
         evidence: ChapterEvidence | None = None,
         signal_judgment: SignalJudgment | None = None,
         risk_checklist: tuple[RiskChecklistItem, ...] | None = None,
+        stress_test: StressTestResult | None = None,
     ) -> str:
         """回退用的模板章节生成（模板对齐版）。
 
@@ -2517,6 +2526,7 @@ class FundReadingService:
             evidence: 证据来源汇总（可选）。
             signal_judgment: 确定性信号判断结果（Ch7 使用）。
             risk_checklist: 风险清单检查结果（Ch6 使用）。
+            stress_test: 压力测试结果（Ch6 使用）。
 
         返回:
             模板生成的 Markdown 文本。
@@ -2569,7 +2579,31 @@ class FundReadingService:
                 ])
             base_content = "\n".join(lines) + "\n"
         elif chapter_id == 6:
-            lines = ["## 风险清单\n", "| 风险项 | 状态 | 说明 |", "|--------|------|------|"]
+            lines = []
+            # 压力测试（如果有）
+            if stress_test:
+                fund_type_labels = {"index_fund": "指数基金", "bond_fund": "债券基金", "active_fund": "主动基金"}
+                level_labels = {
+                    "outperform": "跑赢基准", "inline": "基本持平",
+                    "underperform": "跑输基准", "severe_underperform": "严重跑输",
+                }
+                lines.extend([
+                    "## 压力测试\n",
+                    f"- 基金类型: {fund_type_labels.get(stress_test.fund_type, stress_test.fund_type)}",
+                ])
+                if stress_test.current_scale_billion is not None:
+                    lines.append(f"- 当前规模: {stress_test.current_scale_billion:.2f}亿元")
+                    lines.extend(["", "| 场景 | 阈值 | 损失金额(亿元) |", "|------|------|--------------|"])
+                    for name in ("normal", "extreme", "worst"):
+                        sc = stress_test.stress_scenarios[name]
+                        lines.append(f"| {name} | {sc['threshold']:.0%} | {sc['loss_billion']:.4f} |")
+                if stress_test.excess_return is not None:
+                    lines.append(f"\n- 超额收益: {stress_test.excess_return:.2%}")
+                if stress_test.stress_level is not None:
+                    lines.append(f"- 压力等级: {level_labels.get(stress_test.stress_level, stress_test.stress_level)}")
+                lines.append("")
+            # 风险清单
+            lines.extend(["## 风险清单\n", "| 风险项 | 状态 | 说明 |", "|--------|------|------|"])
             if risk_checklist:
                 for item in risk_checklist:
                     lines.append(f"| {item.name} | {item.status} | {item.detail} |")
@@ -4343,3 +4377,130 @@ def _extract_fee_rates_from_agent_result(
             fees.append(FeeRateItem(fee_name="销售服务费C类", rate=sales_c_match.group(1)))
 
     return tuple(fees)
+
+
+# ── Slice 16B 压力测试 ──────────────────────────────────────────────
+
+STRESS_THRESHOLDS: dict[str, tuple[float, float, float]] = {
+    "index_fund": (-0.30, -0.50, -0.70),
+    "bond_fund": (-0.05, -0.10, -0.20),
+    "active_fund": (-0.25, -0.45, -0.65),
+}
+
+
+def infer_fund_type(fund_name: str) -> tuple[str, bool]:
+    """基于基金名称关键词推断基金类型。
+
+    参数:
+        fund_name: 基金名称。
+
+    返回:
+        (fund_type, inferred) — fund_type 为 index_fund/bond_fund/active_fund，
+        inferred 为 True 表示由关键词匹配推断。
+    """
+    if "指数" in fund_name:
+        return "index_fund", True
+    if "债券" in fund_name or "债" in fund_name:
+        return "bond_fund", True
+    return "active_fund", True
+
+
+def compute_stress_test(
+    scale_info: ScaleInfo | None,
+    nav_growth_rate: float | None,
+    benchmark_return_rate: float | None,
+    fund_name: str = "",
+) -> StressTestResult:
+    """计算 Ch6 压力测试结果。
+
+    参数:
+        scale_info: 规模信息（含 estimated_aum）。
+        nav_growth_rate: 净值增长率（小数形式，如 0.087 表示 8.7%）。
+        benchmark_return_rate: 基准收益率（小数形式）。
+        fund_name: 基金名称（用于类型推断）。
+
+    返回:
+        StressTestResult，含三档损失金额和 stress_level。
+    """
+    fund_type, fund_type_inferred = infer_fund_type(fund_name)
+
+    # 解析规模
+    current_scale_billion: float | None = None
+    if scale_info and scale_info.estimated_aum:
+        current_scale_billion = _parse_aum_yi(scale_info.estimated_aum)
+
+    # 计算三档损失金额
+    thresholds = STRESS_THRESHOLDS[fund_type]
+    scenario_names = ("normal", "extreme", "worst")
+    stress_scenarios: dict[str, dict[str, float]] = {}
+    for i, name in enumerate(scenario_names):
+        t = thresholds[i]
+        loss = None
+        if current_scale_billion is not None:
+            loss = round(current_scale_billion * abs(t), 6)
+        stress_scenarios[name] = {
+            "threshold": t,
+            "loss_billion": loss if loss is not None else 0.0,
+        }
+
+    # 计算超额收益
+    excess_return: float | None = None
+    if nav_growth_rate is not None and benchmark_return_rate is not None:
+        excess_return = round(nav_growth_rate - benchmark_return_rate, 6)
+
+    # 判定 stress_level
+    stress_level: str | None = None
+    if excess_return is not None:
+        if excess_return > 0:
+            stress_level = "outperform"
+        elif excess_return >= -0.02:
+            stress_level = "inline"
+        elif excess_return > -0.05:
+            stress_level = "underperform"
+        else:
+            stress_level = "severe_underperform"
+
+    return StressTestResult(
+        fund_type=fund_type,
+        fund_type_inferred=fund_type_inferred,
+        current_scale_billion=current_scale_billion,
+        stress_scenarios=stress_scenarios,
+        nav_growth_rate=nav_growth_rate,
+        benchmark_return_rate=benchmark_return_rate,
+        excess_return=excess_return,
+        stress_level=stress_level,
+    )
+
+
+def _compute_ch6_stress_test(
+    performance: dict[int, dict[str, str]],
+    report_year: int,
+    scale_info: ScaleInfo | None,
+    fund_name: str,
+) -> StressTestResult | None:
+    """从 report 数据中提取最新年份的净值增长率和基准收益率，计算压力测试。
+
+    参数:
+        performance: 多年度业绩数据（字符串百分比格式）。
+        report_year: 报告年份。
+        scale_info: 规模信息。
+        fund_name: 基金名称。
+
+    返回:
+        StressTestResult，数据不足时返回 None。
+    """
+    latest = performance.get(report_year, {})
+    nav_str = latest.get("nav_growth_rate", "")
+    bench_str = latest.get("benchmark_return_rate", "")
+
+    nav_rate = _parse_percent(nav_str)
+    bench_rate = _parse_percent(bench_str)
+
+    # 转换为小数
+    nav_float = nav_rate / 100.0 if nav_rate is not None else None
+    bench_float = bench_rate / 100.0 if bench_rate is not None else None
+
+    if nav_float is None and bench_float is None and (scale_info is None or not scale_info.estimated_aum):
+        return None
+
+    return compute_stress_test(scale_info, nav_float, bench_float, fund_name)

@@ -15,6 +15,7 @@ from .models import (
     HoldingExtraction,
     ReportChapter,
     ScaleInfo,
+    StressTestResult,
 )
 
 
@@ -105,6 +106,7 @@ def generate_data_table(
     fund_manager: FundManagerInfo | None = None,
     scale_info: ScaleInfo | None = None,
     evidence: ChapterEvidence | None = None,
+    stress_test: StressTestResult | None = None,
 ) -> str:
     """程序化生成数据表格（数字 100% 从数据 dict 提取，不经过 LLM）。
 
@@ -290,6 +292,33 @@ def generate_data_table(
         for year in sorted(performance.keys()):
             p = performance[year]
             lines.append(f"| {year} | {p.get('nav_growth_rate', 'N/A')} | {p.get('excess_return', 'N/A')} |")
+
+        # 压力测试
+        if stress_test:
+            lines.extend(["", "## 压力测试"])
+            fund_type_labels = {"index_fund": "指数基金", "bond_fund": "债券基金", "active_fund": "主动基金"}
+            lines.append(f"- 基金类型: {fund_type_labels.get(stress_test.fund_type, stress_test.fund_type)}")
+            lines.append(f"- 类型判定: {'关键词推断' if stress_test.fund_type_inferred else '显式指定'}")
+            if stress_test.current_scale_billion is not None:
+                lines.append(f"- 当前规模: {stress_test.current_scale_billion:.2f}亿元")
+                lines.extend(["", "| 场景 | 阈值 | 损失金额(亿元) |",
+                              "|------|------|--------------|"])
+                for name in ("normal", "extreme", "worst"):
+                    sc = stress_test.stress_scenarios[name]
+                    lines.append(
+                        f"| {name} | {sc['threshold']:.0%} | {sc['loss_billion']:.4f} |"
+                    )
+            if stress_test.excess_return is not None:
+                lines.append(f"\n- 超额收益: {stress_test.excess_return:.2%}")
+            if stress_test.stress_level is not None:
+                level_labels = {
+                    "outperform": "跑赢基准",
+                    "inline": "基本持平",
+                    "underperform": "跑输基准",
+                    "severe_underperform": "严重跑输",
+                }
+                lines.append(f"- 压力等级: {level_labels.get(stress_test.stress_level, stress_test.stress_level)}")
+
         base_content = "\n".join(lines)
 
     # Ch7: 最终判断 — 汇总数据
@@ -458,6 +487,7 @@ class LlmChapterGenerator:
         fund_manager: FundManagerInfo | None = None,
         scale_info: ScaleInfo | None = None,
         evidence: ChapterEvidence | None = None,
+        stress_test: StressTestResult | None = None,
     ) -> str | None:
         """生成单个章节（程序表格 + LLM 分析）。
 
@@ -477,7 +507,7 @@ class LlmChapterGenerator:
         data_table = generate_data_table(
             chapter_id, fund_code, fund_name, report_year,
             performance, holdings, allocation, fees,
-            fund_manager, scale_info, evidence,
+            fund_manager, scale_info, evidence, stress_test,
         )
 
         # 阶段 2：LLM 生成定性分析

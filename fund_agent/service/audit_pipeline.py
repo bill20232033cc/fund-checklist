@@ -1493,10 +1493,13 @@ class ReportGenerationCoordinator:
 
         # 生成数据表格
         from fund_agent.service.chapter_generator import generate_data_table
+        from fund_agent.service.extraction import _compute_ch6_stress_test
+        stress_test = _compute_ch6_stress_test(performance, report_year, scale_info, fund_name) if chapter_id == 6 else None
         data_table = generate_data_table(
             chapter_id, fund_code, fund_name, report_year,
             performance, holdings, allocation, fees,
             fund_manager, scale_info, evidence,
+            stress_test=stress_test,
         )
 
         # 生成章节内容（LLM 或模板）

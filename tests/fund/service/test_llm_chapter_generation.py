@@ -338,3 +338,42 @@ def test_generate_report_llm_fallback_to_template(monkeypatch, tmp_path: Path) -
     assert len(result.report.chapters) == 8
     # 应该有警告（生成失败或审计失败）
     assert len(result.warnings) > 0
+
+
+def test_ch6_includes_stress_test_data() -> None:
+    """Ch6 数据表格在传入 StressTestResult 时必须包含压力测试段。"""
+
+    from fund_agent.service.models import ScaleInfo
+    from fund_agent.service.extraction import compute_stress_test
+
+    scale = ScaleInfo(
+        total_shares_a="1亿", total_shares_c="",
+        individual_investor_ratio="80%", management_holds="",
+        estimated_aum="2.99亿元",
+    )
+    stress = compute_stress_test(scale, 0.087, 0.053, "安信企业价值优选混合")
+
+    table = generate_data_table(
+        6, "004393", "安信企业价值优选混合", 2024,
+        _sample_performance(), _sample_holdings(), {}, {},
+        stress_test=stress,
+    )
+
+    assert "压力测试" in table
+    assert "主动基金" in table
+    assert "2.99亿元" in table
+    assert "0.7475" in table  # normal loss
+    assert "1.3455" in table  # extreme loss
+    assert "跑赢基准" in table
+    # 压力测试段在风险相关数据之后
+
+
+def test_ch6_without_stress_test_no_section() -> None:
+    """Ch6 不传 stress_test 时不出现压力测试段。"""
+
+    table = generate_data_table(
+        6, "004393", "测试基金", 2024,
+        _sample_performance(), _sample_holdings(), {}, {},
+    )
+
+    assert "压力测试" not in table

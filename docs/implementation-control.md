@@ -3,7 +3,7 @@
 更新时间：2026-07-12
 当前阶段：`FUND_ANALYSIS_ASSISTANT`
 当前角色：control / CIC-lite controller
-当前目标：Slice 16B Ch6 压力测试表实现中。
+当前目标：Slice 16B Ch6 压力测试表 — ACCEPTED（2026-07-13）。
 关联文档：AGENTS.md（执行规则）、docs/design.md（设计决策）
 
 ## 已完成研究报告
@@ -18,7 +18,7 @@
 
 ### Phase 2：Ch7 结构化判断 + 模板区块补齐
 - **Slice 16A**：Ch7 确定性信号判断 + Ch6 风险清单表 ✅ 已完成（含加权 Jaccard）
-- **Slice 16B**：Ch6 压力测试表（按基金类型分 3 档跌幅 × 3 场景）
+- **Slice 16B**：Ch6 压力测试表（按基金类型分 3 档跌幅 × 3 场景）✅ ACCEPTED（2026-07-13）
 - **Slice 16C**：Ch0 升级/降级阈值事件 + 一句话产品定义
 
 ### Phase 3：报告质量 + 可用性
