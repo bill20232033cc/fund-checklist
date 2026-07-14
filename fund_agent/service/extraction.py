@@ -75,6 +75,7 @@ from .models import (
     GenerateReportResult,
     HoldingExtraction,
     IndustryAllocationItem,
+    ThresholdEvent,
     MultiYearAllocationSeries,
     MultiYearAnnualPerformanceRow,
     MultiYearAnnualPerformanceSeries,
@@ -195,6 +196,177 @@ DISCLOSURE_LOCATOR_CONTRACT_REGISTRY = (
         extraction_allowed=False,
     ),
 )
+
+
+# --- 阈值事件 tier-delta 算法 ---
+
+# 每个指标的离散得分档位（从低到高），用于计算一档跳变的 raw points 增量。
+# 与 signal_scoring.py 中的评分规则完全同源。
+_INDICATOR_TIERS: dict[str, tuple[int, ...]] = {
+    "超额收益趋势": (0, 5, 15, 25),
+    "费率水平": (0, 5, 15, 25),
+    "风格漂移": (0, 5, 15, 25),
+    "规模风险": (0, 15, 25),
+    "基金经理变更": (0, 20),
+    "持仓集中度": (0, 5, 10, 15),
+}
+
+# 基金名称关键词 → 类型标签，first-match-wins。
+PRODUCT_TYPE_RULES: list[tuple[str, str]] = [
+    ("沪深300", "沪深300指数基金"),
+    ("中证500", "中证500指数基金"),
+    ("创业板", "创业板指数基金"),
+    ("债券", "债券基金"),
+    ("混合", "混合型基金"),
+    ("股票", "股票型基金"),
+]
+
+
+def _next_tier_up(name: str, current: int) -> int | None:
+    """返回当前得分的上一档分数；已满档时返回 None。"""
+    tiers = _INDICATOR_TIERS.get(name)
+    if tiers is None:
+        return None
+    for t in tiers:
+        if t > current:
+            return t
+    return None
+
+
+def _next_tier_down(name: str, current: int) -> int | None:
+    """返回当前得分的下一档分数；已最低档时返回 None。"""
+    tiers = _INDICATOR_TIERS.get(name)
+    if tiers is None:
+        return None
+    for t in reversed(tiers):
+        if t < current:
+            return t
+    return None
+
+
+def _compute_threshold_events(
+    scored: list,
+) -> tuple[ThresholdEvent | None, ThresholdEvent | None]:
+    """从评分结果计算升级/降级阈值事件（F1 + F2 修复版）。
+
+    F1 算法：tier-delta 驱动
+    - 升级：找一档改善后 raw points 增量最大的指标
+    - 降级：找一档恶化后 raw points 损失最大的指标
+
+    F2 边界：
+    - data_completeness < 0.5 → 两者均 None
+    - 全部满分 → upgrade_event=None
+    - 全部零分 → downgrade_event=None
+
+    参数:
+        scored: _ScoredIndicator 列表。
+
+    返回:
+        (upgrade_event, downgrade_event)。
+    """
+    calculable = [s for s in scored if s.calculable]
+    if len(calculable) / len(scored) < 0.5:
+        return None, None
+
+    # --- 升级事件 ---
+    upgrade_event: ThresholdEvent | None = None
+    non_full = [s for s in calculable if s.score < s.max_score]
+    if not non_full:
+        # 全部满分：upgrade_event = None（F2）
+        upgrade_event = None
+    else:
+        best = None
+        best_delta = 0
+        for s in non_full:
+            next_up = _next_tier_up(s.name, s.score)
+            if next_up is not None:
+                delta = next_up - s.score
+                if delta > best_delta or (delta == best_delta and best is None):
+                    best = s
+                    best_delta = delta
+        if best is not None and best_delta > 0:
+            next_up = _next_tier_up(best.name, best.score)
+            upgrade_event = ThresholdEvent(
+                direction="upgrade",
+                indicator_name=best.name,
+                current_score=best.score,
+                target_score=best.max_score,
+                tier_delta=best_delta,
+                description=(
+                    f"{best.name}（{best.score}/{best.max_score}）"
+                    f"跳一档至 {next_up} 可带来 +{best_delta} raw points，"
+                    f"是当前对升级贡献最大的指标"
+                ),
+            )
+
+    # --- 降级事件 ---
+    downgrade_event: ThresholdEvent | None = None
+    non_zero = [s for s in calculable if s.score > 0]
+    if not non_zero:
+        # 全部零分：downgrade_event = None（F2）
+        downgrade_event = None
+    else:
+        worst = None
+        worst_delta = 0
+        for s in non_zero:
+            next_down = _next_tier_down(s.name, s.score)
+            if next_down is not None:
+                delta = s.score - next_down
+                if delta > worst_delta or (delta == worst_delta and worst is None):
+                    worst = s
+                    worst_delta = delta
+        if worst is not None and worst_delta > 0:
+            next_down = _next_tier_down(worst.name, worst.score)
+            downgrade_event = ThresholdEvent(
+                direction="downgrade",
+                indicator_name=worst.name,
+                current_score=worst.score,
+                target_score=0,
+                tier_delta=worst_delta,
+                description=(
+                    f"{worst.name}（{worst.score}/{worst.max_score}）"
+                    f"掉一档至 {next_down} 将损失 -{worst_delta} raw points，"
+                    f"是当前对降级风险最大的指标"
+                ),
+            )
+
+    return upgrade_event, downgrade_event
+
+
+def compute_product_definition(
+    fund_name: str,
+    fund_code: str,
+    fund_manager: FundManagerInfo | None = None,
+) -> str:
+    """确定性生成一句话产品定义。
+
+    规则:
+    1. 从 fund_name 按 PRODUCT_TYPE_RULES 匹配基金类型（first-match-wins）。
+    2. 拼接为 "{fund_name}（{fund_code}）是一只{类型标签}"。
+    3. 有经理时追加 "，由{经理名}管理"。
+    4. 无匹配时退化为 "{fund_name}（{fund_code}）是一只基金"。
+
+    参数:
+        fund_name: 基金名称。
+        fund_code: 基金代码。
+        fund_manager: 基金经理信息（可选）。
+
+    返回:
+        一句话产品定义字符串。
+
+    异常:
+        本函数不执行 I/O，不抛出业务异常。
+    """
+    fund_type = "基金"
+    for keyword, label in PRODUCT_TYPE_RULES:
+        if keyword in fund_name:
+            fund_type = label
+            break
+
+    parts = [f"{fund_name}（{fund_code}）是一只{fund_type}"]
+    if fund_manager:
+        parts.append(f"，由{fund_manager.name}管理")
+    return "".join(parts)
 
 
 @dataclass(frozen=True)
@@ -1774,6 +1946,7 @@ class FundReadingService:
                     fund_manager=fund_manager,
                     scale_info=scale_info,
                     evidence=evidence,
+                    signal_judgment=signal_judgment,
                 )
                 llm_warnings.extend(coordinator_warnings)
 
@@ -2328,12 +2501,16 @@ class FundReadingService:
         else:
             signal = "🔴 建议替换"
 
+        upgrade_event, downgrade_event = _compute_threshold_events(scored)
+
         return SignalJudgment(
             signal=signal,
             normalized_score=normalized,
             indicators=indicators,
             data_completeness=calculable_count / 6,
             warnings=warnings,
+            upgrade_event=upgrade_event,
+            downgrade_event=downgrade_event,
         )
 
     def compute_risk_checklist(
@@ -2445,6 +2622,7 @@ class FundReadingService:
                 fund_manager=fund_manager,
                 scale_info=scale_info,
                 stress_test=stress_test if chapter_id == 6 else None,
+                signal_judgment=signal_judgment,
             )
 
             if content is None:

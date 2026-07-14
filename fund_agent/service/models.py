@@ -975,6 +975,33 @@ class GenerateReportResult:
 
 
 @dataclass(frozen=True)
+class ThresholdEvent:
+    """阈值事件（升级或降级）。
+
+    参数:
+        direction: 方向，"upgrade" 或 "downgrade"。
+        indicator_name: 触发指标名（如"超额收益趋势"）。
+        current_score: 当前得分。
+        target_score: 目标得分（升级=满分，降级=0）。
+        tier_delta: 一档跳变带来的 raw points 增量。
+        description: 程序拼接的事件描述。
+
+    返回:
+        不可变阈值事件 DTO。
+
+    异常:
+        本模型不执行 I/O，不抛出业务异常。
+    """
+
+    direction: str
+    indicator_name: str
+    current_score: int
+    target_score: int
+    tier_delta: int
+    description: str
+
+
+@dataclass(frozen=True)
 class SignalIndicator:
     """信号判断单项指标评分。
 
@@ -1007,6 +1034,8 @@ class SignalJudgment:
         indicators: 6 项指标评分明细。
         data_completeness: 数据完整度比例（0.0-1.0，如 1.0 表示 6/6）。
         warnings: 数据不足或其他警告。
+        upgrade_event: 升级阈值事件（None 表示无法判断或已满分）。
+        downgrade_event: 降级阈值事件（None 表示无法判断或已零分）。
 
     返回:
         不可变信号判断 DTO。
@@ -1020,6 +1049,8 @@ class SignalJudgment:
     indicators: tuple[SignalIndicator, ...]
     data_completeness: float
     warnings: tuple[str, ...] = ()
+    upgrade_event: ThresholdEvent | None = None
+    downgrade_event: ThresholdEvent | None = None
 
 
 @dataclass(frozen=True)

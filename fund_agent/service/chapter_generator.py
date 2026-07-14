@@ -15,6 +15,7 @@ from .models import (
     HoldingExtraction,
     ReportChapter,
     ScaleInfo,
+    SignalJudgment,
     StressTestResult,
 )
 
@@ -107,6 +108,7 @@ def generate_data_table(
     scale_info: ScaleInfo | None = None,
     evidence: ChapterEvidence | None = None,
     stress_test: StressTestResult | None = None,
+    signal_judgment: SignalJudgment | None = None,
 ) -> str:
     """程序化生成数据表格（数字 100% 从数据 dict 提取，不经过 LLM）。
 
@@ -126,6 +128,10 @@ def generate_data_table(
 
     # Ch0: 投资要点概览 — 汇总关键指标
     if chapter_id == 0:
+        # 产品定义（确定性，结构化底线）
+        from .extraction import compute_product_definition
+        product_def = compute_product_definition(fund_name, fund_code, fund_manager)
+
         latest = performance.get(report_year, {})
         latest_nav = latest.get("nav_growth_rate", "N/A")
         latest_bench = latest.get("benchmark_return_rate", "N/A")
@@ -151,6 +157,10 @@ def generate_data_table(
         lines = [
             "## 关键指标",
             "",
+            "### 产品定义",
+            "",
+            product_def,
+            "",
             "| 指标 | 值 |",
             "|------|----|",
             f"| 基金名称 | {fund_name} |",
@@ -167,6 +177,20 @@ def generate_data_table(
         if excess_trend:
             lines.append("")
             lines.append(f"**超额收益趋势**：{excess_trend}")
+
+        # 阈值事件（从 SignalJudgment 反推）
+        if signal_judgment is not None:
+            lines.append("")
+            lines.append("### 阈值事件")
+            if signal_judgment.upgrade_event:
+                lines.append(f"- **升级路径**：{signal_judgment.upgrade_event.description}")
+            else:
+                lines.append("- **升级路径**：当前无明确升级路径（数据不足或已满分）")
+            if signal_judgment.downgrade_event:
+                lines.append(f"- **降级风险**：{signal_judgment.downgrade_event.description}")
+            else:
+                lines.append("- **降级风险**：当前无明确降级风险（数据不足或已零分）")
+
         base_content = "\n".join(lines)
 
     # Ch1: 产品定义 — 基本信息 + 基金经理
@@ -488,6 +512,7 @@ class LlmChapterGenerator:
         scale_info: ScaleInfo | None = None,
         evidence: ChapterEvidence | None = None,
         stress_test: StressTestResult | None = None,
+        signal_judgment: SignalJudgment | None = None,
     ) -> str | None:
         """生成单个章节（程序表格 + LLM 分析）。
 
@@ -508,6 +533,7 @@ class LlmChapterGenerator:
             chapter_id, fund_code, fund_name, report_year,
             performance, holdings, allocation, fees,
             fund_manager, scale_info, evidence, stress_test,
+            signal_judgment,
         )
 
         # 阶段 2：LLM 生成定性分析

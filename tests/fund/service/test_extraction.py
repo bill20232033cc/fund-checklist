@@ -3022,6 +3022,43 @@ def test_compute_signal_judgment_insufficient_data():
     assert any("数据不足" in w for w in result.warnings)
 
 
+def test_compute_signal_judgment_threshold_events_integration():
+    """集成测试：compute_signal_judgment 完整路径产出阈值事件。"""
+    service = FundReadingService()
+    perf = {
+        2023: {"nav_growth_rate": "10.00%", "benchmark_return_rate": "7.00%", "excess_return": "3.00%"},
+        2024: {"nav_growth_rate": "12.00%", "benchmark_return_rate": "8.00%", "excess_return": "4.00%"},
+    }
+    fees = {
+        2024: (FeeRateItem("基金管理费", "0.60%"), FeeRateItem("基金托管费", "0.15%")),
+    }
+    holdings_2023 = tuple(
+        HoldingExtraction(rank=i, stock_code=f"00000{i}", stock_name=f"股票{i}", quantity="1000", fair_value="10000", percentage="5.0%")
+        for i in range(1, 11)
+    )
+    holdings_2024 = tuple(
+        HoldingExtraction(rank=i, stock_code=f"00000{i}", stock_name=f"股票{i}", quantity="1000", fair_value="10000", percentage="5.0%")
+        for i in range(1, 11)
+    )
+    holdings = {2023: holdings_2023, 2024: holdings_2024}
+    manager = FundManagerInfo("张三", "2020-01-01", "10年", "价值投资", "10~50万份")
+    scale = ScaleInfo("100000000", "50000000", "95%", "", "5.00亿元")
+
+    result = service.compute_signal_judgment(
+        performance=perf, fees=fees, holdings=holdings,
+        fund_manager=manager, scale_info=scale, report_year=2024,
+    )
+
+    # 全部满分时 upgrade_event 应为 None
+    # 实际数据不一定是满分，但阈值事件必须存在或为 None（不报错）
+    if result.upgrade_event is not None:
+        assert result.upgrade_event.direction == "upgrade"
+        assert result.upgrade_event.tier_delta > 0
+    if result.downgrade_event is not None:
+        assert result.downgrade_event.direction == "downgrade"
+        assert result.downgrade_event.tier_delta > 0
+
+
 def test_compute_risk_checklist_all_green():
     """所有指标安全时，全部 🟢。"""
     service = FundReadingService()
@@ -3278,3 +3315,165 @@ class TestStressLevel:
         result = compute_stress_test(None, 0.0, 0.10, "某基金")
         assert result.excess_return == -0.10
         assert result.stress_level == "severe_underperform"
+
+
+# --- Slice 16C: 产品定义 + 阈值事件 ---
+
+class TestProductDefinition:
+    """产品定义确定性拼接测试。"""
+
+    def test_keyword_match_index300(self):
+        from fund_agent.service.extraction import compute_product_definition
+        result = compute_product_definition("华夏沪深300ETF联接A", "000051")
+        assert "沪深300指数基金" in result
+        assert "华夏沪深300ETF联接A" in result
+        assert "000051" in result
+
+    def test_keyword_match_bond(self):
+        from fund_agent.service.extraction import compute_product_definition
+        result = compute_product_definition("某债券型证券投资基金", "123456")
+        assert "债券基金" in result
+
+    def test_keyword_match_mixed(self):
+        from fund_agent.service.extraction import compute_product_definition
+        result = compute_product_definition("某某成长混合", "654321")
+        assert "混合型基金" in result
+
+    def test_fallback_no_match(self):
+        from fund_agent.service.extraction import compute_product_definition
+        result = compute_product_definition("某某灵活配置", "111111")
+        assert "是一只基金" in result
+        assert "指数" not in result
+        assert "债券" not in result
+
+    def test_with_manager(self):
+        from fund_agent.service.extraction import compute_product_definition
+        manager = FundManagerInfo("张三", "2020-01-01", "10年", "", "")
+        result = compute_product_definition("某某混合", "000001", manager)
+        assert "由张三管理" in result
+
+    def test_without_manager(self):
+        from fund_agent.service.extraction import compute_product_definition
+        result = compute_product_definition("某某混合", "000001")
+        assert "由" not in result
+        assert "管理" not in result
+
+
+class TestThresholdEvents:
+    """阈值事件 tier-delta 算法测试。"""
+
+    def _make_judgment(self, scores: list[tuple[str, int, int, bool]]) -> SignalJudgment:
+        """通过 compute_signal_judgment 路径构造带阈值事件的 SignalJudgment。
+
+        参数: scores = [(name, score, max_score, calculable), ...]
+        """
+        from fund_agent.service.signal_scoring import _ScoredIndicator
+        from fund_agent.service.extraction import _compute_threshold_events
+        scored = [
+            _ScoredIndicator(
+                name=n, value=None, score=s, max_score=m,
+                risk_status="🟡", detail="test", calculable=c,
+            )
+            for n, s, m, c in scores
+        ]
+        upgrade_event, downgrade_event = _compute_threshold_events(scored)
+        total = sum(s for _, s, _, _ in scores)
+        total_max = sum(m for _, _, m, _ in scores)
+        normalized = round(total / total_max * 100) if total_max > 0 else 0
+        calculable_count = sum(1 for _, _, _, c in scores if c)
+        indicators = tuple(
+            SignalIndicator(name=n, score=s, max_score=m, detail="test")
+            for n, s, m, _ in scores
+        )
+        return SignalJudgment(
+            signal="🟡 需要关注",
+            normalized_score=normalized,
+            indicators=indicators,
+            data_completeness=calculable_count / len(scores),
+            upgrade_event=upgrade_event,
+            downgrade_event=downgrade_event,
+        )
+
+    def test_upgrade_event_picks_largest_tier_delta(self):
+        """升级事件应选一档改善 raw points 增量最大的指标。"""
+        sj = self._make_judgment([
+            ("超额收益趋势", 15, 25, True),   # 15→25, delta=10
+            ("费率水平", 25, 25, True),        # 满分，无升级
+            ("风格漂移", 5, 25, True),         # 5→15, delta=10
+            ("规模风险", 25, 25, True),        # 满分
+            ("基金经理变更", 20, 20, True),    # 满分
+            ("持仓集中度", 15, 15, True),      # 满分
+        ])
+        assert sj.upgrade_event is not None
+        # 超额收益和风格漂移 delta 相同（都是10），取第一个遇到的
+        assert sj.upgrade_event.tier_delta == 10
+        assert sj.upgrade_event.direction == "upgrade"
+
+    def test_downgrade_event_picks_largest_drop(self):
+        """降级事件应选一档恶化 raw points 损失最大的指标。"""
+        sj = self._make_judgment([
+            ("超额收益趋势", 25, 25, True),   # 25→15, loss=10
+            ("费率水平", 15, 25, True),        # 15→5, loss=10
+            ("风格漂移", 5, 25, True),         # 5→0, loss=5
+            ("规模风险", 25, 25, True),        # 25→15, loss=10
+            ("基金经理变更", 20, 20, True),    # 20→0, loss=20
+            ("持仓集中度", 15, 15, True),      # 15→10, loss=5
+        ])
+        assert sj.downgrade_event is not None
+        assert sj.downgrade_event.tier_delta == 20  # 经理变更 20→0
+        assert sj.downgrade_event.direction == "downgrade"
+
+    def test_all_full_upgrade_none(self):
+        """全部满分时 upgrade_event 应为 None（F2）。"""
+        sj = self._make_judgment([
+            ("超额收益趋势", 25, 25, True),
+            ("费率水平", 25, 25, True),
+            ("风格漂移", 25, 25, True),
+            ("规模风险", 25, 25, True),
+            ("基金经理变更", 20, 20, True),
+            ("持仓集中度", 15, 15, True),
+        ])
+        assert sj.upgrade_event is None
+        # 降级事件仍应存在（最大暴露）
+        assert sj.downgrade_event is not None
+
+    def test_all_zero_downgrade_none(self):
+        """全部零分时 downgrade_event 应为 None（F2）。"""
+        sj = self._make_judgment([
+            ("超额收益趋势", 0, 25, True),
+            ("费率水平", 0, 25, True),
+            ("风格漂移", 0, 25, True),
+            ("规模风险", 0, 25, True),
+            ("基金经理变更", 0, 20, True),
+            ("持仓集中度", 0, 15, True),
+        ])
+        assert sj.downgrade_event is None
+        # 升级事件仍应存在（最大提升潜力）
+        assert sj.upgrade_event is not None
+
+    def test_low_completeness_both_none(self):
+        """data_completeness < 0.5 时两者均 None（F2）。"""
+        sj = self._make_judgment([
+            ("超额收益趋势", 15, 25, True),
+            ("费率水平", 0, 25, False),
+            ("风格漂移", 0, 25, False),
+            ("规模风险", 0, 25, False),
+            ("基金经理变更", 0, 20, False),
+            ("持仓集中度", 0, 15, False),
+        ])
+        assert sj.upgrade_event is None
+        assert sj.downgrade_event is None
+
+    def test_threshold_event_description_format(self):
+        """description 应包含指标名、得分和 delta。"""
+        sj = self._make_judgment([
+            ("超额收益趋势", 5, 25, True),
+            ("费率水平", 25, 25, True),
+            ("风格漂移", 25, 25, True),
+            ("规模风险", 25, 25, True),
+            ("基金经理变更", 20, 20, True),
+            ("持仓集中度", 15, 15, True),
+        ])
+        assert sj.upgrade_event is not None
+        assert "超额收益趋势" in sj.upgrade_event.description
+        assert "+10" in sj.upgrade_event.description

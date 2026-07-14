@@ -1382,6 +1382,7 @@ class ReportGenerationCoordinator:
         fund_manager: Any = None,
         scale_info: Any = None,
         evidence: Any = None,
+        signal_judgment: Any = None,
     ) -> tuple[dict[int, str], list[str]]:
         """生成报告。
 
@@ -1415,6 +1416,7 @@ class ReportGenerationCoordinator:
                 fund_manager=fund_manager,
                 scale_info=scale_info,
                 evidence=evidence,
+                signal_judgment=signal_judgment,
             )
             if content:
                 chapter_contents[chapter_id] = content
@@ -1449,6 +1451,7 @@ class ReportGenerationCoordinator:
                 scale_info=scale_info,
                 use_chapter_summaries=True,
                 chapter_summaries={cid: chapter_contents.get(cid, "") for cid in range(1, 7)},
+                signal_judgment=signal_judgment,
             )
             if content:
                 chapter_contents[chapter_id] = content
@@ -1472,6 +1475,7 @@ class ReportGenerationCoordinator:
         evidence: Any = None,
         use_chapter_summaries: bool = False,
         chapter_summaries: dict[int, str] | None = None,
+        signal_judgment: Any = None,
     ) -> str | None:
         """生成并审计单个章节。
 
@@ -1500,6 +1504,7 @@ class ReportGenerationCoordinator:
             performance, holdings, allocation, fees,
             fund_manager, scale_info, evidence,
             stress_test=stress_test,
+            signal_judgment=signal_judgment,
         )
 
         # 生成章节内容（LLM 或模板）

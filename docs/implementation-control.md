@@ -86,6 +86,16 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - 当前有样本 PDF 和历史分析报告；`基金年报/` 作为本地材料目录不纳入 public git，后续按分析需求下载或本地提供。
 - `AGENTS.md` 是执行规则入口；`docs/design.md` 是设计真源。
 
+- Slice 16C 已实现 Ch0 升级/降级阈值事件 + 一句话产品定义：
+  - 新增 `ThresholdEvent` dataclass（`models.py`），`SignalJudgment` 加 `upgrade_event` / `downgrade_event` 字段。
+  - 阈值事件算法：tier-delta 驱动（F1 修复）。升级 = 选一档改善后 raw points 增量最大的指标；降级 = 选一档恶化后 raw points 损失最大的指标。
+  - 边界处理（F2 修复）：全部满分 → `upgrade_event=None`；全部零分 → `downgrade_event=None`；`data_completeness < 0.5` → 两者均 `None`。
+  - 产品定义：`compute_product_definition` 按 `PRODUCT_TYPE_RULES`（first-match-wins）确定性拼接一句话产品定义。
+  - Ch0 数据表新增"产品定义"和"阈值事件"两个小节。
+  - `signal_judgment` 参数已贯穿 `generate_data_table` → `generate_chapter` → `ReportGenerationCoordinator.generate_report` → `_generate_and_audit_chapter` 全链路。
+  - 验证结果：`uv run pytest tests/fund/service/test_extraction.py tests/fund/service/test_llm_chapter_generation.py tests/fund/cli/test_cli.py` -> `192 passed, 2 warnings`。
+  - Agent 回归：`uv run pytest tests/fund/agent/test_minimal_tool_loop.py tests/fund/agent/test_llm_tool_loop.py` -> `29 passed`。
+
 ## Accepted Decisions
 
 - 产品方向：基金分析助手，覆盖年报导入 → 结构化抽取 → 多年度追踪 → 信号评分 → 报告生成 → 审计管道；已脱离 MVP 阅读工具层阶段。
@@ -1290,3 +1300,4 @@ Slice 10L git diff --check: passed
 技术债修复 f03030b: data_completeness type mismatch + _parse_percent substring match — ACCEPTED
 测试: 268 passed, 1 skipped, 3 warnings
 ```
+**Slice 16C**：Ch0 升级/降级阈值事件 + 一句话产品定义 ✅ 已完成（2026-07-14）
