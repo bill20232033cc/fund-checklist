@@ -369,7 +369,7 @@ def generate_data_table(
     return base_content
 
 
-def _format_citation(citation: Citation | None) -> str:
+def format_citation(citation: Citation | None) -> str:
     """格式化单个 citation 为可读文本。
 
     参数:

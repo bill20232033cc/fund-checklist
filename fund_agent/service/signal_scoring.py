@@ -58,7 +58,11 @@ def _parse_percent(text: str) -> float | None:
     m = re.search(r"([\d.]+)\s*%", text)
     if m:
         return float(m.group(1))
-    return None
+    # 无 % 号时尝试直接解析纯数字（如持仓占比表中的 "6.08"）
+    try:
+        return float(text.replace(",", ""))
+    except (ValueError, TypeError):
+        return None
 
 
 def _parse_aum_yi(text: str) -> float | None:

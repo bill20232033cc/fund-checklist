@@ -2366,7 +2366,8 @@ class FundReadingService:
                 for i, nav_str in enumerate(nav_matches[:2]):
                     try:
                         nav = float(nav_str)
-                        shares = float(shares_list[i]) if i < len(shares_list) and shares_list[i] else 0.0
+                        shares_str = shares_list[i] if i < len(shares_list) and shares_list[i] else "0"
+                        shares = float(shares_str.replace(",", ""))
                         total_aum += nav * shares
                     except (ValueError, IndexError):
                         continue
