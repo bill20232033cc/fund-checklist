@@ -129,6 +129,14 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
   - 验证结果：`uv run pytest tests/fund/service/test_extraction.py tests/fund/service/test_llm_chapter_generation.py tests/fund/cli/test_cli.py` -> `192 passed, 2 warnings`。
   - Agent 回归：`uv run pytest tests/fund/agent/test_minimal_tool_loop.py tests/fund/agent/test_llm_tool_loop.py` -> `29 passed`。
 
+- Slice 17A 已实现报告 Markdown 持久化 + metadata sidecar：
+  - `_export_markdown` 增加 `signal_judgment` 参数，导出 .md 后自动写入 `.meta.json` sidecar。
+  - sidecar 字段：`fund_code`、`fund_name`、`report_year`、`generation_time`（ISO 8601）、`audit_score`（无审计 null）、`signal`、`normalized_score`。
+  - `signal_judgment` 透传路径：`generate_report` → `_export_markdown`。
+  - 4 条新测试：sidecar 创建、字段完整性、有/无 signal_judgment。
+  - 验证结果：`uv run pytest tests/fund/service/test_extraction.py tests/fund/service/test_llm_chapter_generation.py tests/fund/cli/test_cli.py` -> `197 passed, 2 warnings`。
+  - Agent 回归：`uv run pytest tests/fund/agent/test_minimal_tool_loop.py tests/fund/agent/test_llm_tool_loop.py` -> `29 passed`。
+
 ## Accepted Decisions
 
 - 产品方向：基金分析助手，覆盖年报导入 → 结构化抽取 → 多年度追踪 → 信号评分 → 报告生成 → 审计管道；已脱离 MVP 阅读工具层阶段。

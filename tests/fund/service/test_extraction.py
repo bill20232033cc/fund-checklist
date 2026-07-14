@@ -19,8 +19,10 @@ from fund_agent.service import (
     AnnualReportDocument,
     ExtractFeeRatesRequest,
     FundReadingService,
+    FundReport,
     ImportLocalReportRequest,
     ListReportsRequest,
+    ReportChapter,
     QueryRouteAttempt,
     ReadLocalReportRequest,
     ScaleInfo,
@@ -3477,3 +3479,94 @@ class TestThresholdEvents:
         assert sj.upgrade_event is not None
         assert "超额收益趋势" in sj.upgrade_event.description
         assert "+10" in sj.upgrade_event.description
+
+
+# --- Slice 17A: Metadata Sidecar ---
+
+class TestMetadataSidecar:
+    """metadata sidecar 测试。"""
+
+    def test_sidecar_created_with_markdown(self, tmp_path):
+        """导出 Markdown 时应同时生成 .meta.json sidecar。"""
+        from fund_agent.service.extraction import FundReadingService
+        service = FundReadingService()
+        report = FundReport(
+            fund_code="000051",
+            fund_name="测试基金",
+            report_year=2024,
+            chapters=(
+                ReportChapter(chapter_id=0, title="投资要点概览", content="## 概览\n\n测试内容", data_sources=()),
+            ),
+        )
+        service._export_markdown(report, tmp_path)
+
+        sidecar_path = tmp_path / "reports" / "000051-2024-analysis.meta.json"
+        assert sidecar_path.exists()
+
+    def test_sidecar_fields_complete(self, tmp_path):
+        """sidecar 应包含所有规定字段。"""
+        import json
+        from fund_agent.service.extraction import FundReadingService
+        service = FundReadingService()
+        report = FundReport(
+            fund_code="000051",
+            fund_name="测试基金",
+            report_year=2024,
+            chapters=(),
+        )
+        service._export_markdown(report, tmp_path)
+
+        sidecar_path = tmp_path / "reports" / "000051-2024-analysis.meta.json"
+        data = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        assert data["fund_code"] == "000051"
+        assert data["fund_name"] == "测试基金"
+        assert data["report_year"] == 2024
+        assert "generation_time" in data
+        assert data["audit_score"] is None
+        assert data["signal"] is None
+        assert data["normalized_score"] is None
+
+    def test_sidecar_with_signal_judgment(self, tmp_path):
+        """传入 signal_judgment 时 sidecar 应包含 signal 和 normalized_score。"""
+        import json
+        from fund_agent.service.extraction import FundReadingService
+        from fund_agent.service.models import SignalIndicator, SignalJudgment
+        service = FundReadingService()
+        report = FundReport(
+            fund_code="000051",
+            fund_name="测试基金",
+            report_year=2024,
+            chapters=(),
+        )
+        sj = SignalJudgment(
+            signal="🟢 值得持有",
+            normalized_score=85.0,
+            indicators=(
+                SignalIndicator(name="超额收益趋势", score=25, max_score=25, detail="连续正超额"),
+            ),
+            data_completeness=1.0,
+        )
+        service._export_markdown(report, tmp_path, signal_judgment=sj)
+
+        sidecar_path = tmp_path / "reports" / "000051-2024-analysis.meta.json"
+        data = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        assert data["signal"] == "🟢 值得持有"
+        assert data["normalized_score"] == 85.0
+
+    def test_sidecar_without_signal_judgment(self, tmp_path):
+        """signal_judgment 为 None 时 sidecar 中 signal/normalized_score 应为 None。"""
+        import json
+        from fund_agent.service.extraction import FundReadingService
+        service = FundReadingService()
+        report = FundReport(
+            fund_code="000051",
+            fund_name="测试基金",
+            report_year=2024,
+            chapters=(),
+        )
+        service._export_markdown(report, tmp_path, signal_judgment=None)
+
+        sidecar_path = tmp_path / "reports" / "000051-2024-analysis.meta.json"
+        data = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        assert data["signal"] is None
+        assert data["normalized_score"] is None

@@ -7,7 +7,7 @@ import re
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -2010,9 +2010,9 @@ class FundReadingService:
             output_path = None
             warnings: list[str] = list(llm_warnings)
             if request.output_format == "markdown":
-                output_path = self._export_markdown(report, request.work_dir)
+                output_path = self._export_markdown(report, request.work_dir, signal_judgment)
             elif request.output_format == "pdf":
-                md_path = self._export_markdown(report, request.work_dir)
+                md_path = self._export_markdown(report, request.work_dir, signal_judgment)
                 output_path, pdf_warning = self._export_pdf(md_path, request.work_dir)
                 if pdf_warning:
                     warnings.append(pdf_warning)
@@ -2859,12 +2859,28 @@ class FundReadingService:
             return base_content + "\n" + evidence_section
         return base_content
 
-    def _export_markdown(self, report: FundReport, work_dir: Path) -> str:
-        """导出 Markdown 文件。"""
+    def _export_markdown(
+        self,
+        report: FundReport,
+        work_dir: Path,
+        signal_judgment: SignalJudgment | None = None,
+    ) -> str:
+        """导出 Markdown 文件 + metadata sidecar。
+
+        参数:
+            report: 基金分析报告。
+            work_dir: 工作目录。
+            signal_judgment: 信号判断结果（可选，用于 sidecar）。
+
+        返回:
+            Markdown 文件路径。
+        """
 
         output_dir = work_dir / "reports"
         output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / f"{report.fund_code}-{report.report_year}-analysis.md"
+        base_name = f"{report.fund_code}-{report.report_year}-analysis"
+        output_path = output_dir / f"{base_name}.md"
+        sidecar_path = output_dir / f"{base_name}.meta.json"
 
         lines = [f"# {report.fund_name}（{report.fund_code}）{report.report_year} 年度分析报告\n"]
         lines.append("**风险警示**：本报告由 AI 辅助生成，仅供参考，不构成投资建议。\n")
@@ -2874,6 +2890,22 @@ class FundReadingService:
             lines.append(chapter.content)
 
         output_path.write_text("\n".join(lines), encoding="utf-8")
+
+        # 写入 metadata sidecar
+        sidecar: dict[str, object] = {
+            "fund_code": report.fund_code,
+            "fund_name": report.fund_name,
+            "report_year": report.report_year,
+            "generation_time": datetime.now(timezone.utc).isoformat(),
+            "audit_score": None,
+            "signal": signal_judgment.signal if signal_judgment else None,
+            "normalized_score": signal_judgment.normalized_score if signal_judgment else None,
+        }
+        sidecar_path.write_text(
+            json.dumps(sidecar, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
         return str(output_path)
 
     def _export_pdf(self, md_path: str, work_dir: Path) -> tuple[str, str | None]:
