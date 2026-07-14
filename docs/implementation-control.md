@@ -26,6 +26,39 @@
 - **Slice 17B**：citation 验证工具
 - **Slice 17C**：generate CLI 端到端 smoke
 
+### Slice 17A 实施规格
+
+sidecar = 伴随主文件的元数据 JSON 文件。报告正文是 Markdown（给人看），sidecar 是结构化 JSON（给程序读）。
+
+裁决：
+1. 格式：JSON（与 ArtifactStore、CLI 输出一致）。
+2. 文件命名：`{fund_code}-{year}-analysis.meta.json`，与 .md 同目录（`{work_dir}/reports/`）。
+3. 字段范围：`fund_code`、`fund_name`、`report_year`、`generation_time`（ISO 8601）、`audit_score`（无审计时 null）、`signal`（🟢/🟡/🔴）、`normalized_score`（0-100）。
+4. audit_score 来源：有审计时取全章平均分；无审计时 null，不伪造。
+5. 生成时机：紧跟 `_export_markdown` 之后写入，保证 .md 和 .meta 原子性。
+6. `_export_markdown` 增加 `signal_judgment` 参数，透传 signal 和 normalized_score。
+
+### allowed write set（17A）
+
+- `fund_agent/service/extraction.py`
+- `tests/fund/service/test_extraction.py`
+- `tests/fund/cli/test_cli.py`
+- `docs/implementation-control.md`
+- `docs/design.md`
+
+### 验证命令（17A）
+
+```bash
+uv run pytest tests/fund/service/test_extraction.py tests/fund/service/test_llm_chapter_generation.py tests/fund/cli/test_cli.py -v --tb=short
+```
+
+### stop conditions（17A）
+
+- sidecar 字段缺失或类型错误。
+- .md 存在但 .meta.json 不存在。
+- .meta.json 中 audit_score 非 null 但无审计路径。
+- signal_judgment 为 None 时 sidecar 中 signal/normalized_score 应为 null，不得报错。
+
 ### Phase 4：分析能力扩展（低优先级）
 - ~~Slice 18A~~：已在 16A 实现，删除
 - ~~Slice 18D~~：已在 16A 覆盖，删除

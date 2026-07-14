@@ -1242,3 +1242,4 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - **P1-3**：提取 compute_signal_judgment / compute_risk_checklist 共享评分 helper。
 - **extraction.py 二次拆分**：当前 4634 行，提取 signal_scoring.py / risk_assessment.py。
 **Slice 16C**：Ch0 升级/降级阈值事件 + 一句话产品定义。从 Ch7 信号反推 Ch0 封面。✅ 已完成。含 tier-delta 阈值事件算法 + 确定性产品定义。
+**Slice 17A**：报告 Markdown 持久化 + metadata sidecar。文件名 `{fund_code}-{year}-analysis.meta.json`，与 .md 同目录。字段：fund_code、fund_name、report_year、generation_time（ISO 8601）、audit_score（无审计 null）、signal、normalized_score。_export_markdown 增加 signal_judgment 参数。
