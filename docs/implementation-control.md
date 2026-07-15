@@ -45,17 +45,13 @@
 ### 验证命令（17C）
 
 ```bash
-uv run python -m fund_agent.cli.main import \
-  "基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf" \
-  --fund-code 004393 \
-  --work-dir .fund_checklist_cli_smoke_17c
+mkdir -p /tmp/fund-checklist-17c-pdf
 
-uv run python -m fund_agent.cli.main generate \
-  --fund-code 004393 \
-  --fund-name "安信企业价值优选混合型证券投资基金" \
-  --year 2024 \
-  --format markdown \
-  --work-dir .fund_checklist_cli_smoke_17c
+cp "基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf" /tmp/fund-checklist-17c-pdf/
+
+uv run python -m fund_agent.cli.main import --pdf-dir /tmp/fund-checklist-17c-pdf --fund-code 004393 --fund-name "安信企业价值优选混合型证券投资基金" --year-range 2024-2024 --work-dir .fund_checklist_cli_smoke_17c
+
+uv run python -m fund_agent.cli.main generate --fund-code 004393 --fund-name "安信企业价值优选混合型证券投资基金" --year 2024 --format markdown --llm --work-dir .fund_checklist_cli_smoke_17c
 ```
 
 ### stop conditions（17C）
