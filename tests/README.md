@@ -3,7 +3,7 @@
 当前 Slice 1/2/3/4 与 CLI Read Command Gate 测试覆盖本地 PDF 导入、Docling conversion、DoclingDocumentStore、FundDocumentToolService、最小 Host/Agent tool loop、Service boundary 和 `fund-checklist read`：
 
 ```bash
-uv run pytest tests/fund/document_tools/test_service.py tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_docling_conversion.py tests/fund/document_tools/test_local_pdf_source.py
+uv run pytest tests/fund/document_tools/test_service.py tests/fund/document_tools/test_get_excerpt_verify.py tests/fund/document_tools/test_docling_store.py tests/fund/document_tools/test_docling_conversion.py tests/fund/document_tools/test_local_pdf_source.py
 uv run pytest tests/fund/service
 uv run pytest tests/fund/agent/test_minimal_tool_loop.py
 uv run pytest tests/fund/cli/test_cli.py
@@ -26,6 +26,7 @@ uv run pytest tests/fund/cli/test_cli.py
 - table row 命中摘录只返回命中行的有界文本，不返回整表。
 - public tools 捕获 `DocumentToolError` 并返回 `ToolFailure`；unknown locator 返回 `not_found`。
 - `get_excerpt` 只接受 prior tools 返回的受控 `Locator`，按 section/table/excerpt locator kind 路由。
+- `verify_citation_excerpt` 在 citation 验证路径下复用相同摘录路由，覆盖 identity mismatch 与 not_found 失败路径。
 - `MinimalFundDocumentAgent` 先执行 `search_document -> read_section`，再通过 `list_tables/read_table` 补充相关表格。
 - `search_document` first hit 是 high-certainty table-backed result 且带 `table_ref` 时，`MinimalFundDocumentAgent` 直接 `read_table`，不经 `list_tables` 做表格发现。
 - high-certainty table-backed answer 以 bounded table rows 为主体，section title / table caption 只作来源上下文。
