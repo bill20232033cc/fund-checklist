@@ -1245,3 +1245,8 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 **Slice 17A**：报告 Markdown 持久化 + metadata sidecar。文件名 `{fund_code}-{year}-analysis.meta.json`，与 .md 同目录。字段：fund_code、fund_name、report_year、generation_time（ISO 8601）、audit_score（无审计 null）、signal、normalized_score。_export_markdown 增加 signal_judgment 参数。
 **Slice 17A**：报告 Markdown 持久化 + metadata sidecar。文件名 `{fund_code}-{year}-analysis.meta.json`，与 .md 同目录。字段：fund_code、fund_name、report_year、generation_time（ISO 8601）、audit_score（无审计 null）、signal、normalized_score。_export_markdown 增加 signal_judgment 参数。✅ 已完成。
 **Slice 17B**：citation 验证工具。输入必须为结构化 `Citation / Locator`；输出为 `ExcerptContent | ToolFailure`；验证口径仅限 locator 可回溯且可读取原文片段，不做内容语义真伪校验；实现层复用 `FundDocumentToolService.get_excerpt`，不新增 raw payload 暴露。
+
+### 外部候选研究参考（非执行真源）
+
+- `docs/dayu-agent-comparison-report.md` 与 `docs/agent-evolution-design.md` 仅作为候选研究输入材料，不作为设计真源或已批准 roadmap。
+- 若后续需要推进其中任何用户侧新能力（如 `ask`、`interactive`、`streaming`、联网搜索、会话持久化），必须回到本文件与 `docs/implementation-control.md` 单独裁决。
