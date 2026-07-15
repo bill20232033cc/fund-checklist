@@ -128,7 +128,7 @@ def test_verify_citation_excerpt_rejects_unknown_locator_kind(tmp_path: Path) ->
     service = _service(tmp_path)
     bad_locator = Locator(
         document_id=_identity().document_id,
-        locator_kind="unknown",
+        locator_kind="unknown_kind",
         section_ref=None,
         table_ref=None,
         page_no=None,
@@ -160,3 +160,29 @@ def test_verify_citation_excerpt_returns_not_found_for_missing_ref(tmp_path: Pat
 
     assert isinstance(result, ToolFailure)
     assert result.code is FailureCode.NOT_FOUND
+
+
+def test_verify_citation_excerpt_returns_section_excerpt(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    results = service.search_document(_identity().document_id, "基金经理")
+    assert not isinstance(results, ToolFailure)
+    hit = results[0]
+    assert hit.locator.locator_kind is LocatorKind.EXCERPT
+
+    section_locator = Locator(
+        document_id=_identity().document_id,
+        locator_kind=LocatorKind.SECTION,
+        section_ref=hit.section_ref,
+        table_ref=None,
+        page_no=hit.locator.page_no,
+        page_range=None,
+        internal_ref=None,
+        internal_ref_available=False,
+    )
+
+    result = service.verify_citation_excerpt(_identity().document_id, _citation(section_locator))
+
+    assert not isinstance(result, ToolFailure)
+    assert result.locator.section_ref == hit.section_ref
+    assert result.citation.locator == result.locator
+    assert "基金经理" in result.text
