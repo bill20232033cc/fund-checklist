@@ -55,9 +55,10 @@ def _parse_percent(text: str) -> float | None:
         return 0.0
     if text.upper() in ("N/A", "—", "-", "暂无数据"):
         return None
-    m = re.search(r"([\d.]+)\s*%", text)
+    # 支持带负号的百分比，如 "-3.2%"
+    m = re.search(r"-?[\d.]+\s*%", text)
     if m:
-        return float(m.group(1))
+        return float(m.group(0).replace(" ","").rstrip("%"))
     # 无 % 号时尝试直接解析纯数字（如持仓占比表中的 "6.08"）
     try:
         return float(text.replace(",", ""))
