@@ -1227,7 +1227,7 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 ### Phase 3：报告质量 + 可用性
 
 - **Slice 17A**：报告 Markdown 持久化 + metadata sidecar（fund_code, year, audit_score, generation_time）。
-- **Slice 17B**：citation 验证工具（给定 citation locator → 定位年报原文 → 返回上下文片段）。
+- **Slice 17B**：citation 验证工具（给定 citation locator → 定位年报原文 → 返回上下文片段）。✅ 裁决口径已确认（结构化输入、ExcerptContent|ToolFailure 输出、仅定位不做语义校验）。
 - **Slice 17C**： CLI 端到端 smoke（真实 PDF → 完整报告 → 审计产物落盘 → exit code 验证）。
 
 ### Phase 4：分析能力扩展（低优先级）
@@ -1244,3 +1244,4 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 **Slice 16C**：Ch0 升级/降级阈值事件 + 一句话产品定义。从 Ch7 信号反推 Ch0 封面。✅ 已完成。含 tier-delta 阈值事件算法 + 确定性产品定义。
 **Slice 17A**：报告 Markdown 持久化 + metadata sidecar。文件名 `{fund_code}-{year}-analysis.meta.json`，与 .md 同目录。字段：fund_code、fund_name、report_year、generation_time（ISO 8601）、audit_score（无审计 null）、signal、normalized_score。_export_markdown 增加 signal_judgment 参数。
 **Slice 17A**：报告 Markdown 持久化 + metadata sidecar。文件名 `{fund_code}-{year}-analysis.meta.json`，与 .md 同目录。字段：fund_code、fund_name、report_year、generation_time（ISO 8601）、audit_score（无审计 null）、signal、normalized_score。_export_markdown 增加 signal_judgment 参数。✅ 已完成。
+**Slice 17B**：citation 验证工具。输入必须为结构化 `Citation / Locator`；输出为 `ExcerptContent | ToolFailure`；验证口径仅限 locator 可回溯且可读取原文片段，不做内容语义真伪校验；实现层复用 `FundDocumentToolService.get_excerpt`，不新增 raw payload 暴露。

@@ -237,6 +237,37 @@ class FundDocumentToolService:
 
         return self._call_tool(lambda: self._get_excerpt(document_id, locator, max_chars=max_chars))
 
+    def verify_citation_excerpt(
+        self,
+        document_id: str,
+        citation: Citation,
+        *,
+        max_chars: int | None = None,
+    ) -> ExcerptContent | ToolFailure:
+        """验证 citation locator 是否可回溯并返回对应摘录。
+
+        参数:
+            document_id: public reading tools 使用的内容身份。
+            citation: 待验证 citation，必须携带结构化 locator。
+            max_chars: 可选最大字符数；None 使用搜索摘录默认上限。
+
+        返回:
+            ExcerptContent；验证失败时返回 ToolFailure。
+
+        异常:
+            不向 public caller 抛出 DocumentToolError 或未分类异常。
+        """
+        locator = citation.locator
+        if locator.locator_kind not in {
+            LocatorKind.SECTION,
+            LocatorKind.TABLE,
+            LocatorKind.EXCERPT,
+        }:
+            return ToolFailure(code=FailureCode.IDENTITY_MISMATCH, message="citation locator 类型不合法")
+        if locator.document_id != document_id:
+            return ToolFailure(code=FailureCode.IDENTITY_MISMATCH, message="citation locator 与目标 document_id 不一致")
+        return self._call_tool(lambda: self._get_excerpt(document_id, locator, max_chars=max_chars))
+
     def _store(self, document_id: str) -> DoclingDocumentStore:
         """按 document_id 读取内存 registry 中的 store。"""
 

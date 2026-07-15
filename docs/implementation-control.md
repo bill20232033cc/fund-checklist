@@ -26,6 +26,37 @@
 - **Slice 17B**：citation 验证工具
 - **Slice 17C**：generate CLI 端到端 smoke
 
+### Slice 17B 实施规格
+
+裁决：
+1. 输入必须是结构化 `Citation / Locator`，不接受自由文本 locator 解析。
+2. 输出契约固定为 `ExcerptContent | ToolFailure`，不新增新模型，不新增 page-only locator 路由。
+3. 验证口径是“locator 可回溯且可读取原文片段”，不做内容语义真伪校验（不判断是否支撑结论）。
+4. 集成层复用 `FundDocumentToolService.get_excerpt`，不新增 raw Docling JSON / raw PDF / 本地路径暴露。
+5. 输入参数：`citation: Citation`（可选 `max_chars`）；可叠加 `document_id` 显式入参以匹配公共 tool 契约。
+6. 验证逻辑：(1) `citation.locator.document_id == document_id`；(2) `locator_kind` 合法；(3) 按 `table / section / excerpt` 路由取摘录。
+
+### allowed write set（17B）
+
+- `fund_agent/fund/document_tools/service.py`
+- `tests/fund/document_tools/test_get_excerpt_verify.py`
+- `docs/implementation-control.md`
+- `docs/design.md`
+
+### 验证命令（17B）
+
+```bash
+uv run pytest tests/fund/document_tools/test_get_excerpt_verify.py tests/fund/service/test_extraction.py tests/fund/cli/test_cli.py -x --tb=short -q
+```
+
+### stop conditions（17B）
+
+- 接受自由文本 locator 或章节号字符串作为输入。
+- 新增 raw payload 或本地路径暴露。
+- 输出新增非 `ExcerptContent | ToolFailure` 的新模型。
+- 将验证口径滑向“内容是否支持结论”的语义校验。
+- 未覆盖 `not_found / identity_mismatch` 两个失败路径测试。
+
 ### Slice 17A 实施规格
 
 sidecar = 伴随主文件的元数据 JSON 文件。报告正文是 Markdown（给人看），sidecar 是结构化 JSON（给程序读）。
