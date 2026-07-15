@@ -2178,3 +2178,76 @@ def test_generate_json_output_includes_warnings(monkeypatch, tmp_path: Path) -> 
     output = json.loads(stdout)
     assert "warnings" in output
     assert output["warnings"] == ["pandoc 未安装，已回退为 Markdown 格式"]
+
+
+
+def test_generate_cli_real_pdf_smoke_writes_report_and_audit(monkeypatch, tmp_path: Path) -> None:
+    """17C 真实 PDF generate smoke：import -> generate -> 落盘 report/sidecar/audit。"""
+
+    assert REAL_SMOKE_PDF.is_file(), "Slice 17C real-smoke PDF is required"
+
+    class _FakeDeepSeekLlmClient:
+        def generate_text(self, *, system_prompt: str, user_prompt: str, temperature: float = 0) -> str:
+            if "审计" in system_prompt or "audit" in system_prompt.lower():
+                return '{"score": 99, "violations": []}'
+            if "修复" in system_prompt or "repair" in system_prompt.lower():
+                return '{"strategy": "none"}'
+            return "本章定性分析完成。"
+
+    monkeypatch.setattr(cli_module, "DeepSeekLlmClient", _FakeDeepSeekLlmClient)
+
+    pdf_dir = tmp_path / "pdfs"
+    pdf_dir.mkdir()
+    (pdf_dir / REAL_SMOKE_PDF.name).write_bytes(REAL_SMOKE_PDF.read_bytes())
+
+    work_dir = tmp_path / "work"
+
+    import_exit, import_stdout, import_stderr = _run(
+        [
+            "import",
+            "--pdf-dir", str(pdf_dir),
+            "--fund-code", REAL_SMOKE_FUND_CODE,
+            "--fund-name", REAL_SMOKE_FUND_NAME,
+            "--year-range", f"{REAL_SMOKE_YEAR}-{REAL_SMOKE_YEAR}",
+            "--work-dir", str(work_dir),
+        ]
+    )
+
+    assert import_exit == SUCCESS_EXIT_CODE, import_stdout + import_stderr
+    assert "1 imported" in import_stdout
+
+    generate_exit, generate_stdout, generate_stderr = _run(
+        [
+            "generate",
+            "--fund-code", REAL_SMOKE_FUND_CODE,
+            "--fund-name", REAL_SMOKE_FUND_NAME,
+            "--year", REAL_SMOKE_YEAR,
+            "--format", "markdown",
+            "--llm",
+            "--work-dir", str(work_dir),
+        ]
+    )
+
+    assert generate_exit == SUCCESS_EXIT_CODE, generate_stdout + generate_stderr
+    output = json.loads(generate_stdout)
+
+    assert output["fund_code"] == REAL_SMOKE_FUND_CODE
+    assert output["report_year"] == int(REAL_SMOKE_YEAR)
+    assert len(output["chapters"]) == 8
+
+    reports_dir = work_dir / "reports"
+    md_path = reports_dir / f"{REAL_SMOKE_FUND_CODE}-{REAL_SMOKE_YEAR}-analysis.md"
+    sidecar_path = reports_dir / f"{REAL_SMOKE_FUND_CODE}-{REAL_SMOKE_YEAR}-analysis.meta.json"
+    audit_dir = work_dir / "audit_artifacts"
+
+    assert md_path.is_file(), md_path
+    assert sidecar_path.is_file(), sidecar_path
+    assert audit_dir.is_dir(), audit_dir
+
+    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    assert sidecar["fund_code"] == REAL_SMOKE_FUND_CODE
+    assert sidecar["fund_name"] == REAL_SMOKE_FUND_NAME
+    assert sidecar["report_year"] == int(REAL_SMOKE_YEAR)
+
+    audit_files = sorted(audit_dir.glob("chapter_*_audit.json"))
+    assert audit_files, audit_dir
