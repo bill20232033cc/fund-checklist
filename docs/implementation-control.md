@@ -26,6 +26,47 @@
 - **Slice 17B**：citation 验证工具
 - **Slice 17C**：generate CLI 端到端 smoke
 
+### Slice 17C 实施规格
+
+裁决：
+1. 只做 `generate` CLI 端到端 smoke，不新增 `ask / interactive / streaming`。
+2. 真实样本固定为仓库本地 PDF：`基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf`；样本缺失时该 smoke 直接 blocker，不得用 fake PDF 替代。
+3. 先完成 `import`，再执行 `generate`；验证链路为：真实 PDF -> import -> generate -> report 落盘 -> 审计产物落盘 -> exit code 验证。
+4. 本次 smoke 使用 `--format markdown`，验证落盘链路；默认 `json` 模式只打印 stdout，不单独作为本 slice 的落盘验收。
+5. 验收口径：exit code 0；stdout JSON 包含 `fund_code=004393`、`report_year=2024`、8 个 chapters；落盘文件包含 `reports/{fund_code}-{year}-analysis.md`、`reports/{fund_code}-{year}-analysis.meta.json`；至少存在一个 `audit_artifacts/chapter_*_audit.json`。
+6. 本 smoke 不测 LLM 输出质量，不测泛化问答，不改现有 report contract，不进入默认慢路径 pytest gate。
+
+### allowed write set（17C）
+
+- `tests/fund/cli/test_cli.py`
+- `docs/implementation-control.md`
+- `docs/design.md`
+
+### 验证命令（17C）
+
+```bash
+uv run python -m fund_agent.cli.main import \
+  "基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf" \
+  --fund-code 004393 \
+  --work-dir .fund_checklist_cli_smoke_17c
+
+uv run python -m fund_agent.cli.main generate \
+  --fund-code 004393 \
+  --fund-name "安信企业价值优选混合型证券投资基金" \
+  --year 2024 \
+  --format markdown \
+  --work-dir .fund_checklist_cli_smoke_17c
+```
+
+### stop conditions（17C）
+
+- 真实 PDF 不存在。
+- import 或 generate 非 0 退出。
+- report markdown / sidecar 未落盘。
+- 审计产物未落盘。
+- smoke 被放进默认 pytest gate，导致常规回归变慢。
+- 顺带扩大成 `ask / interactive / streaming` 或新增用户入口。
+
 ### Slice 17B 实施规格
 
 裁决：
