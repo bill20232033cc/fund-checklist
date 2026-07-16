@@ -2219,7 +2219,10 @@ class FundReadingService:
                         section_ref=hit.section_ref,
                     ),
                 )
+                # 按列头内容匹配基金经理简介表（Docling 可能把 table 归到相邻 section）
+                # 优先匹配 section_ref，fallback 按列头关键词匹配
                 tables = tool_service.list_tables(doc_id)
+                matched = False
                 for t in tables:
                     if hasattr(t, "section_ref") and t.section_ref == hit.section_ref:
                         table = tool_service.read_table(doc_id, t.table_ref, max_rows=5)
@@ -2229,6 +2232,29 @@ class FundReadingService:
                                 name = str(data_row[0]).strip()
                                 tenure_start = str(data_row[2]).strip()
                                 years_of_service = str(data_row[4]).strip()
+                                matched = True
+                                break
+                # fallback: 按列头关键词匹配（姓名 + 从业年限）
+                # 注：表头可能跨两行（Row0: 姓名/职务/期限/证券从业年限, Row1: 任职日期/离任日期）
+                if not matched:
+                    for t in tables:
+                        table = tool_service.read_table(doc_id, t.table_ref, max_rows=2)
+                        if hasattr(table, "rows") and len(table.rows) >= 1:
+                            header_all = " ".join(str(c) for c in table.rows[0])
+                            if len(table.rows) >= 2:
+                                header_all += " " + " ".join(str(c) for c in table.rows[1])
+                            # 合并连续空格后匹配（Docling 可能在表格列头中插入空格，如"从 业年限"）
+                            header_normalized = re.sub(r"\s+", "", header_all)
+                            if "姓名" in header_normalized and "从业" in header_normalized:
+                                full_table = tool_service.read_table(doc_id, t.table_ref, max_rows=5)
+                                if hasattr(full_table, "rows") and len(full_table.rows) >= 3:
+                                    data_row = full_table.rows[2]
+                                    if len(data_row) >= 5:
+                                        name = str(data_row[0]).strip()
+                                        tenure_start = str(data_row[2]).strip()
+                                        years_of_service = str(data_row[4]).strip()
+                                        matched = True
+                                        break
                 break
 
         # 搜索投资策略

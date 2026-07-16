@@ -183,20 +183,19 @@ CHAPTER_CONTRACTS: dict[int, ChapterContract] = {
         title="当前阶段与关键变化",
         narrative_mode="变化→阶段→判断",
         must_answer=(
-            "当前阶段是什么（建仓期/稳定期/膨胀期/萎缩期/转型期）。",
-            "过去一年最关键的1-3个变化。",
-            "这些变化是否影响原始投资假设。",
-            "为什么偏偏是现在需要关注这只基金。",
-            "下一步最小验证问题是什么。",
+            "当前阶段是什么（5选1，按优先级匹配：转型期>建仓期>膨胀期>萎缩期>稳定期）。",
+            "过去一年最关键的1-3个变化（从持仓变动/规模变动/费率变动3个维度筛选，阈值触发才列入）。",
+            "这些变化是否影响原始投资假设（对比Ch7信号评分方向是否逆转）。",
+            "接下来最该跟踪的1-3个变量（来自Ch7评分最低指标）。",
         ),
         must_not_cover=(
             "不做市场整体走势预测。",
-            "不罗列所有变化，只保留最关键的1-3个。",
+            "不罗列所有变化，只保留阈值触发的最关键1-3个。",
             "不给最终持有/替换结论。",
         ),
         required_output_items=(
-            "过去一年最关键的变化（1-3个）",
-            "基金当前所处阶段",
+            "基金当前所处阶段（含判定依据）",
+            "过去一年最关键的变化（含触发阈值）",
             "变化是否改变前文判断",
             "接下来最该跟踪的变量",
         ),
@@ -1327,6 +1326,26 @@ class ChapterRepairer:
             )
 
 
+def _is_data_sufficient(chapter_id: int, data_table: str, contract: Any = None) -> bool:
+    """检测章节数据是否充足。
+
+    判定规则：仅当数据表中包含「**数据完整性声明**」精确标记时判定为数据不足。
+    「未披露」「暂不可用」等属于正常字段默认值，不作为降级依据。
+
+    参数:
+        chapter_id: 章节编号。
+        data_table: 程序生成的数据表。
+        contract: 章节合同（预留，当前未使用）。
+
+    返回:
+        数据充足返回 True，不足返回 False。
+    """
+    if not data_table:
+        return False
+    # 只检查精确降级标记（chapter_generator 中的 **数据完整性声明**）
+    return "数据完整性声明" not in data_table
+
+
 # ============================================================
 # ReportGenerationCoordinator（流程协调器）
 # ============================================================
@@ -1335,6 +1354,13 @@ class ChapterRepairer:
 SCORE_PASS = 80.0      # ≥80分通过
 SCORE_PATCH = 50.0     # 50-79分需修复
 # <50分需重写
+
+# 数据不足场景的评分调整
+SCORE_PASS_DEGRADED = 70.0   # 数据不足时 ≥70分通过
+WEIGHT_PROG_NORMAL = 0.3     # 数据充足时程序审计权重
+WEIGHT_LLM_NORMAL = 0.7      # 数据充足时 LLM 审计权重
+WEIGHT_PROG_DEGRADED = 0.5   # 数据不足时程序审计权重
+WEIGHT_LLM_DEGRADED = 0.5    # 数据不足时 LLM 审计权重
 
 # 最大修复次数
 MAX_PATCH_ATTEMPTS = 3
@@ -1423,17 +1449,37 @@ class ReportGenerationCoordinator:
             else:
                 warnings.append(f"Ch{chapter_id} 生成失败")
 
-        # 2. 检查 Ch1-6 是否全部通过
+        # 2. 检查 Ch1-6 是否全部通过（含数据不足时的降级通过）
         all_passed = all(
-            self._process_states.get(cid, ChapterProcessState(chapter_id=cid)).status == "passed"
+            self._process_states.get(cid, ChapterProcessState(chapter_id=cid)).status in ("passed", "passed_with_degradation")
             for cid in range(1, 7)
         )
 
         if not all_passed:
             warnings.append("Ch1-6 未全部通过，Ch0+Ch7 使用模板生成")
             # 使用模板生成 Ch0+Ch7
-            chapter_contents[0] = self._generate_template_chapter(0, fund_name, report_year, performance, evidence)
-            chapter_contents[7] = self._generate_template_chapter(7, fund_name, report_year, performance, evidence)
+            chapter_contents[0] = self._generate_template_chapter(
+                chapter_id=0,
+                fund_name=fund_name,
+                report_year=report_year,
+                performance=performance,
+                evidence=evidence,
+                fund_code=fund_code,
+                fund_manager=fund_manager,
+                scale_info=scale_info,
+                signal_judgment=signal_judgment,
+            )
+            chapter_contents[7] = self._generate_template_chapter(
+                chapter_id=7,
+                fund_name=fund_name,
+                report_year=report_year,
+                performance=performance,
+                evidence=evidence,
+                fund_code=fund_code,
+                fund_manager=fund_manager,
+                scale_info=scale_info,
+                signal_judgment=signal_judgment,
+            )
             return chapter_contents, warnings
 
         # 3. Ch1-6 全部通过，生成 Ch0+Ch7
@@ -1487,6 +1533,45 @@ class ReportGenerationCoordinator:
             审计通过的章节内容；失败时返回 None。
         """
 
+        try:
+            return self._generate_and_audit_chapter_inner(
+                chapter_id=chapter_id,
+                fund_code=fund_code, fund_name=fund_name,
+                report_year=report_year,
+                performance=performance, holdings=holdings,
+                allocation=allocation, fees=fees,
+                fund_manager=fund_manager, scale_info=scale_info,
+                evidence=evidence,
+                use_chapter_summaries=use_chapter_summaries,
+                chapter_summaries=chapter_summaries,
+                signal_judgment=signal_judgment,
+            )
+        except Exception:
+            state = ChapterProcessState(chapter_id=chapter_id)
+            state.status = "failed"
+            state.record_event("generate_failed", {"chapter_id": chapter_id, "reason": "unhandled_exception"})
+            self._process_states[chapter_id] = state
+            return None
+
+    def _generate_and_audit_chapter_inner(
+        self,
+        chapter_id: int,
+        fund_code: str,
+        fund_name: str,
+        report_year: int,
+        performance: dict[int, dict[str, str]],
+        holdings: dict[int, tuple[Any, ...]],
+        allocation: dict[int, tuple[Any, ...]],
+        fees: dict[int, tuple[Any, ...]],
+        fund_manager: Any = None,
+        scale_info: Any = None,
+        evidence: Any = None,
+        use_chapter_summaries: bool = False,
+        chapter_summaries: dict[int, str] | None = None,
+        signal_judgment: Any = None,
+    ) -> str | None:
+        """内部实现，由 _generate_and_audit_chapter 包装异常处理。"""
+
         # 初始化过程状态
         state = ChapterProcessState(chapter_id=chapter_id)
         self._process_states[chapter_id] = state
@@ -1525,6 +1610,26 @@ class ReportGenerationCoordinator:
         )
 
         if not content:
+            # LLM 生成失败，尝试模板降级
+            content = self._generate_template_chapter(
+                chapter_id=chapter_id,
+                fund_name=fund_name,
+                report_year=report_year,
+                performance=performance,
+                evidence=evidence,
+                fund_code=fund_code,
+                fund_manager=fund_manager,
+                scale_info=scale_info,
+                signal_judgment=signal_judgment,
+                risk_checklist=None,  # 审计管道中不传 risk_checklist
+                stress_test=stress_test,
+            )
+            if content:
+                # 模板降级成功，标记为 passed_with_degradation
+                state.status = "passed_with_degradation"
+                state.record_event("template_fallback", {"chapter_id": chapter_id})
+                self._artifact_store.save_process_state(state)
+                return content
             state.status = "failed"
             state.record_event("generate_failed", {"chapter_id": chapter_id})
             self._artifact_store.save_process_state(state)
@@ -1543,6 +1648,7 @@ class ReportGenerationCoordinator:
             audit_data_table = "\n".join(summary_parts)
 
         # 审计闭环
+        last_valid_content = content  # 保留初始生成的内容
         for attempt in range(MAX_PATCH_ATTEMPTS + MAX_REGENERATE_ATTEMPTS):
             state.audit_attempts += 1
 
@@ -1554,8 +1660,20 @@ class ReportGenerationCoordinator:
             llm_auditor = LlmAuditor(self._llm_client, chapter_id, content, audit_data_table, contract)
             llm_score, llm_violations = llm_auditor.audit()
 
-            # 综合分数（程序30% + LLM70%）
-            final_score = prog_score * 0.3 + llm_score * 0.7
+            # 数据充足性检测
+            data_sufficient = _is_data_sufficient(chapter_id, data_table, contract)
+
+            # 综合分数（根据数据充足性调整权重）
+            if data_sufficient:
+                weight_prog = WEIGHT_PROG_NORMAL
+                weight_llm = WEIGHT_LLM_NORMAL
+                score_pass = SCORE_PASS
+            else:
+                weight_prog = WEIGHT_PROG_DEGRADED
+                weight_llm = WEIGHT_LLM_DEGRADED
+                score_pass = SCORE_PASS_DEGRADED
+
+            final_score = prog_score * weight_prog + llm_score * weight_llm
             all_violations = prog_violations + llm_violations
 
             # 记录审计决定
@@ -1565,7 +1683,7 @@ class ReportGenerationCoordinator:
                 violations=all_violations,
                 programmatic_score=prog_score,
                 llm_score=llm_score,
-                recommendation="pass" if final_score >= SCORE_PASS else "patch" if final_score >= SCORE_PATCH else "regenerate",
+                recommendation="pass" if final_score >= score_pass else "patch" if final_score >= SCORE_PATCH else "regenerate",
                 audit_time=datetime.now().isoformat(),
             )
             self._artifact_store.save_audit_decision(decision)
@@ -1577,12 +1695,16 @@ class ReportGenerationCoordinator:
                 "score": final_score,
                 "violations_count": len(all_violations),
                 "recommendation": decision.recommendation,
+                "data_sufficient": data_sufficient,
+                "weight_prog": weight_prog,
+                "weight_llm": weight_llm,
+                "score_pass_threshold": score_pass,
             })
 
             # 判断是否通过
-            if final_score >= SCORE_PASS:
-                state.status = "passed"
-                state.record_event("passed", {"score": final_score})
+            if final_score >= score_pass:
+                state.status = "passed_with_degradation" if not data_sufficient else "passed"
+                state.record_event(state.status, {"score": final_score, "data_sufficient": data_sufficient})
                 self._artifact_store.save_process_state(state)
                 return content
 
@@ -1620,11 +1742,14 @@ class ReportGenerationCoordinator:
                     # PATCH 次数用完，尝试 REGENERATE
                     if state.can_regenerate():
                         state.regenerate_attempts += 1
-                        content = self._regenerate_chapter(
+                        regen = self._regenerate_chapter(
                             chapter_id, fund_code, fund_name, report_year,
                             data_table, performance, holdings, allocation,
                             fees, fund_manager, scale_info,
                         )
+                        if regen:
+                            content = regen
+                            last_valid_content = regen
                         state.record_event("regenerated", {
                             "attempt": state.regenerate_attempts,
                         })
@@ -1641,14 +1766,14 @@ class ReportGenerationCoordinator:
                         "attempt": state.regenerate_attempts,
                     })
 
-        # 所有修复尝试用完
+        # 所有修复尝试用完，返回最后一次生成的内容（避免空章节）
         state.status = "failed"
         state.record_event("failed", {
             "reason": "max_attempts_exceeded",
             "final_score": state.current_score,
         })
         self._artifact_store.save_process_state(state)
-        return None
+        return content if content else last_valid_content
 
     def _generate_chapter_content(
         self,
@@ -1711,6 +1836,9 @@ class ReportGenerationCoordinator:
                 user_prompt=user_prompt,
             )
 
+            if not llm_analysis or not isinstance(llm_analysis, str):
+                return None
+
             # 检查 hallucination
             allowed_numbers = set(re.findall(r'\d+\.?\d*', data_table))
             from fund_agent.service.chapter_generator import contains_non_year_numbers
@@ -1759,6 +1887,12 @@ class ReportGenerationCoordinator:
         report_year: int,
         performance: dict[int, dict[str, str]],
         evidence: Any = None,
+        fund_code: str = "",
+        fund_manager: Any = None,
+        scale_info: Any = None,
+        signal_judgment: Any = None,
+        risk_checklist: Any = None,
+        stress_test: Any = None,
     ) -> str:
         """生成模板章节（fallback）。
 
@@ -1768,6 +1902,12 @@ class ReportGenerationCoordinator:
             report_year: 报告年份。
             performance: 多年度业绩数据。
             evidence: 证据来源汇总（可选）。
+            fund_code: 基金代码（可选）。
+            fund_manager: 基金经理信息（可选）。
+            scale_info: 规模信息（可选）。
+            signal_judgment: 信号判断结果（可选）。
+            risk_checklist: 风险清单（可选）。
+            stress_test: 压力测试结果（可选）。
 
         返回:
             模板生成的 Markdown 文本（含证据来源小节）。
@@ -1778,11 +1918,81 @@ class ReportGenerationCoordinator:
             base_content = (
                 f"## 一眼看懂\n\n"
                 f"- **基金名称**：{fund_name}\n"
+                f"- **基金代码**：{fund_code}\n"
                 f"- **报告年份**：{report_year}\n"
                 f"- **最新净值增长率**：{latest.get('nav_growth_rate', 'N/A')}\n\n"
                 f"## 投资要点\n\n"
                 f"基于 {report_year} 年报数据分析，该基金业绩表现和持仓情况详见后续章节。\n"
             )
+        elif chapter_id == 1:
+            lines = [
+                f"## 基金概况\n",
+                f"- 基金代码：{fund_code}",
+                f"- 基金名称：{fund_name}",
+                f"- 报告年份：{report_year}",
+            ]
+            if fund_manager:
+                lines.append(f"- 基金经理：{fund_manager.name}（从业{fund_manager.years_of_service}）")
+            base_content = "\n".join(lines) + "\n"
+        elif chapter_id == 2:
+            lines = ["## 业绩数据\n"]
+            if report_year in performance:
+                perf = performance[report_year]
+                lines.extend([
+                    "| 年份 | 净值增长率 | 基准收益率 | 超额收益 |",
+                    "|------|-----------|-----------|---------|",
+                    f"| {report_year} | {perf.get('nav_growth_rate', 'N/A')} | {perf.get('benchmark_return_rate', 'N/A')} | {perf.get('excess_return', 'N/A')} |",
+                ])
+            else:
+                lines.append("暂无业绩数据。")
+            base_content = "\n".join(lines) + "\n"
+        elif chapter_id == 3:
+            lines = ["## 基金经理信息"]
+            if fund_manager:
+                lines.extend([
+                    f"- 姓名：{fund_manager.name}",
+                    f"- 任职日期：{fund_manager.tenure_start}",
+                    f"- 从业年限：{fund_manager.years_of_service}",
+                    f"- 持有本基金：{fund_manager.holds_fund or '未披露'}",
+                ])
+            else:
+                lines.append("基金经理信息暂不可用。")
+            base_content = "\n".join(lines) + "\n"
+        elif chapter_id == 4:
+            base_content = "## 投资者获得感\n\n投资者实际收益数据暂不可用，详见原始年报。\n"
+        elif chapter_id == 5:
+            lines = ["## 当前阶段与关键变化"]
+            if scale_info:
+                lines.extend([
+                    f"- A类份额总数：{scale_info.total_shares_a}",
+                    f"- C类份额总数：{scale_info.total_shares_c}",
+                    f"- 管理人持有比例：{scale_info.management_holds}",
+                ])
+            else:
+                lines.append("规模信息暂不可用。")
+            base_content = "\n".join(lines) + "\n"
+        elif chapter_id == 6:
+            lines = ["## 核心风险与否决项\n"]
+            # 压力测试（如果有）
+            if stress_test:
+                fund_type_labels = {"index_fund": "指数基金", "bond_fund": "债券基金", "active_fund": "主动基金"}
+                lines.extend([
+                    "### 压力测试\n",
+                    f"- 基金类型: {fund_type_labels.get(stress_test.fund_type, stress_test.fund_type)}",
+                ])
+                if stress_test.current_scale_billion is not None:
+                    lines.append(f"- 当前规模: {stress_test.current_scale_billion:.2f}亿元")
+                if stress_test.excess_return is not None:
+                    lines.append(f"- 超额收益: {stress_test.excess_return:.2%}")
+                lines.append("")
+            # 风险清单
+            lines.extend(["### 风险清单\n", "| 风险项 | 状态 | 说明 |", "|--------|------|------|"])
+            if risk_checklist:
+                for item in risk_checklist:
+                    lines.append(f"| {item.name} | {item.status} | {item.detail} |")
+            else:
+                lines.append("| （无数据） | 🟡 | 需要补充数据 |")
+            base_content = "\n".join(lines) + "\n"
         elif chapter_id == 7:
             latest = performance.get(report_year, {})
             base_content = (

@@ -59,19 +59,28 @@ LLM_ANALYSIS_PROMPTS: dict[int, str] = {
     ),
     3: (
         "请基于上述基金经理信息和持仓数据，写一段「基金经理画像」分析。要求：\n"
-        "- 分析基金经理的投资策略与实际持仓行为是否一致\n"
+        "- 如果数据表包含「数据完整性声明」，先声明缺失字段，再基于已有数据分析\n"
+        "- 言行一致性分析必须基于「宣称投资策略」与实际持仓的对比，禁止从持仓反推基金经理的投资意图或策略\n"
+        "- 如果「宣称投资策略」缺失，声明该维度无法分析，仅描述持仓行为特征\n"
         "- 分析持仓集中度趋势、行业分布特点\n"
         "- 分析基金经理是否持有本基金（利益一致性）\n"
         "- 不做性格或人品的主观评价\n"
         "- 不猜测基金经理的动机\n"
         "- 不要包含任何数字"
     ),
-    4: "投资者实际收益数据暂不可用，详见原始年报。",
+    4: (
+        "请基于上述数据，写一段「投资者获得感」分析。要求：\n"
+        "- 如果数据表包含「数据完整性声明」（2026 新规前年报），说明当前报告年份不披露投资者实际收益数据，仅展示基金产品收益\n"
+        "- 如果有投资者实际收益数据，分析行为损益 = 投资者实际收益 - 基金产品收益\n"
+        "- 分析份额变动趋势\n"
+        "- 不要包含任何数字"
+    ),
     5: (
-        "请基于上述规模和配置数据，写一段「当前阶段与关键变化」分析。要求：\n"
-        "- 判断当前阶段（建仓期/稳定期/膨胀期/萎缩期/转型期）\n"
-        "- 指出过去一年最关键的1-3个变化\n"
-        "- 这些变化是否影响原始投资假设\n"
+        "请基于上述数据和阶段判定规则，写一段「当前阶段与关键变化」分析。要求：\n"
+        "- 参考数据表中的「阶段判定规则」节，按优先级匹配阶段（转型期>建仓期>膨胀期>萎缩期>稳定期）\n"
+        "- 参考「关键变化筛选阈值」节，从持仓变动/规模变动/费率变动3个维度筛选关键变化，只列阈值触发的项\n"
+        "- 分析这些变化是否影响原始投资假设（如果数据表中有信号评分，对比方向是否逆转）\n"
+        "- 给出接下来最该跟踪的1-3个变量\n"
         "- 不要包含任何数字"
     ),
     6: (
@@ -219,12 +228,19 @@ def generate_data_table(
 
     # Ch2: R=A+B-C 收益归因
     if chapter_id == 2:
-        lines = [
+        lines = []
+        # 数据不足时输出结构化缺失声明
+        if len(performance) < 3:
+            lines.extend([
+                f"**数据完整性声明**：当前仅导入 {len(performance)} 年数据，本章要求近 1/3/5 年数据。以下为已导入年份的 R-A-B-C 拆解。",
+                "",
+            ])
+        lines.extend([
             "## 业绩数据",
             "",
             "| 年份 | 净值增长率(R) | 基准收益率(B) | 超额收益(A=R-B) |",
             "|------|-------------|-------------|----------------|",
-        ]
+        ])
         for year in sorted(performance.keys()):
             p = performance[year]
             lines.append(
@@ -250,19 +266,31 @@ def generate_data_table(
     if chapter_id == 3:
         lines = ["## 基金经理信息"]
         if fund_manager:
+            # 检查字段完整性，逐项声明缺失字段
+            missing_fields = []
+            if not fund_manager.tenure_start:
+                missing_fields.append("任职日期")
+            if not fund_manager.years_of_service:
+                missing_fields.append("从业年限")
+            if not fund_manager.investment_strategy:
+                missing_fields.append("宣称投资策略")
+            if not fund_manager.holds_fund:
+                missing_fields.append("持有本基金")
+            if missing_fields:
+                lines.extend(["", f"**数据完整性声明**：以下字段缺失：{'、'.join(missing_fields)}。言行一致性判断仅基于已有数据。", ""])
             lines.extend([
                 "",
                 "| 项目 | 值 |",
                 "|------|----|",
                 f"| 姓名 | {fund_manager.name} |",
-                f"| 任职日期 | {fund_manager.tenure_start} |",
-                f"| 从业年限 | {fund_manager.years_of_service} |",
+                f"| 任职日期 | {fund_manager.tenure_start or '未披露'} |",
+                f"| 从业年限 | {fund_manager.years_of_service or '未披露'} |",
                 f"| 持有本基金 | {fund_manager.holds_fund or '未披露'} |",
             ])
             if fund_manager.investment_strategy:
                 lines.extend(["", "## 宣称投资策略（原文）", "", fund_manager.investment_strategy[:600]])
         else:
-            lines.append("\n基金经理信息暂不可用。")
+            lines.extend(["", "**数据完整性声明**：基金经理信息未提取成功。以下仅展示持仓行为数据，无法进行言行一致性分析。", ""])
         # 持仓变化作为实际行为
         lines.extend(["", "## 实际持仓行为"])
         for year in sorted(holdings.keys()):
@@ -273,9 +301,24 @@ def generate_data_table(
                 lines.append(f"| {h.rank} | {h.stock_code} | {h.stock_name} | {h.percentage} |")
         base_content = "\n".join(lines)
 
-    # Ch4: 投资者获得感 — 暂不可用
+    # Ch4: 投资者获得感
     if chapter_id == 4:
-        base_content = "## 投资者获得感\n\n投资者实际收益数据暂不可用，详见原始年报。"
+        if report_year < 2026:
+            lines = [
+                '## 投资者获得感', '',
+                '**数据完整性声明**：本章节所需的投资者实际收益数据（盈利投资者占比、加权平均投资者收益率）'
+                '为 2026 年度报告新规要求披露的字段。当前报告年份为 '
+                f'{report_year} 年，年报中不包含上述数据，本章节暂不适用。', '',
+                '以下仅展示基金产品收益数据。', '',
+            ]
+            if performance:
+                lines.extend(['| 年份 | 净值增长率 | 基准收益率 |', '|------|-----------|-----------|'])
+                for year in sorted(performance.keys()):
+                    p = performance[year]
+                    lines.append(f'| {year} | {p.get("nav_growth_rate", "N/A")} | {p.get("benchmark_return_rate", "N/A")} |')
+            base_content = '\n'.join(lines)
+        else:
+            base_content = "## 投资者获得感\n\n投资者实际收益数据暂不可用，详见原始年报。"
 
     # Ch5: 当前阶段与关键变化
     if chapter_id == 5:
@@ -300,6 +343,57 @@ def generate_data_table(
             lines.append("|---------|------|---------|")
             for a in allocation[year][:8]:
                 lines.append(f"| {a.category} | {a.amount} | {a.percentage_of_net} |")
+
+        # 结构化阶段判定（确定性计算）
+        lines.extend(["", "## 阶段判定规则"])
+        stage = "稳定期"  # 默认
+        stage_reason = "默认"
+        sorted_years = sorted(performance.keys())
+        if len(sorted_years) >= 2:
+            prev_year = sorted_years[-2]
+            curr_year = sorted_years[-1]
+            # 规模变动检测
+            if scale_info and hasattr(scale_info, 'estimated_aum') and scale_info.estimated_aum:
+                # 无法直接计算同比，标记为需人工判断
+                pass
+            # 基金经理变更检测（如果 fund_manager 有变更记录）
+            if fund_manager and not fund_manager.tenure_start:
+                stage = "转型期"
+                stage_reason = "基金经理信息缺失，可能涉及变更"
+        # 建仓期检测
+        if fund_manager and fund_manager.tenure_start:
+            try:
+                import re as _re
+                year_match = _re.search(r'(\d{4})', fund_manager.tenure_start)
+                if year_match:
+                    start_year = int(year_match.group(1))
+                    if report_year - start_year < 2:
+                        stage = "建仓期"
+                        stage_reason = f"基金经理任职于{start_year}年，管理本基金不足2年"
+            except (ValueError, AttributeError):
+                pass
+
+        stage_labels = {
+            "转型期": "🔴 转型期（优先级最高）",
+            "建仓期": "🟡 建仓期",
+            "膨胀期": "🟡 膨胀期",
+            "萎缩期": "🟡 萎缩期",
+            "稳定期": "🟢 稳定期",
+        }
+        lines.append(f"| 判定结果 | {stage_labels.get(stage, stage)} |")
+        lines.append(f"| 判定依据 | {stage_reason} |")
+        lines.append("")
+        lines.append("阶段优先级：转型期 > 建仓期 > 膨胀期 > 萎缩期 > 稳定期")
+        lines.append("时间窗口：同比（当前年 vs 上一年）")
+
+        # 关键变化筛选阈值
+        lines.extend(["", "## 关键变化筛选阈值"])
+        lines.append("| 维度 | 阈值 | 说明 |")
+        lines.append("|------|------|------|")
+        lines.append("| 持仓变动 | 前十大持仓换手 >40% | 两年间前十大持仓中替换的股票数量占比 |")
+        lines.append("| 规模变动 | 份额×净值同比 >30% | 规模同比增长超过30% |")
+        lines.append("| 费率变动 | 管理费/托管费绝对值变动 >0.1% | 费率变动超过0.1个百分点 |")
+
         base_content = "\n".join(lines)
 
     # Ch6: 核心风险与否决项

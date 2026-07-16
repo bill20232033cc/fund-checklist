@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from fund_agent.service.models import FundManagerInfo, ScaleInfo, RiskChecklistItem, StressTestResult
 
 import pytest
 
@@ -526,3 +527,150 @@ def test_coordinator_initialization(tmp_path: Path) -> None:
 
     states = coordinator.get_process_states()
     assert len(states) == 0
+
+
+# ============================================================
+# 模板生成测试（Slice 17G 根因验证）
+# ============================================================
+
+
+def test_template_chapter_generation_all_chapters(tmp_path: Path) -> None:
+    """模板降级必须为所有章节生成非空内容（Slice 17G 根因）。"""
+
+    client = FakeLlmClient("{}")
+    coordinator = ReportGenerationCoordinator(client, tmp_path)
+
+    performance = {2024: {"nav_growth_rate": "17.32%", "benchmark_return_rate": "14.45%"}}
+    evidence = None
+
+    # 测试所有章节的模板生成（使用当前签名）
+    for chapter_id in range(8):
+        content = coordinator._generate_template_chapter(
+            chapter_id=chapter_id,
+            fund_name="安信企业价值优选混合型证券投资基金",
+            report_year=2024,
+            performance=performance,
+            evidence=evidence,
+        )
+        # 关键断言：每个章节必须生成非空内容
+        assert content, f"Chapter {chapter_id} template returned empty content"
+        assert len(content) > 10, f"Chapter {chapter_id} template content too short: {len(content)} chars"
+
+
+def test_template_chapter_1_with_fund_manager(tmp_path: Path) -> None:
+    """Ch1 模板：有基金经理信息时输出姓名和从业年限。"""
+    from fund_agent.service.audit_pipeline import ReportGenerationCoordinator
+
+    client = FakeLlmClient("{}")
+    coordinator = ReportGenerationCoordinator(client, tmp_path)
+
+    fm = FundManagerInfo(
+        name="张三",
+        tenure_start="2020-01-01",
+        years_of_service="10年",
+        investment_strategy="价值投资",
+        holds_fund="10~50万份",
+    )
+    content = coordinator._generate_template_chapter(
+        chapter_id=1,
+        fund_name="测试基金",
+        report_year=2024,
+        performance={},
+        evidence=None,
+        fund_manager=fm,
+    )
+    assert "张三" in content
+    assert "10年" in content
+
+
+def test_template_chapter_3_with_fund_manager(tmp_path: Path) -> None:
+    """Ch3 模板：有基金经理信息时输出完整画像。"""
+    from fund_agent.service.audit_pipeline import ReportGenerationCoordinator
+
+    client = FakeLlmClient("{}")
+    coordinator = ReportGenerationCoordinator(client, tmp_path)
+
+    fm = FundManagerInfo(
+        name="李四",
+        tenure_start="2019-06-01",
+        years_of_service="8年",
+        investment_strategy="成长投资",
+        holds_fund="0",
+    )
+    content = coordinator._generate_template_chapter(
+        chapter_id=3,
+        fund_name="测试基金",
+        report_year=2024,
+        performance={},
+        evidence=None,
+        fund_manager=fm,
+    )
+    assert "李四" in content
+    assert "2019-06-01" in content
+
+
+def test_template_chapter_5_with_scale_info(tmp_path: Path) -> None:
+    """Ch5 模板：有规模信息时输出份额数据。"""
+    from fund_agent.service.audit_pipeline import ReportGenerationCoordinator
+
+    client = FakeLlmClient("{}")
+    coordinator = ReportGenerationCoordinator(client, tmp_path)
+
+    scale = ScaleInfo(
+        total_shares_a="1.5亿份",
+        total_shares_c="0.3亿份",
+        individual_investor_ratio="95%",
+        management_holds="0.01%",
+        estimated_aum="2.99亿元",
+    )
+    content = coordinator._generate_template_chapter(
+        chapter_id=5,
+        fund_name="测试基金",
+        report_year=2024,
+        performance={},
+        evidence=None,
+        scale_info=scale,
+    )
+    assert "1.5亿份" in content
+    assert "0.3亿份" in content
+
+
+def test_template_chapter_6_with_risk_checklist(tmp_path: Path) -> None:
+    """Ch6 模板：有风险清单时输出表格。"""
+    from fund_agent.service.audit_pipeline import ReportGenerationCoordinator
+
+    client = FakeLlmClient("{}")
+    coordinator = ReportGenerationCoordinator(client, tmp_path)
+
+    risks = [
+        RiskChecklistItem(name="清盘风险", status="🟢", detail="规模2.99亿，远超红线"),
+        RiskChecklistItem(name="风格漂移", status="🟡", detail="行业配置变动较大"),
+    ]
+    content = coordinator._generate_template_chapter(
+        chapter_id=6,
+        fund_name="测试基金",
+        report_year=2024,
+        performance={},
+        evidence=None,
+        risk_checklist=risks,
+    )
+    assert "清盘风险" in content
+    assert "风格漂移" in content
+    assert "🟢" in content
+
+
+def test_is_data_sufficient_with_normal_placeholder(tmp_path: Path) -> None:
+    """_is_data_sufficient 不应将「未披露」默认值误判为数据不足。"""
+    from fund_agent.service.audit_pipeline import _is_data_sufficient
+
+    # 包含「未披露」但没有「数据完整性声明」的数据表 → 数据充足
+    data_table = "| 项目 | 值 |\n|------|----|\n| 持有本基金 | 未披露 |"
+    assert _is_data_sufficient(3, data_table) is True
+
+
+def test_is_data_sufficient_with_degradation_marker(tmp_path: Path) -> None:
+    """_is_data_sufficient 对含「数据完整性声明」的数据表判定为不足。"""
+    from fund_agent.service.audit_pipeline import _is_data_sufficient
+
+    data_table = "**数据完整性声明**：基金经理信息未提取成功。"
+    assert _is_data_sufficient(3, data_table) is False

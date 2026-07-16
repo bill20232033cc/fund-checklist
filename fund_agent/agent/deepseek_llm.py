@@ -21,7 +21,7 @@ DEEPSEEK_BASE_URL_ENV = "DEEPSEEK_BASE_URL"
 DEEPSEEK_MODEL_ENV = "DEEPSEEK_MODEL"
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEFAULT_DEEPSEEK_MODEL = "deepseek-chat"
-DEFAULT_DEEPSEEK_TIMEOUT_SECONDS = 30
+DEFAULT_DEEPSEEK_TIMEOUT_SECONDS = 60
 _CHAT_COMPLETIONS_PATH = "/chat/completions"
 _JSON_CONTENT_TYPE = "application/json"
 _UNAVAILABLE_MESSAGE = "DeepSeek LLM provider 暂不可用"
@@ -250,14 +250,25 @@ class DeepSeekLlmClient:
             },
             timeout_seconds=self._timeout_seconds,
         )
-        try:
-            response = self._transport.send(request)
-        except DeepSeekTransportUnavailable as exc:
-            raise LlmClientFailure(FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE) from exc
-
-        if response.status_code < 200 or response.status_code >= 300:
-            raise LlmClientFailure(FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE)
-        return _parse_text_content(response.body)
+        # 带指数退避的重试逻辑（最多3次）
+        import time as _time
+        max_retries = 3
+        last_exc: Exception | None = None
+        for attempt in range(max_retries):
+            try:
+                response = self._transport.send(request)
+                if 200 <= response.status_code < 300:
+                    return _parse_text_content(response.body)
+                # 非2xx响应，重试
+                last_exc = LlmClientFailure(FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE)
+            except DeepSeekTransportUnavailable as exc:
+                last_exc = LlmClientFailure(FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE)
+            except Exception as exc:
+                last_exc = exc
+            # 指数退避：1s, 2s, 4s
+            if attempt < max_retries - 1:
+                _time.sleep(2 ** attempt)
+        raise last_exc  # type: ignore[misc]
 
 
 def _chat_completions_url(base_url: str) -> str:
