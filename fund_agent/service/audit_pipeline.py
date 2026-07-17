@@ -679,12 +679,14 @@ class ProgrammaticAuditor:
         chapter_content: str,
         data_table: str,
         contract: ChapterContract,
+        global_allowed_numbers: set[str] | None = None,
     ) -> None:
         """初始化审计器。"""
         self._chapter_id = chapter_id
         self._content = chapter_content
         self._data_table = data_table
         self._contract = contract
+        self._global_allowed_numbers = global_allowed_numbers
 
     def audit(self) -> tuple[float, tuple[AuditViolation, ...]]:
         """执行程序审计。
@@ -739,16 +741,22 @@ class ProgrammaticAuditor:
             ))
 
         # P2: 数字编造（LLM输出包含数据表中没有的数字）
-        data_numbers = set(re.findall(r'\d+\.?\d*', self._data_table))
+        # 使用全局 allowed_numbers（支持跨章节引用），否则用本章 data_table
+        from fund_agent.service.chapter_generator import _normalize_number
+        if self._global_allowed_numbers:
+            data_numbers_norm = {_normalize_number(n) for n in self._global_allowed_numbers}
+        else:
+            data_numbers_norm = {_normalize_number(n) for n in re.findall(r'\d+\.?\d*', self._data_table)}
         content_numbers = set(re.findall(r'\d+\.?\d*', self._content))
         # 排除年份（20xx）和小数字（1-99）
         suspicious = set()
         for n in content_numbers:
-            if re.match(r'^(20[12]\d)$', n):
+            normalized = _normalize_number(n)
+            if re.match(r'^(20[12]\d)$', normalized):
                 continue
-            if re.match(r'^[1-9]\d?$', n):
+            if re.match(r'^[1-9]\d?$', normalized):
                 continue
-            if n not in data_numbers:
+            if normalized not in data_numbers_norm:
                 suspicious.add(n)
         if suspicious:
             violations.append(AuditViolation(
@@ -1704,7 +1712,7 @@ class ReportGenerationCoordinator:
             state.audit_attempts += 1
 
             # 程序审计
-            prog_auditor = ProgrammaticAuditor(chapter_id, content, audit_data_table, contract)
+            prog_auditor = ProgrammaticAuditor(chapter_id, content, audit_data_table, contract, global_allowed_numbers=global_allowed_numbers)
             prog_score, prog_violations = prog_auditor.audit()
 
             # LLM 审计

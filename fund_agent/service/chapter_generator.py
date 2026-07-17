@@ -26,7 +26,7 @@ LLM_CHAPTER_SYSTEM_PROMPT = (
     "1. 你可以引用数据表格中的数字（如净值增长率、费率、持仓比例等），引用时需注明据上表或据数据表格\n"
     "2. 禁止编造数据表格中不存在的数字\n"
     "3. 数据表格已由系统生成，你只需要写分析评论\n"
-    "4. 禁止输出投资建议（如'买入''卖出''推荐''建议关注'等）\n"
+    "4. 禁止输出投资建议关键词（如'买入''卖出''推荐''建议关注'等），即使引用基金经理原文也需改写\n"
     "5. 禁止预测未来收益或市场走势\n"
     "6. 使用 Markdown 格式，语言简洁专业\n\n"
     "违反以上约束的输出将被拒绝。"
@@ -693,14 +693,16 @@ def contains_non_year_numbers(text: str, allowed_numbers: set[str] | None = None
     numbers = re.findall(r'(?<!\d)\d+\.?\d*%?(?!\d)', text)
     for n in numbers:
         cleaned = n.rstrip('%')
+        # 归一化后再做所有检查（1.20→1.2, 1.→1）
+        normalized = _normalize_number(cleaned)
         # 年份（20xx）允许
-        if re.match(r'^(20[12]\d)$', cleaned):
+        if re.match(r'^(20[12]\d)$', normalized):
             continue
-        # 单位数字（1-9）和常见小数字（10-99）允许（从业年限、排名等）
-        if re.match(r'^[1-9]\d?$', cleaned):
+        # 单位数字（1-9）和常见小数字（10-99）允许（从业年限、排名、列表编号等）
+        if re.match(r'^[1-9]\d?$', normalized):
             continue
         # 在允许列表中的数字允许（归一化匹配）
-        if normalized_allowed and _normalize_number(cleaned) in normalized_allowed:
+        if normalized_allowed and normalized in normalized_allowed:
             continue
         return True
     return False
