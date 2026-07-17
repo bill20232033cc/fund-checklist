@@ -797,7 +797,7 @@ class ProgrammaticAuditor:
         if self._global_allowed_numbers:
             data_numbers_norm = {_normalize_number(n) for n in self._global_allowed_numbers}
         else:
-            data_numbers_norm = {_normalize_number(n) for n in re.findall(r'\d+\.?\d*', self._data_table)}
+            data_numbers_norm = {_normalize_number(n) for n in re.findall(r'\d+\.?\d*', self._data_table.replace(',', ''))}
         content_numbers = set(re.findall(r'\d+\.?\d*', self._content))
         # 排除年份（20xx）和小数字（1-99）
         suspicious = set()
@@ -813,7 +813,7 @@ class ProgrammaticAuditor:
         # 单位等价过滤：检查可疑数字是否是 allowed_numbers 的亿元/万元缩写
         # 例如 LLM 输出 "100.95" 匹配数据表中的 "10,095,099,672.67"（÷1亿）
         if suspicious:
-            raw_allowed = self._global_allowed_numbers or set(re.findall(r'\d+\.?\d*', self._data_table))
+            raw_allowed = self._global_allowed_numbers or set(re.findall(r'\d+\.?\d*', self._data_table.replace(',', '')))
             filtered = set()
             for s in suspicious:
                 if _is_unit_equivalent(s, raw_allowed):
@@ -1552,7 +1552,7 @@ class ReportGenerationCoordinator:
                 fund_manager, scale_info, evidence,
                 stress_test=st, signal_judgment=signal_judgment,
             )
-            global_numbers.update(re.findall(r'\d+\.?\d*', dt))
+            global_numbers.update(re.findall(r'\d+\.?\d*', dt.replace(',', '')))
 
         # 1. 生成 Ch1-6
         for chapter_id in range(1, 7):
@@ -2000,7 +2000,7 @@ class ReportGenerationCoordinator:
             if global_allowed_numbers:
                 allowed_numbers = global_allowed_numbers
             else:
-                allowed_numbers = set(re.findall(r'\d+\.?\d*', data_table))
+                allowed_numbers = set(re.findall(r'\d+\.?\d*', data_table.replace(',', '')))
             if contains_non_year_numbers(llm_analysis, allowed_numbers):
                 import logging
                 logging.getLogger(__name__).warning(
