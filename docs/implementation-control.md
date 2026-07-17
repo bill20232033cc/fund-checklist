@@ -24,7 +24,7 @@
 ### Phase 3：报告质量 + 可用性
 - **Slice 17A**：报告 Markdown 持久化 + metadata sidecar
 - **Slice 17B**：citation 验证工具
-- **Slice 17C**：generate CLI 端到端 smoke
+- **Slice 17C**：generate CLI 端到端 smoke ✅ 已完成（发现 3/8 章失败，触发 Phase 3.5）
 
 ### Slice 17C 实施规格
 
@@ -126,6 +126,35 @@ uv run pytest tests/fund/service/test_extraction.py tests/fund/service/test_llm_
 - .md 存在但 .meta.json 不存在。
 - .meta.json 中 audit_score 非 null 但无审计路径。
 - signal_judgment 为 None 时 sidecar 中 signal/normalized_score 应为 null，不得报错。
+
+### Phase 3.5：报告质量稳定化（阻塞 Phase 4）
+
+> 17C 手动验证发现 3/8 章失败（Ch2/Ch3/Ch5），根因：数据不足时无降级策略、审计阈值与数据现实脱节。
+> 本 Phase 完成前，Phase 4 不得启动。
+
+- **Slice 17D**：Ch2 单年降级 + Ch3 fund_manager 抽取修复 + LLM 分析约束。
+  - Ch2：单年导入时输出结构化缺失声明 + 已有单年数据表格，保留多年要求但不因数据不足导致 audit 循环失败。
+  - Ch3 bug fix：`_extract_fund_manager_with_citation` 按 section_ref 精确匹配 table，但 table-0014 在 section-0078 而非 section-0073。修复：改为按 section title 关键词匹配——search_document("基金经理") 收集所有 hit.section_ref，list_tables 后检查每个 table 所属 section 的 title 是否含"基金经理"，匹配则为候选 table。无匹配时 fallback：在 search_document 命中的所有 section_ref ±10 范围内扫描。
+  - Ch3 LLM 约束：fund_manager 部分字段缺失时，LLM 只分析已有数据（持仓行为），逐项声明缺失字段及原因；禁止从持仓反推基金经理意图。章节状态标记为 `passed_with_degradation`。
+- **Slice 17E**：Ch4 报告年份适配 + Ch5 must_answer 结构化规则。
+  - Ch4：report_year < 2026 时标注「本章节适用于 2026 年及以后年度报告」，输出 N/A 声明。2026+ 年报按 ChapterContract 生成。
+  - Ch5：定义 must_answer 的结构化规则，LLM 在规则框架内分析：
+    - 阶段判定（5 选 1，优先级从高到低）：转型期（基金经理变更 / 投资目标变更 / 业绩基准变更 / 基金类型变更）> 建仓期（成立 <2 年）> 膨胀期（规模同比增长 >50%）> 萎缩期（规模同比下降 >30%）> 稳定期（默认）。
+    - 时间窗口：同比（当前年 vs 上一年）。
+    - 关键变化筛选（3 维度，阈值触发才列入）：持仓变动（前十大持仓换手 >40%）、规模变动（份额×净值同比 >30%）、费率变动（管理费/托管费绝对值变动 >0.1%）。
+    - 是否改变投资假设：对比 Ch7 信号评分方向是否逆转。
+    - 跟踪变量：1-3 个，来自 Ch7 评分最低指标。
+    - LLM 失败时重试 1 次，仍失败则模板降级（数据表格 + 阶段判定结果 + 缺失声明）。
+- **Slice 17F**：审计管道数据适配。
+  - data_sources 缺失时 LLM 审计权重 70%→50%，程序审计 30%→50%。
+  - 数据不足场景通过阈值降至 ≥70。
+  - 审计产物记录数据不足状态、触发的降级规则、权重调整情况。
+- **Slice 17G** ✅：端到端验证通过（8/8 章非空）+ LLM 稳定性修复 + 模板降级 + _is_data_sufficient 精确化。DS ACCEPTED。
+
+**Phase 3.5 验收标准**：
+- 单年 PDF 导入后，8 章报告全部有内容（含降级声明）。
+- 审计产物正确记录降级状态。
+- 无章节因 audit 循环失败而输出空内容。
 
 ### Phase 4：分析能力扩展（低优先级）
 - ~~Slice 18A~~：已在 16A 实现，删除
