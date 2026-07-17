@@ -78,9 +78,11 @@ LLM_ANALYSIS_PROMPTS: dict[int, str] = {
     5: (
         "请基于上述数据和阶段判定规则，写一段「当前阶段与关键变化」分析。要求：\n"
         "- 参考数据表中的「阶段判定规则」节，按优先级匹配阶段（转型期>建仓期>膨胀期>萎缩期>稳定期）\n"
+        "- 参考「关键变化指标（预计算）」节，直接引用预计算结果，不要自行计算派生数字\n"
         "- 参考「关键变化筛选阈值」节，从持仓变动/规模变动/费率变动3个维度筛选关键变化，只列阈值触发的项\n"
+        "- 如果预计算结果显示某维度已触发阈值，直接引用；如果未触发，说明未触发\n"
         "- 分析这些变化是否影响原始投资假设（如果数据表中有信号评分，对比方向是否逆转）\n"
-        "- 给出接下来最该跟踪的1-3个变量\n"
+        "- 给出接下来最该跟踪的1-3个变量（引用数据表中评分最低或数据缺失的指标）\n"
         "- 可以引用数据表中的数字，但不得编造数据表中不存在的数字"
     ),
     6: (
@@ -335,6 +337,15 @@ def generate_data_table(
             ])
             if scale_info.estimated_aum:
                 lines.append(f"| 估算资产净值 | {scale_info.estimated_aum} |")
+            # 预计算份额万份（避免 LLM 派生计算触发 hallucination）
+            try:
+                shares_a_num = float(scale_info.total_shares_a.replace(",", ""))
+                shares_c_num = float(scale_info.total_shares_c.replace(",", ""))
+                lines.append(f"| A类份额（万份） | {shares_a_num / 10000:.2f} |")
+                lines.append(f"| C类份额（万份） | {shares_c_num / 10000:.2f} |")
+                lines.append(f"| 合计份额（万份） | {(shares_a_num + shares_c_num) / 10000:.2f} |")
+            except (ValueError, AttributeError):
+                pass
         # 资产配置变化
         lines.extend(["", "## 资产配置变化"])
         for year in sorted(allocation.keys()):
@@ -352,10 +363,40 @@ def generate_data_table(
         if len(sorted_years) >= 2:
             prev_year = sorted_years[-2]
             curr_year = sorted_years[-1]
-            # 规模变动检测
+            # 规模变动检测（膨胀期/萎缩期）
             if scale_info and hasattr(scale_info, 'estimated_aum') and scale_info.estimated_aum:
-                # 无法直接计算同比，标记为需人工判断
-                pass
+                try:
+                    import re as _re_aum
+                    aum_match = _re_aum.search(r'([\d.]+)', scale_info.estimated_aum)
+                    if aum_match:
+                        curr_aum = float(aum_match.group(1))
+                        # 从 allocation 数据中估算上一年规模
+                        # 使用权益投资金额作为规模代理
+                        if prev_year in allocation and allocation[prev_year]:
+                            prev_equity = None
+                            curr_equity = None
+                            for a in allocation[prev_year]:
+                                if '权益' in a.category or '股票' in a.category:
+                                    try:
+                                        prev_equity = float(a.amount.replace(",", ""))
+                                    except (ValueError, AttributeError):
+                                        pass
+                            for a in allocation.get(curr_year, []):
+                                if '权益' in a.category or '股票' in a.category:
+                                    try:
+                                        curr_equity = float(a.amount.replace(",", ""))
+                                    except (ValueError, AttributeError):
+                                        pass
+                            if prev_equity and curr_equity and prev_equity > 0:
+                                growth_rate = (curr_equity - prev_equity) / prev_equity
+                                if growth_rate > 0.3:
+                                    stage = "膨胀期"
+                                    stage_reason = f"权益投资同比增长 {growth_rate:.0%}，超过30%阈值"
+                                elif growth_rate < -0.3:
+                                    stage = "萎缩期"
+                                    stage_reason = f"权益投资同比下降 {abs(growth_rate):.0%}，超过30%阈值"
+                except (ValueError, AttributeError):
+                    pass
             # 基金经理变更检测（如果 fund_manager 有变更记录）
             if fund_manager and not fund_manager.tenure_start:
                 stage = "转型期"
@@ -385,6 +426,38 @@ def generate_data_table(
         lines.append("")
         lines.append("阶段优先级：转型期 > 建仓期 > 膨胀期 > 萎缩期 > 稳定期")
         lines.append("时间窗口：同比（当前年 vs 上一年）")
+
+        # 预计算关键变化指标（避免 LLM 派生计算触发 hallucination）
+        lines.extend(["", "## 关键变化指标（预计算）"])
+        fee_years = sorted(fees.keys())
+        if len(fee_years) >= 2:
+            prev_fee_year = fee_years[-2]
+            curr_fee_year = fee_years[-1]
+            prev_mgmt = ""
+            curr_mgmt = ""
+            prev_cust = ""
+            curr_cust = ""
+            for f in fees.get(prev_fee_year, []):
+                if "管理" in f.fee_name:
+                    prev_mgmt = f.rate.rstrip("%")
+                elif "托管" in f.fee_name:
+                    prev_cust = f.rate.rstrip("%")
+            for f in fees.get(curr_fee_year, []):
+                if "管理" in f.fee_name:
+                    curr_mgmt = f.rate.rstrip("%")
+                elif "托管" in f.fee_name:
+                    curr_cust = f.rate.rstrip("%")
+            try:
+                if prev_mgmt and curr_mgmt:
+                    mgmt_change = float(curr_mgmt) - float(prev_mgmt)
+                    lines.append(f"- 管理费变动: {prev_fee_year}年{prev_mgmt}% → {curr_fee_year}年{curr_mgmt}%（变动{mgmt_change:+.2f}%）")
+                    lines.append(f"  - 是否触发阈值(>0.1%): {'是' if abs(mgmt_change) > 0.1 else '否'}")
+                if prev_cust and curr_cust:
+                    cust_change = float(curr_cust) - float(prev_cust)
+                    lines.append(f"- 托管费变动: {prev_fee_year}年{prev_cust}% → {curr_fee_year}年{curr_cust}%（变动{cust_change:+.2f}%）")
+                    lines.append(f"  - 是否触发阈值(>0.1%): {'是' if abs(cust_change) > 0.1 else '否'}")
+            except (ValueError, AttributeError):
+                pass
 
         # 关键变化筛选阈值
         lines.extend(["", "## 关键变化筛选阈值"])

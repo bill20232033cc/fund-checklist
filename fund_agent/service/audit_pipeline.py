@@ -1922,14 +1922,18 @@ class ReportGenerationCoordinator:
             if not llm_analysis or not isinstance(llm_analysis, str):
                 return None
 
-            # 检查 hallucination（优先使用全局允许列表，支持跨章节数字引用）
+            # 检查 hallucination（仅记录警告，不丢弃 LLM 输出）
+            # 审计管道会独立检测 hallucination 并评分
             from fund_agent.service.chapter_generator import contains_non_year_numbers
             if global_allowed_numbers:
                 allowed_numbers = global_allowed_numbers
             else:
                 allowed_numbers = set(re.findall(r'\d+\.?\d*', data_table))
             if contains_non_year_numbers(llm_analysis, allowed_numbers):
-                return None
+                import logging
+                logging.getLogger(__name__).warning(
+                    f"[Ch{chapter_id}] LLM 输出包含可疑数字，交由审计管道处理"
+                )
 
             return f"{data_table}\n\n## 分析\n\n{llm_analysis}"
 
