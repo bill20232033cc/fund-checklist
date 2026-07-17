@@ -151,10 +151,41 @@ uv run pytest tests/fund/service/test_extraction.py tests/fund/service/test_llm_
   - 审计产物记录数据不足状态、触发的降级规则、权重调整情况。
 - **Slice 17G** ✅：端到端验证通过（8/8 章非空）+ LLM 稳定性修复 + 模板降级 + _is_data_sufficient 精确化。DS ACCEPTED。
 
-**Phase 3.5 验收标准**：
-- 单年 PDF 导入后，8 章报告全部有内容（含降级声明）。
-- 审计产物正确记录降级状态。
-- 无章节因 audit 循环失败而输出空内容。
+> **17G 端到端验证暴露报告质量问题**：8/8 章非空但内容质量差。4/8 章为纯模板（Ch0/Ch1/Ch4/Ch6/Ch8），4/8 章有 LLM 分析但被审计打回。根因：hallucination 检测误杀 + 程序审计假阳性 + LLM 审计 hallucinate + 模板系统不一致。详见 `/tmp/phase35-quality-improvement-plan-v4.md`。
+
+### Phase 3.5（续）：报告质量深度修复
+
+**裁决记录**：
+- 最少 3 年数据：**强制**（不足 3 年拒绝生成）
+- 修复优先级：**先修 hallucination 误杀**（自然减少 fallback）
+- 审计阈值：保持 80，修复后观察得分再决定
+
+- **Slice 17H**：hallucination 检测修复 + LLM 提示词改造。
+  - `contains_non_year_numbers` 数字归一化：strip trailing zeros（`1.20` → `1.2`）。
+  - 跨章节数据引用：`generate_report` 层面收集所有章节 `allowed_numbers` 合并为全局集合。
+  - LLM 提示词：删除"不要包含任何数字"，改为"可以引用数据表中的数字，但不得编造数据表中不存在的数字"。
+  - 验收：LLM 输出"管理费为1.2%"不被拦截；"规模为3.5亿元"（不在任何 data_table 中）仍被拦截。
+- **Slice 17I**：程序审计引用排除 + LLM 审计 prompt 约束 + JSON 解析重试 + 截断限制修复。
+  - `ProgrammaticAuditor._check_prohibited_content` 跳过 `## 分析` 之前的内容（data_table 区域）。
+  - `LlmAuditor` prompt 增加正例/反例："建议关注" ≠ 投资建议；"基金仍可跟踪" ≠ 投资建议；投资建议定义为"买入/卖出/持有"的直接操作建议。
+  - `LlmAuditor` JSON 解析失败时重试 1 次。
+  - 截断限制：章节摘要 300→1000 字符；LLM 审计器数据表 1000→3000 字符；Ch0/Ch7 提示词摘要 500→1500 字符。
+  - 验收：audit.json 中不再出现"建议关注被判为投资建议"类违规；Ch5 不再出现 LLM_PARSE_ERROR。
+- **Slice 17J**：fallback 条件收紧 + 模板统一化。
+  - 审计循环耗尽时：得分 < 50 返回模板 + 标记 `passed_with_degradation`；≥ 50 返回 LLM 内容 + 标记 `passed_with_degradation`。
+  - `extraction.py:_generate_template_chapter` 改为调用 `generate_data_table()`，统一两套模板系统。
+  - CLI 模板模式提示：不传 `--llm` 时 stderr 输出警告。
+  - 验收：不传 `--llm` 时报告仍包含结构化数据表；传 `--llm` 时 8 章全部有 LLM 分析。
+- **Slice 17K**：多年数据强制。
+  - `import` 命令 `--year-range` 默认最近 3 年。
+  - `generate` 命令可用年份 < 3 时拒绝生成，报错提示用户补充导入。
+  - 验收：仅 1 年数据时 generate 命令报错退出。
+
+**Phase 3.5 最终验收标准**：
+- 传 `--llm` 时，8 章报告全部有 LLM 分析（`## 分析` 段落）。
+- 审计得分 ≥ 80 的章节数 ≥ 6/6（Ch1-6）。
+- 不传 `--llm` 时，报告包含结构化数据表（非纯 key-value 倾倒）。
+- 仅 1 年数据时，generate 命令拒绝执行。
 
 ### Phase 4：分析能力扩展（低优先级）
 - ~~Slice 18A~~：已在 16A 实现，删除

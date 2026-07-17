@@ -549,6 +549,108 @@ Slice 6 非目标：
 - **REGENERATE**：重新生成整章报告
 - **NONE**：标记为已知限制，不修复
 
+
+### 6.6 报告质量门禁
+
+报告生成必须处理数据不完整场景。核心原则：降级而非失败，输出结构化声明而非空内容。
+
+#### 6.6.1 数据充足场景
+
+多年度 PDF 导入（≥3 年）且核心数据源（performance、holdings、fees）完整时：
+- 各章节按 ChapterContract 全要求生成。
+- 审计管道按标准阈值打分（≥80 通过）。
+
+#### 6.6.2 数据不足场景
+
+单年导入或核心数据源缺失时，按章节分别处理：
+
+| 章节 | 数据不足条件 | 降级策略 |
+|------|------------|---------|
+| Ch2 R=A+B-C | 仅导入 <3 年 | 保留多年要求，输出结构化缺失声明：「仅导入 N 年，以下为已导入年份的 R-A-B-C 拆解」+ 已有数据表格 |
+| Ch3 基金经理画像 | fund_manager 部分字段缺失（如 tenure_start / years_of_service / investment_strategy 为空） | LLM 只分析已有数据（如持仓行为），逐项声明缺失字段及原因；禁止从持仓反推基金经理意图或投资策略 |
+| Ch4 投资者获得感 | report_year < 2026（2026 新规前年报不披露投资者实际收益） | 明确标注「本章节适用于 2026 年及以后年度报告」，输出结构化 N/A 声明，不尝试生成分析 |
+| Ch5 当前阶段与关键变化 | must_answer 结构化规则未定义或 LLM 分析不可用 | 先定义 must_answer 的结构化规则（阶段判定 5 选 1 含优先级、关键变化 3 维度含阈值、时间窗口为同比），LLM 在规则框架内分析；失败时重试 1 次，仍失败则模板降级（数据表格 + 阶段判定 + 缺失声明） |
+
+#### 6.6.3 结构化缺失声明格式
+
+缺失声明必须包含：
+- 缺失的具体字段或维度
+- 缺失原因（数据未导入 / 年报未披露 / 数据源不可用）
+- 对分析结论的影响（哪些判断因此无法做出）
+
+#### 6.6.4 多年数据强制要求
+
+- 报告生成最少需要 3 年数据（performance/holdings/fees）。
+- 可用年份 < 3 时，`generate` 命令拒绝执行并报错。
+- `import` 命令 `--year-range` 默认最近 3 年。
+
+#### 6.6.5 hallucination 检测规则
+
+`contains_non_year_numbers`（`chapter_generator.py`）用于检测 LLM 输出中的编造数字：
+
+- **数字归一化**：strip trailing zeros（`1.20` → `1.2`，`2.60` → `2.6`），避免格式微差导致误杀。
+- **跨章节引用**：所有章节的 `allowed_numbers` 合并为全局集合；LLM 引用其他章节 data_table 中的数字视为合法。
+- **保留拦截**：不在任何 data_table 中的数字仍被拦截（凭空编造）。
+- **LLM 提示词**：允许引用数据表中的数字（如净值增长率、费率、持仓比例），但不得编造数据表中不存在的数字。
+
+#### 6.6.6 审计管道约束
+
+**程序审计**（`ProgrammaticAuditor`）：
+- 投资建议关键词检测（如"买入"）跳过 `## 分析` 之前的内容（data_table 区域包含引用文本，不应触发）。
+
+**LLM 审计**（`LlmAuditor`）：
+- prompt 必须包含正例/反例，明确"投资建议"的定义：必须是"买入/卖出/持有"的直接操作建议。
+- "建议关注"、"基金仍可跟踪"、"超额收益持续性有待观察"等分析性表述不视为投资建议。
+- JSON 解析失败时重试 1 次。
+
+#### 6.6.7 截断限制
+
+审计管道中存在 4 处内容截断，可能导致信息丢失：
+
+| 位置 | 截断长度 | 影响 |
+|------|---------|------|
+| Ch0/Ch7 审计上下文（章节摘要） | 300 字符 | LLM 审计器只看到每章前 300 字，可能遗漏违规项 |
+| Ch0/Ch7 LLM 生成提示词（章节摘要） | 500 字符 | LLM 生成 Ch0/Ch7 时只看到每章前 500 字 |
+| LLM 审计器数据表 | 1000 字符 | 审计器只看到数据表前 1000 字符 |
+| Ch5/Ch6 LLM 审计器上下文 | 500 字符 | 审计器只看到数据表前 500 字符 |
+
+修复方向：增大截断限制或改为分段传递。
+
+#### 6.6.8 fallback 条件
+
+- LLM 生成失败（返回 None）→ 模板降级，标记 `passed_with_degradation`。
+- hallucination 检测命中 → 模板降级。
+- 审计循环耗尽：得分 < 50 → 模板降级；≥ 50 → 返回 LLM 内容 + 标记 `passed_with_degradation`。
+- 异常捕获：只捕获 `LlmClientFailure` 和 `TimeoutError`，其他异常向上抛出。
+- 审计阈值 ≥80 通过；修复 hallucination/程序审计/LLM 审计后观察得分，再决定是否调整。
+
+禁止用模糊表述（如数据不足详见年报）替代结构化声明。
+
+### 6.7 审计管道数据适配
+
+审计打分必须考虑输入数据完整性，不得对数据不足的章节按完整报告标准打分。
+
+#### 6.7.1 LLM 审计权重动态调整
+
+当 ChapterContract 的 data_sources 存在缺失时：
+- LLM 审计权重从 70% 降至 50%，程序审计权重从 30% 升至 50%。
+- 判定规则：data_sources 中任意一个数据源为空或仅含 1 个年份 → 触发权重调整。
+- 程序审计仍按确定性规则检查（格式、字段、引用），不因数据不足而放松。
+
+#### 6.7.2 通过阈值
+
+- 数据充足场景：≥80 分通过，50-79 分 PATCH，<50 分 REGENERATE。
+- 数据不足场景：≥70 分通过（因 LLM 审计权重降低后，数据不足章节更难达到 80）。
+- 通过后标记章节状态为 `passed_with_degradation`，与正常 `passed` 区分。
+
+#### 6.7.3 审计产物要求
+
+审计产物必须记录：
+- 该章节是否处于数据不足状态
+- 触发了哪些降级规则
+- 最终评分及权重调整情况
+
+
 ## 7. dayu 可迁移部分
 
 ### 7.1 可迁移为设计参考
@@ -1226,9 +1328,18 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ### Phase 3：报告质量 + 可用性
 
-- **Slice 17A**：报告 Markdown 持久化 + metadata sidecar（fund_code, year, audit_score, generation_time）。
-- **Slice 17B**：citation 验证工具（给定 citation locator → 定位年报原文 → 返回上下文片段）。✅ 裁决口径已确认（结构化输入、ExcerptContent|ToolFailure 输出、仅定位不做语义校验）。
-- **Slice 17C**： CLI 端到端 smoke（真实 PDF → 完整报告 → 审计产物落盘 → exit code 验证）。
+- **Slice 17A**：报告 Markdown 持久化 + metadata sidecar（fund_code, year, audit_score, generation_time）。✅ 已完成。
+- **Slice 17B**：citation 验证工具（给定 citation locator → 定位年报原文 → 返回上下文片段）。✅ 已完成。
+- **Slice 17C**：CLI 端到端 smoke（真实 PDF → 完整报告 → 审计产物落盘 → exit code 验证）。✅ 已完成（发现 3/8 章失败，触发 Phase 3.5）。
+
+### Phase 3.5：报告质量稳定化（阻塞 Phase 4）
+
+> 17C 验证发现 Ch2/Ch3/Ch5 生成失败、Ch4 为硬编码占位符。根因：单年数据无降级策略、LLM 分析约束不足、审计阈值与数据现实脱节。
+
+- **Slice 17D**：Ch2 单年降级 + Ch3 fund_manager 抽取修复 + LLM 分析约束。Ch2 单年导入时输出结构化缺失声明；Ch3 修复 table locator 跨 section 匹配 bug（按 section title 关键词匹配 + ±10 fallback）；Ch3 LLM 禁止从持仓反推基金经理意图。
+- **Slice 17E**：Ch4 报告年份适配 + Ch5 must_answer 结构化规则。Ch4 report_year < 2026 时输出 N/A 声明；Ch5 定义阶段判定（5选1含优先级，时间窗口同比）、关键变化阈值（持仓换手>40%/规模同比>30%/费率>0.1%）。
+- **Slice 17F**：审计管道数据适配。data_sources 缺失时 LLM 审计权重 70%→50%，数据不足场景通过阈值降至 ≥70。
+- **Slice 17G**：端到端验证——单年 PDF 导入 → 8 章报告全部非空 → exit code 0。
 
 ### Phase 4：分析能力扩展（低优先级）
 
@@ -1248,5 +1359,5 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ### 外部候选研究参考（非执行真源）
 
-- `docs/dayu-agent-comparison-report.md` 与 `docs/agent-evolution-design.md` 仅作为候选研究输入材料，不作为设计真源或已批准 roadmap。
+- `docs/dayu-agent-comparison-report.md`、`docs/agent-evolution-design.md` 与 `docs/dayu-agent-codiwiki-and-development-stage-analysis-20260614.md` 仅作为候选研究输入材料，不作为设计真源或已批准 roadmap。
 - 若后续需要推进其中任何用户侧新能力（如 `ask`、`interactive`、`streaming`、联网搜索、会话持久化），必须回到本文件与 `docs/implementation-control.md` 单独裁决。
