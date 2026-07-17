@@ -366,25 +366,21 @@ def generate_data_table(
             # 规模变动检测（膨胀期/萎缩期）
             if scale_info and hasattr(scale_info, 'estimated_aum') and scale_info.estimated_aum:
                 try:
-                    import re as _re_aum
-                    aum_match = _re_aum.search(r'([\d.]+)', scale_info.estimated_aum)
-                    if aum_match:
-                        curr_aum = float(aum_match.group(1))
-                        # 从 allocation 数据中估算上一年规模
-                        # 使用权益投资金额作为规模代理
-                        if prev_year in allocation and allocation[prev_year]:
-                            prev_equity = None
-                            curr_equity = None
+                    # 从 allocation 数据中估算上一年规模
+                    # 使用权益投资金额作为规模代理
+                    if prev_year in allocation and allocation[prev_year]:
+                            prev_equity = 0.0
+                            curr_equity = 0.0
                             for a in allocation[prev_year]:
                                 if '权益' in a.category or '股票' in a.category:
                                     try:
-                                        prev_equity = float(a.amount.replace(",", ""))
+                                        prev_equity += float(a.amount.replace(",", ""))
                                     except (ValueError, AttributeError):
                                         pass
                             for a in allocation.get(curr_year, []):
                                 if '权益' in a.category or '股票' in a.category:
                                     try:
-                                        curr_equity = float(a.amount.replace(",", ""))
+                                        curr_equity += float(a.amount.replace(",", ""))
                                     except (ValueError, AttributeError):
                                         pass
                             if prev_equity and curr_equity and prev_equity > 0:
