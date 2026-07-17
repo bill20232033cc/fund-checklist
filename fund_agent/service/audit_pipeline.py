@@ -655,6 +655,57 @@ _REQUIRED_FIELD_PATTERNS = {
 }
 
 
+def _is_unit_equivalent(suspicious: str, allowed_numbers: set[str], tolerance: float = 0.02) -> bool:
+    """检查可疑数字是否是 allowed_numbers 中某个数字的单位缩写等价形式。
+
+    支持的等价关系：
+    - raw ÷ 1亿 ≈ suspicious（如 10095099672.67 → 100.95）
+    - raw ÷ 1万 ≈ suspicious（如 100950 → 100.95）
+    - raw ÷ 1000 ≈ suspicious
+
+    参数:
+        suspicious: LLM 输出中的可疑数字字符串。
+        allowed_numbers: 数据表中允许的数字集合（原始精度）。
+        tolerance: 相对误差容忍度，默认 2%。
+
+    返回:
+        如果匹配到等价形式返回 True。
+    """
+    try:
+        susp_val = float(suspicious)
+    except (ValueError, TypeError):
+        return False
+
+    if susp_val == 0:
+        return False
+
+    # 单位换算因子：亿元(1e8)、万元(1e4)、千(1e3)
+    unit_factors = [1e8, 1e4, 1e3]
+
+    for raw_str in allowed_numbers:
+        try:
+            raw_val = float(raw_str)
+        except (ValueError, TypeError):
+            continue
+
+        if raw_val == 0:
+            continue
+
+        # 直接匹配（归一化后已经匹配的跳过）
+        # 检查 raw_val / factor ≈ susp_val
+        for factor in unit_factors:
+            if raw_val < factor * 0.1:
+                continue  # 原始数字太小，不适合此换算
+            converted = raw_val / factor
+            if converted == 0:
+                continue
+            rel_error = abs(converted - susp_val) / max(abs(converted), abs(susp_val))
+            if rel_error < tolerance:
+                return True
+
+    return False
+
+
 class ProgrammaticAuditor:
     """程序审计器（第一层）。
 
@@ -758,6 +809,18 @@ class ProgrammaticAuditor:
                 continue
             if normalized not in data_numbers_norm:
                 suspicious.add(n)
+
+        # 单位等价过滤：检查可疑数字是否是 allowed_numbers 的亿元/万元缩写
+        # 例如 LLM 输出 "100.95" 匹配数据表中的 "10,095,099,672.67"（÷1亿）
+        if suspicious:
+            raw_allowed = self._global_allowed_numbers or set(re.findall(r'\d+\.?\d*', self._data_table))
+            filtered = set()
+            for s in suspicious:
+                if _is_unit_equivalent(s, raw_allowed):
+                    continue  # 等价匹配，不算 hallucination
+                filtered.add(s)
+            suspicious = filtered
+
         if suspicious:
             violations.append(AuditViolation(
                 code="P2",

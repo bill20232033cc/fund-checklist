@@ -674,3 +674,35 @@ def test_is_data_sufficient_with_degradation_marker(tmp_path: Path) -> None:
 
     data_table = "**数据完整性声明**：基金经理信息未提取成功。"
     assert _is_data_sufficient(3, data_table) is False
+
+
+def test_is_unit_equivalent_yi():
+    """亿元缩写等价匹配：100.95 匹配 10095099672.67（÷1亿）。"""
+    from fund_agent.service.audit_pipeline import _is_unit_equivalent
+    allowed = {"10095099672.67", "10017191811.35", "12017526984.51"}
+    assert _is_unit_equivalent("100.95", allowed) is True
+    assert _is_unit_equivalent("100.17", allowed) is True
+    assert _is_unit_equivalent("120.18", allowed) is True
+
+
+def test_is_unit_equivalent_wan():
+    """万元缩写等价匹配：10095.1 匹配 10095099（÷1万）。"""
+    from fund_agent.service.audit_pipeline import _is_unit_equivalent
+    allowed = {"10095099"}
+    assert _is_unit_equivalent("10095.1", allowed) is True
+
+
+def test_is_unit_equivalent_reject():
+    """不匹配的数字应返回 False。"""
+    from fund_agent.service.audit_pipeline import _is_unit_equivalent
+    allowed = {"10095099672.67"}
+    assert _is_unit_equivalent("999.99", allowed) is False
+    assert _is_unit_equivalent("3.14", allowed) is False
+
+
+def test_is_unit_equivalent_zero():
+    """零值处理。"""
+    from fund_agent.service.audit_pipeline import _is_unit_equivalent
+    assert _is_unit_equivalent("0", {"100"}) is False
+    assert _is_unit_equivalent("100", {"0"}) is False
+    assert _is_unit_equivalent("abc", {"100"}) is False
