@@ -181,6 +181,19 @@ uv run pytest tests/fund/service/test_extraction.py tests/fund/service/test_llm_
   - `generate` 命令可用年份 < 3 时拒绝生成，报错提示用户补充导入。
   - 验收：仅 1 年数据时 generate 命令报错退出。
 
+- **Slice 17L** ✅：Ch5 预计算 + hallucination 软门禁 + 阶段判定逻辑。
+  - data_table 添加份额万份、费率变动、关键变化指标。
+  - allowed_numbers 机制：generate_report 预收集所有章节数字传给 LLM 和程序审计。
+  - 阶段判定：规模变动检测（膨胀期/萎缩期），用权益投资金额同比作为规模代理。
+
+- **Slice 17M** 🔲：审计降级根因修复（DS review ACCEPTED，3 个澄清纳入）。
+  - Fix 1：Ch3 data_table 预计算持仓合计（前五/前十大合计、第一大重仓占比）。
+  - Fix 2：Ch5 data_table 统一口径——权益投资同比（代理）+ AUM 绝对值 + 份额变动率，三口径并列。
+  - Fix 3：C3 纵深防御（仅当 Fix 4 后仍有误杀时）——关键词紧邻"策略/宣称/原文"时降级 MAJOR。
+  - Fix 4：提示词章节分工边界（Ch1 不讨论选股能力、Ch5 禁止自行计算）。
+  - Fix 5+6：禁止操作建议（买入/卖出/持有），允许风险提示（建议关注/需持续跟踪）。
+  - 目标：passed 率 2/8 → 6/8。
+
 **Phase 3.5 最终验收标准**：
 - 传 `--llm` 时，8 章报告全部有 LLM 分析（`## 分析` 段落）。
 - 审计得分 ≥ 80 的章节数 ≥ 6/6（Ch1-6）。

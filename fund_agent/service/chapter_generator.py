@@ -20,6 +20,15 @@ from .models import (
 )
 
 
+
+import json as _json
+from pathlib import Path as _Path
+from fund_agent.service.prompt_composer import PromptComposer as _PromptComposer
+
+# PromptComposer 实例（模板目录）
+_PROMPTS_DIR = _Path(__file__).parent / "prompts"
+_PROMPT_COMPOSER = _PromptComposer(template_dir=_PROMPTS_DIR)
+
 LLM_CHAPTER_SYSTEM_PROMPT = (
     "你是一位专业的基金分析师。请基于提供的数据表格，撰写定性分析评论。\n\n"
     "【输出格式 - 必须严格遵守】\n"
@@ -301,6 +310,31 @@ def generate_data_table(
             lines.append("|------|---------|---------|---------|")
             for h in holdings[year][:10]:
                 lines.append(f"| {h.rank} | {h.stock_code} | {h.stock_name} | {h.percentage} |")
+
+        # 预计算持仓集中度指标（避免 LLM 自行计算触发 hallucination）
+        lines.extend(["", "## 持仓集中度（预计算）", ""])
+        lines.append("| 年份 | 前五大合计(%) | 前十大合计(%) | 第一大重仓(%) | 第一大重仓股票 |")
+        lines.append("|------|-------------|-------------|-------------|--------------|")
+        for year in sorted(holdings.keys()):
+            year_holdings = holdings[year][:10]
+            top5_sum = 0.0
+            top10_sum = 0.0
+            top1_pct = 0.0
+            top1_name = ""
+            for h in year_holdings:
+                try:
+                    pct = float(h.percentage)
+                except (ValueError, TypeError):
+                    pct = 0.0
+                top10_sum += pct
+                if h.rank and h.rank <= 5:
+                    top5_sum += pct
+                if h.rank == 1:
+                    top1_pct = pct
+                    top1_name = h.stock_name
+            lines.append(
+                f"| {year} | {top5_sum:.2f} | {top10_sum:.2f} | {top1_pct:.2f} | {top1_name} |"
+            )
         base_content = "\n".join(lines)
 
     # Ch4: 投资者获得感
@@ -387,10 +421,10 @@ def generate_data_table(
                                 growth_rate = (curr_equity - prev_equity) / prev_equity
                                 if growth_rate > 0.3:
                                     stage = "膨胀期"
-                                    stage_reason = f"权益投资同比增长 {growth_rate:.0%}，超过30%阈值"
+                                    stage_reason = f"权益投资规模变动（代理指标）同比增长 {growth_rate:.0%}，超过30%阈值"
                                 elif growth_rate < -0.3:
                                     stage = "萎缩期"
-                                    stage_reason = f"权益投资同比下降 {abs(growth_rate):.0%}，超过30%阈值"
+                                    stage_reason = f"权益投资规模变动（代理指标）同比下降 {abs(growth_rate):.0%}，超过30%阈值"
                 except (ValueError, AttributeError):
                     pass
             # 基金经理变更检测（如果 fund_manager 有变更记录）
@@ -454,6 +488,14 @@ def generate_data_table(
                     lines.append(f"  - 是否触发阈值(>0.1%): {'是' if abs(cust_change) > 0.1 else '否'}")
             except (ValueError, AttributeError):
                 pass
+
+        # 预计算规模指标口径说明（避免 LLM 口径混淆）
+        lines.extend(["", "## 规模指标口径说明"])
+        lines.append("- **估算资产净值（AUM）**：份额 × 单位净值估算，仅当前年份，无上年对比")
+        lines.append("- **权益投资规模变动（代理指标）**：年报资产配置中权益投资金额同比变动，用于阶段判定")
+        lines.append("- 两个口径不同，不可直接比较或互相推算")
+        if scale_info and scale_info.estimated_aum:
+            lines.append(f"- 当前估算资产净值: {scale_info.estimated_aum}")
 
         # 关键变化筛选阈值
         lines.extend(["", "## 关键变化筛选阈值"])
@@ -699,28 +741,69 @@ class LlmChapterGenerator:
             signal_judgment,
         )
 
-        # 阶段 2：LLM 生成定性分析
-        analysis_prompt = LLM_ANALYSIS_PROMPTS.get(chapter_id)
-        if not analysis_prompt:
-            return data_table if data_table else None
+        # 阶段 2：使用 PromptComposer 渲染模板
+        from fund_agent.service.audit_pipeline import get_chapter_contract
+        contract = get_chapter_contract(chapter_id)
+
+        # 构建 must_answer_schema（从章节合同生成）
+        must_answer_schema = ""
+        if contract:
+            schema = {}
+            for item in contract.must_answer:
+                key = item.rstrip("。").split("（")[0].split("。")[0][:30]
+                schema[key] = ""
+            must_answer_schema = f"must_answer JSON 字段定义：\n```json\n{_json.dumps(schema, ensure_ascii=False, indent=2)}\n```"
+
+        # 构建模板上下文变量
+        template_context = {
+            "data_table": data_table,
+            "fund_name": fund_name,
+            "report_year": report_year,
+            "must_answer_schema": must_answer_schema,
+        }
+
+        # 条件变量（用于 <when_missing> 条件块）
+        if chapter_id == 2:
+            template_context["multi_year_note"] = "yes" if len(performance) >= 3 else ""
+        if chapter_id == 3:
+            template_context["investment_strategy"] = getattr(fund_manager, "investment_strategy", "") if fund_manager else ""
+        if chapter_id == 4:
+            template_context["investor_return_data"] = "" if report_year < 2026 else "yes"
+
+        # 渲染 system prompt（基础模板）
+        try:
+            system_composed = _PROMPT_COMPOSER.compose("system_base.md", {})
+            system_prompt = system_composed.system_message
+        except Exception:
+            system_prompt = LLM_CHAPTER_SYSTEM_PROMPT  # fallback 到旧硬编码
+
+        # 渲染 chapter prompt
+        template_name = f"ch{chapter_id}.md"
+        try:
+            chapter_composed = _PROMPT_COMPOSER.compose(template_name, template_context)
+            chapter_prompt = chapter_composed.system_message
+        except Exception:
+            # fallback 到旧硬编码
+            chapter_prompt = LLM_ANALYSIS_PROMPTS.get(chapter_id, "")
+            if not chapter_prompt:
+                return data_table if data_table else None
 
         user_prompt = (
             f"基金名称：{fund_name}\n"
             f"报告年份：{report_year}\n\n"
             f"## 数据表格\n\n{data_table}\n\n"
-            f"## 分析要求\n\n{analysis_prompt}"
+            f"## 分析要求\n\n{chapter_prompt}"
         )
 
         try:
-            llm_analysis = self._llm_client.generate_text(
-                system_prompt=LLM_CHAPTER_SYSTEM_PROMPT,
+            llm_output = self._llm_client.generate_text(
+                system_prompt=system_prompt,
                 user_prompt=user_prompt,
             )
-            # 从数据表中提取允许的数字（这些数字来自真实数据，不是 hallucination）
-            allowed_numbers = set(re.findall(r'\d+\.?\d*', data_table))
-            # 检查 LLM 是否违规输出了数字
-            if contains_non_year_numbers(llm_analysis, allowed_numbers):
-                return None  # hallucination，回退模板
+
+            # 解析 JSON 输出
+            llm_analysis = _parse_llm_json_output(llm_output, chapter_id)
+
             return f"{data_table}\n\n## 分析\n\n{llm_analysis}"
         except Exception:
             return None
@@ -738,6 +821,62 @@ def _normalize_number(s: str) -> str:
     if '.' in s:
         s = s.rstrip('0').rstrip('.')
     return s
+
+
+def _parse_llm_json_output(llm_output: str, chapter_id: int) -> str:
+    """解析 LLM 的 JSON 输出，提取 analysis 正文。
+
+    LLM 输出格式：
+    {
+        "summary": "一句话结论",
+        "analysis": "定性分析正文（Markdown）",
+        "must_answer": { "字段1": "回答", ... },
+        "confidence": "high/medium/low"
+    }
+
+    参数:
+        llm_output: LLM 原始输出文本。
+        chapter_id: 章节编号（用于日志）。
+
+    返回:
+        解析后的 Markdown 分析正文；JSON 解析失败时返回原始文本。
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    # 尝试从输出中提取 JSON 块
+    text = llm_output.strip()
+
+    # 移除可能的 markdown 代码块标记
+    if text.startswith("```json"):
+        text = text[7:]
+    elif text.startswith("```"):
+        text = text[3:]
+    if text.endswith("```"):
+        text = text[:-3]
+    text = text.strip()
+
+    # 预处理：提取第一个 { 到最后一个 } 之间的内容
+    # 处理 LLM 输出中 JSON 前后有额外文本的情况
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    if first_brace >= 0 and last_brace > first_brace:
+        text = text[first_brace:last_brace + 1]
+
+    try:
+        parsed = _json.loads(text)
+        if isinstance(parsed, dict) and "analysis" in parsed:
+            analysis = parsed["analysis"]
+            # 如果有 summary，作为段落开头
+            summary = parsed.get("summary", "")
+            if summary:
+                return f"**{summary}**\n\n{analysis}"
+            return analysis
+    except (_json.JSONDecodeError, KeyError, TypeError) as e:
+        logger.warning(f"Ch{chapter_id}: LLM 输出 JSON 解析失败，使用原始文本: {e}")
+
+    # fallback：返回原始文本
+    return text
 
 
 def contains_non_year_numbers(text: str, allowed_numbers: set[str] | None = None) -> bool:
@@ -767,8 +906,8 @@ def contains_non_year_numbers(text: str, allowed_numbers: set[str] | None = None
         # 年份（20xx）允许
         if re.match(r'^(20[12]\d)$', normalized):
             continue
-        # 单位数字（1-9）和常见小数字（10-99）允许（从业年限、排名、列表编号等）
-        if re.match(r'^[1-9]\d?$', normalized):
+        # 单位数字（0-99）允许（评分0、从业年限、排名、列表编号等）
+        if re.match(r'^[0-9]\d?$', normalized):
             continue
         # 在允许列表中的数字允许（归一化匹配）
         if normalized_allowed and normalized in normalized_allowed:

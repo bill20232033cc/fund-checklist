@@ -826,14 +826,23 @@ class ProgrammaticAuditor:
         analysis_idx = self._content.find(analysis_marker)
         check_content = self._content[analysis_idx:] if analysis_idx >= 0 else self._content
 
-        # C3: 投资建议
+        # C3: 投资建议（纵深防御：关键词紧邻策略/宣称/原文时降级为 MAJOR）
+        _C3_CONTEXT_KEYWORDS = ("策略", "宣称", "原文", "摘录", "运作分析")
         for keyword in _INVESTMENT_ADVICE_KEYWORDS:
             if keyword in check_content:
+                # 检查关键词上下文：前后 20 字符内是否包含策略/原文相关词
+                kw_idx = check_content.find(keyword)
+                context_start = max(0, kw_idx - 50)
+                context_end = min(len(check_content), kw_idx + len(keyword) + 50)
+                context_window = check_content[context_start:context_end]
+                is_quote_context = any(ck in context_window for ck in _C3_CONTEXT_KEYWORDS)
+
+                severity = ViolationSeverity.MAJOR if is_quote_context else ViolationSeverity.CRITICAL
                 violations.append(AuditViolation(
                     code="C3",
                     category=ViolationCategory.CONTENT,
-                    severity=ViolationSeverity.CRITICAL,
-                    description=f"包含投资建议关键词: {keyword}",
+                    severity=severity,
+                    description=f"包含投资建议关键词: {keyword}" + ("（引用上下文，降级为 MAJOR）" if is_quote_context else ""),
                     location=f"Ch{self._chapter_id}",
                     evidence=keyword,
                     suggested_fix=f"删除或改写包含'{keyword}'的内容",
@@ -1396,7 +1405,7 @@ SCORE_PATCH = 50.0     # 50-79分需修复
 # <50分需重写
 
 # 数据不足场景的评分调整
-SCORE_PASS_DEGRADED = 70.0   # 数据不足时 ≥70分通过
+SCORE_PASS_DEGRADED = 75.0   # 数据不足时 ≥70分通过
 WEIGHT_PROG_NORMAL = 0.3     # 数据充足时程序审计权重
 WEIGHT_LLM_NORMAL = 0.7      # 数据充足时 LLM 审计权重
 WEIGHT_PROG_DEGRADED = 0.5   # 数据不足时程序审计权重

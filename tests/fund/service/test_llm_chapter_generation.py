@@ -167,9 +167,10 @@ def test_llm_chapter_generator_success() -> None:
 
 
 def test_llm_chapter_generator_hallucination_rejected() -> None:
-    """LLM 输出未见数字时必须被拒绝，返回 None。"""
+    """LLM 输出未见数字时不再被前置检查拒绝（裁决 5B：hallucination 交由审计管道处理）。"""
 
     # 使用一个不在数据表中的数字（99.99%）
+    # 新行为：LLM 输出不再被前置检查丢弃，而是返回并交由审计管道评分
     client = FakeLlmClient(["净值增长率为99.99%，表现优异。"])
     generator = LlmChapterGenerator(llm_client=client)
 
@@ -184,7 +185,9 @@ def test_llm_chapter_generator_hallucination_rejected() -> None:
         fees={},
     )
 
-    assert result is None
+    # 新行为：LLM 输出被保留（不再返回 None），hallucination 由审计管道处理
+    assert result is not None
+    assert "99.99%" in result
 
 
 def test_llm_chapter_generator_failure_returns_none() -> None:

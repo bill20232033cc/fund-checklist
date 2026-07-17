@@ -1341,6 +1341,56 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - **Slice 17F**：审计管道数据适配。data_sources 缺失时 LLM 审计权重 70%→50%，数据不足场景通过阈值降至 ≥70。
 - **Slice 17G**：端到端验证——单年 PDF 导入 → 8 章报告全部非空 → exit code 0。
 
+- **Slice 17H**：hallucination 数字归一化 + 提示词改造。contains_non_year_numbers 从 return None 改为 logging.warning（软门禁）；LLM 提示词允许引用 data_table 中的数字。✅ 已完成。
+- **Slice 17I**：程序审计引用排除 + LLM 审计约束 + 截断修复。C3 投资建议检测只扫描 `## 分析` 之后内容（跳过 data_table）；LLM 审计器 prompt 增加正例/反例；章节摘要截断从 300→800 字。✅ 已完成。
+- **Slice 17J**：fallback 得分分流 + 模板统一化 + CLI 警告。审计循环耗尽时 ≥50 返回 LLM 内容 + degraded，<50 返回模板；模板与 LLM 路径统一章节结构；CLI 生成时输出降级警告。✅ 已完成。
+- **Slice 17K**：多年数据强制（≥3年）。`import` 默认最近 3 年，`generate` 年份 < 3 时拒绝。✅ 已完成。
+- **Slice 17L**：Ch5 预计算 + hallucination 软门禁 + 阶段判定逻辑。data_table 添加份额万份、费率变动、关键变化指标；allowed_numbers 机制预收集所有章节数字。✅ 已完成。
+- **Slice 17M**：报告生成架构重构（基于 dayu prompting/ 模块启示）。解决 LLM 输出不稳定导致审计分数波动的核心问题。
+
+  **裁决记录**（2026-07-18）：
+
+  | 编号 | 裁决 | 选项 | 理由 |
+  |------|------|------|------|
+  | 1 | 输出格式 | 结构化 JSON（must_answer + analysis 并存） | 结构化保证字段完整，analysis 保留 LLM 分析能力 |
+  | 2 | prompt 模板管理 | 外置 .md 模板文件 + 变量替换 + 条件块 + PromptComposer | 接近 dayu 的 prompting/ 模块设计 |
+  | 3 | 审计阈值 | data_sufficient=True 时降至 75 分 | 适配当前 LLM 能力 |
+  | 4 | prompt 隔离程度 | 每章独立 system prompt（per-chapter 模板） | 消除章节间约束干扰 |
+  | 5 | hallucination 策略 | 移除 contains_non_year_numbers 前置检查，完全依赖审计 P2 | 减少误杀，统一由审计评分处理 |
+  | 6 | JSON schema | must_answer 字段清单 + analysis 正文 + summary + confidence | 6B |
+  | 7 | 变量注入粒度 | 拆分为 data_table + stage_judgment + must_answer_fields 等关键变量 | 模板可精细控制 |
+  | 8 | 模板版本管理 | 文件头加 `<!-- version: x.x -->` 注释行 | 简化实现，仅用于日志追踪 |
+  | 9 | 审计 prompt | 本 slice 不外置，后续独立 slice 处理 | 范围可控 |
+  | 10 | 回滚策略 | 直接替换，不保留旧路径 | 代码干净，git revert 即回滚 |
+
+  **实施内容**：
+
+  - 17M-1：外置模板文件 + PromptComposer 渲染器
+    - 每章一个 `.md` 模板文件，放在 `fund_agent/service/prompts/`
+    - 模板使用 `{{ variable }}` 变量替换 + `<when_missing>` 条件块
+    - PromptComposer：加载模板 → 变量替换 → 条件渲染 → 输出最终 prompt
+    - 模板文件头含 `<!-- version: x.x -->` 注释
+
+  - 17M-2：结构化 JSON 输出改造
+    - LLM 输出 JSON：`{summary, analysis, must_answer: {}, confidence}`
+    - must_answer 字段由模板中的章节合同定义
+    - 解析 JSON 后拼接为 Markdown 报告
+
+  - 17M-3：审计阈值 + hallucination 策略调整
+    - SCORE_PASS 保持 80，SCORE_PASS_DEGRADED 从 70 降至 75
+    - 移除 contains_non_year_numbers 前置检查
+    - C3 纵深防御保留（关键词紧邻策略/原文时降级 MAJOR）
+
+  - 17M-4：端到端验证
+    - 3 年数据测试，目标 passed 率 ≥ 6/8
+    - 验证输出稳定性（连续 2 次运行结果一致）
+
+  **Phase 3.5 初始 Fix（已完成但效果有限，保留在代码中）**：
+  - Fix 1：Ch3 data_table 预计算持仓合计 ✅
+  - Fix 2：Ch5 data_table 统一口径 + 口径说明 ✅
+  - Fix 3：C3 纵深防御（上下文窗口 50 字符） ✅
+  - Fix 4+5+6：系统提示词章节分工 + 禁止自行计算 + 操作建议禁令 ✅
+
 ### Phase 4：分析能力扩展（低优先级）
 
 - ~~**Slice 18A**：风格漂移检测~~ → 已在 16A 加权 Jaccard 实现，删除。
