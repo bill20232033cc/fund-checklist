@@ -2740,7 +2740,6 @@ class FundReadingService:
         # Ch1-Ch6: 统一调用 generate_data_table() 获取结构化数据表
         if 1 <= chapter_id <= 6:
             from fund_agent.service.chapter_generator import generate_data_table
-            from fund_agent.service.extraction import _compute_ch6_stress_test
             st = _compute_ch6_stress_test(performance, report_year, scale_info, fund_name) if chapter_id == 6 else None
             data_table = generate_data_table(
                 chapter_id, fund_code, fund_name, report_year,

@@ -832,7 +832,7 @@ class ProgrammaticAuditor:
                 ))
                 break  # 只报第一个
 
-        # C5: must_not_cover 违规
+        # C5: must_not_cover 违规（扫描整个章节，因为约束是章节级的）
         for prohibited in self._contract.must_not_cover:
             # 简单检查：如果禁止内容的关键短语出现
             key_phrases = [p for p in prohibited.split("，") if len(p) > 4]
@@ -1463,7 +1463,6 @@ class ReportGenerationCoordinator:
         # 0. 预生成所有章节数据表，收集全局允许数字集合（支持跨章节引用）
         from fund_agent.service.chapter_generator import generate_data_table
         from fund_agent.service.extraction import _compute_ch6_stress_test
-        all_data_tables: dict[int, str] = {}
         global_numbers: set[str] = set()
         for cid in range(1, 8):
             st = _compute_ch6_stress_test(performance, report_year, scale_info, fund_name) if cid == 6 else None
@@ -1473,7 +1472,6 @@ class ReportGenerationCoordinator:
                 fund_manager, scale_info, evidence,
                 stress_test=st, signal_judgment=signal_judgment,
             )
-            all_data_tables[cid] = dt
             global_numbers.update(re.findall(r'\d+\.?\d*', dt))
 
         # 1. 生成 Ch1-6
