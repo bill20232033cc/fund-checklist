@@ -798,7 +798,7 @@ class ProgrammaticAuditor:
             data_numbers_norm = {_normalize_number(n) for n in self._global_allowed_numbers}
         else:
             data_numbers_norm = {_normalize_number(n) for n in re.findall(r'\d+\.?\d*', self._data_table.replace(',', ''))}
-        content_numbers = set(re.findall(r'\d+\.?\d*', self._content))
+        content_numbers = set(re.findall(r'\d+\.?\d*', self._content.replace(',', '')))
         # 排除年份（20xx）和小数字（1-99）
         suspicious = set()
         for n in content_numbers:
