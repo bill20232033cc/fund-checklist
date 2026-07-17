@@ -142,7 +142,7 @@ def build_parser() -> argparse.ArgumentParser:
     import_parser.add_argument("--pdf-dir", required=True, type=Path)
     import_parser.add_argument("--fund-code", required=True)
     import_parser.add_argument("--fund-name", required=True)
-    import_parser.add_argument("--year-range", required=True)
+    import_parser.add_argument("--year-range", default="2022-2024", help="年份范围（默认最近3年：2022-2024）")
     import_parser.add_argument("--work-dir", default=Path(DEFAULT_WORK_DIR), type=Path)
 
     holdings_parser = subparsers.add_parser("holdings")
@@ -725,6 +725,12 @@ def _run_generate_command(args: argparse.Namespace, *, stdout: TextIO, stderr: T
 
     years = _parse_years(args.years)
     service = FundReadingService()
+
+    # 检查可用年份是否 >= 3
+    available_years = set(years) if years else set()
+    if len(available_years) < 3:
+        stderr.write(f"错误：需要至少 3 年数据，当前仅有 {len(available_years)} 年。请使用 import 命令补充导入更多年份的 PDF。\n")
+        return CLASSIFIED_FAILURE_EXIT_CODE
 
     llm_client = None
     if getattr(args, "llm", False):
