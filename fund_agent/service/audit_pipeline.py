@@ -1819,14 +1819,37 @@ class ReportGenerationCoordinator:
                         "attempt": state.regenerate_attempts,
                     })
 
-        # 所有修复尝试用完，返回最后一次生成的内容（避免空章节）
-        state.status = "failed"
-        state.record_event("failed", {
-            "reason": "max_attempts_exceeded",
-            "final_score": state.current_score,
-        })
-        self._artifact_store.save_process_state(state)
-        return content if content else last_valid_content
+        # 所有修复尝试用完：得分 < 50 返回模板，≥ 50 返回 LLM 内容（标记降级）
+        final_score = state.current_score or 0
+        if final_score < 50 or not content:
+            # 低分或无内容 → 模板降级
+            template_content = self._generate_template_chapter(
+                chapter_id=chapter_id,
+                fund_name=fund_name,
+                report_year=report_year,
+                performance=performance,
+                evidence=evidence,
+                fund_code=fund_code,
+                fund_manager=fund_manager,
+                scale_info=scale_info,
+                signal_judgment=signal_judgment,
+            )
+            state.status = "passed_with_degradation"
+            state.record_event("template_fallback", {
+                "reason": "audit_exhausted_low_score",
+                "final_score": final_score,
+            })
+            self._artifact_store.save_process_state(state)
+            return template_content
+        else:
+            # 中等分数 → 返回 LLM 内容，标记降级
+            state.status = "passed_with_degradation"
+            state.record_event("passed_with_degradation", {
+                "reason": "audit_exhausted_medium_score",
+                "final_score": final_score,
+            })
+            self._artifact_store.save_process_state(state)
+            return content if content else last_valid_content
 
     def _generate_chapter_content(
         self,

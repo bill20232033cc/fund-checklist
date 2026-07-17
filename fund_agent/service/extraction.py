@@ -2737,6 +2737,20 @@ class FundReadingService:
             模板生成的 Markdown 文本。
         """
 
+        # Ch1-Ch6: 统一调用 generate_data_table() 获取结构化数据表
+        if 1 <= chapter_id <= 6:
+            from fund_agent.service.chapter_generator import generate_data_table
+            from fund_agent.service.extraction import _compute_ch6_stress_test
+            st = _compute_ch6_stress_test(performance, report_year, scale_info, fund_name) if chapter_id == 6 else None
+            data_table = generate_data_table(
+                chapter_id, fund_code, fund_name, report_year,
+                performance, holdings, allocation, fees,
+                fund_manager, scale_info, evidence,
+                stress_test=st, signal_judgment=signal_judgment,
+            )
+            if data_table:
+                return data_table
+
         if chapter_id == 0:
             latest = performance.get(report_year, {})
             base_content = (
