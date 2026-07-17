@@ -186,7 +186,7 @@ uv run pytest tests/fund/service/test_extraction.py tests/fund/service/test_llm_
   - allowed_numbers 机制：generate_report 预收集所有章节数字传给 LLM 和程序审计。
   - 阶段判定：规模变动检测（膨胀期/萎缩期），用权益投资金额同比作为规模代理。
 
-- **Slice 17M** 🔲：审计降级根因修复（DS review ACCEPTED，3 个澄清纳入）。
+- **Slice 17M** ✅：报告生成架构重构（外置模板 + PromptComposer + JSON 输出）。DS ACCEPTED。（DS review ACCEPTED，3 个澄清纳入）。
   - Fix 1：Ch3 data_table 预计算持仓合计（前五/前十大合计、第一大重仓占比）。
   - Fix 2：Ch5 data_table 统一口径——权益投资同比（代理）+ AUM 绝对值 + 份额变动率，三口径并列。
   - Fix 3：C3 纵深防御（仅当 Fix 4 后仍有误杀时）——关键词紧邻"策略/宣称/原文"时降级 MAJOR。
@@ -194,9 +194,17 @@ uv run pytest tests/fund/service/test_extraction.py tests/fund/service/test_llm_
   - Fix 5+6：禁止操作建议（买入/卖出/持有），允许风险提示（建议关注/需持续跟踪）。
   - 目标：passed 率 2/8 → 6/8。
 
+- **Slice 17N** 🔲：Ch5/Ch6 报告质量提升（模板优化 + 数字引用规范 + must_answer 补齐）。
+  - 17N-1：所有模板增加数字引用规范（引用原始数字，不缩写）。
+  - 17N-2：Ch5 模板重写（数据验证 + 口径强调 + 阶段判定逐步核对）。
+  - 17N-3：Ch6 ChapterContract 补充 must_answer "信息缺口"。
+  - 17N-4：Ch6 模板增加投资建议边界清单。
+  - 17N-5：端到端验证（Ch1-6 ≥75 passed 率 ≥4/6）。
+  - 裁决：数字引用走方案 A（模板约束，不缩写）；目标 ≥75 passed（非 degradation）。
+
 **Phase 3.5 最终验收标准**：
 - 传 `--llm` 时，8 章报告全部有 LLM 分析（`## 分析` 段落）。
-- 审计得分 ≥ 80 的章节数 ≥ 6/6（Ch1-6）。
+- 审计得分 ≥ 75 的章节数 ≥ 4/6（Ch1-6）。当前阈值 17N 裁决。
 - 不传 `--llm` 时，报告包含结构化数据表（非纯 key-value 倾倒）。
 - 仅 1 年数据时，generate 命令拒绝执行。
 

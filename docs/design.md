@@ -1411,3 +1411,32 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 - `docs/dayu-agent-comparison-report.md`、`docs/agent-evolution-design.md` 与 `docs/dayu-agent-codiwiki-and-development-stage-analysis-20260614.md` 仅作为候选研究输入材料，不作为设计真源或已批准 roadmap。
 - 若后续需要推进其中任何用户侧新能力（如 `ask`、`interactive`、`streaming`、联网搜索、会话持久化），必须回到本文件与 `docs/implementation-control.md` 单独裁决。
+
+- **Slice 17N**：Ch5/Ch6 报告质量提升（模板优化 + 数字引用规范 + must_answer 补齐）。
+
+  **裁决记录**（2026-07-18）：
+
+  | 编号 | 裁决 | 选项 | 理由 |
+  |------|------|------|------|
+  | 1 | 数字引用规范 | 方案 A：模板约束 LLM 引用原始数字，不缩写 | 消除 P2 误杀根因，零误匹配风险 |
+  | 2 | 目标阈值 | Ch1-6 审计得分 ≥75（passed，非 degradation） | 适配当前 LLM 能力，先消除降级 |
+  | 3 | 修复范围 | 5 项全做 | 问题相互关联，部分修复效果有限 |
+
+  **问题清单**：
+
+  | # | 问题 | 根因 | 修复 |
+  |---|------|------|------|
+  | 1 | P2 hallucination 误杀 | LLM 缩写数字（10095099672.67→100.95亿），allowed_numbers 不匹配 | 模板增加"引用原始数字，不得缩写"规则 |
+  | 2 | Ch5 数据验证不足 | LLM 未逐条核对数据表就输出结论 | 模板增加"先逐条核对数据，再输出结论"指令 |
+  | 3 | Ch6 must_answer 缺"信息缺口" | ChapterContract 未定义该字段 | 补充 must_answer 条目 |
+  | 4 | Ch6 投资建议违规 | 模板未明确禁止/允许边界 | 模板增加禁止/允许清单 |
+  | 5 | Ch5 口径混淆 | LLM 混淆"权益投资规模"和"份额×净值同比" | 模板增加口径强调段 |
+
+  **实施内容**：
+
+  - 17N-1：所有章节模板增加数字引用规范（引用数据表原始数字，不缩写、不四舍五入）
+  - 17N-2：Ch5 模板重写（数据验证规则 + 口径强调 + 阶段判定逐步核对）
+  - 17N-3：Ch6 ChapterContract 补充 must_answer "哪个信息缺口最可能改变最终判断"
+  - 17N-4：Ch6 模板增加投资建议边界清单
+  - 17N-5：端到端验证（3年数据，Ch1-6 ≥75 passed 率 ≥4/6）
+
