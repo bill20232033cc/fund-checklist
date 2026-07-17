@@ -1428,6 +1428,22 @@ class ReportGenerationCoordinator:
         warnings: list[str] = []
         chapter_contents: dict[int, str] = {}
 
+        # 0. 预生成所有章节数据表，收集全局允许数字集合（支持跨章节引用）
+        from fund_agent.service.chapter_generator import generate_data_table
+        from fund_agent.service.extraction import _compute_ch6_stress_test
+        all_data_tables: dict[int, str] = {}
+        global_numbers: set[str] = set()
+        for cid in range(1, 8):
+            st = _compute_ch6_stress_test(performance, report_year, scale_info, fund_name) if cid == 6 else None
+            dt = generate_data_table(
+                cid, fund_code, fund_name, report_year,
+                performance, holdings, allocation, fees,
+                fund_manager, scale_info, evidence,
+                stress_test=st, signal_judgment=signal_judgment,
+            )
+            all_data_tables[cid] = dt
+            global_numbers.update(re.findall(r'\d+\.?\d*', dt))
+
         # 1. 生成 Ch1-6
         for chapter_id in range(1, 7):
             content = self._generate_and_audit_chapter(
@@ -1443,6 +1459,7 @@ class ReportGenerationCoordinator:
                 scale_info=scale_info,
                 evidence=evidence,
                 signal_judgment=signal_judgment,
+                global_allowed_numbers=global_numbers,
             )
             if content:
                 chapter_contents[chapter_id] = content
@@ -1522,6 +1539,7 @@ class ReportGenerationCoordinator:
         use_chapter_summaries: bool = False,
         chapter_summaries: dict[int, str] | None = None,
         signal_judgment: Any = None,
+        global_allowed_numbers: set[str] | None = None,
     ) -> str | None:
         """生成并审计单个章节。
 
@@ -1545,6 +1563,7 @@ class ReportGenerationCoordinator:
                 use_chapter_summaries=use_chapter_summaries,
                 chapter_summaries=chapter_summaries,
                 signal_judgment=signal_judgment,
+                global_allowed_numbers=global_allowed_numbers,
             )
         except Exception:
             state = ChapterProcessState(chapter_id=chapter_id)
@@ -1566,6 +1585,7 @@ class ReportGenerationCoordinator:
         fund_manager: Any = None,
         scale_info: Any = None,
         evidence: Any = None,
+        global_allowed_numbers: set[str] | None = None,
         use_chapter_summaries: bool = False,
         chapter_summaries: dict[int, str] | None = None,
         signal_judgment: Any = None,
@@ -1607,6 +1627,7 @@ class ReportGenerationCoordinator:
             scale_info=scale_info,
             use_chapter_summaries=use_chapter_summaries,
             chapter_summaries=chapter_summaries,
+            global_allowed_numbers=global_allowed_numbers,
         )
 
         if not content:
@@ -1790,6 +1811,7 @@ class ReportGenerationCoordinator:
         scale_info: Any = None,
         use_chapter_summaries: bool = False,
         chapter_summaries: dict[int, str] | None = None,
+        global_allowed_numbers: set[str] | None = None,
     ) -> str | None:
         """生成章节内容。"""
 
@@ -1839,9 +1861,12 @@ class ReportGenerationCoordinator:
             if not llm_analysis or not isinstance(llm_analysis, str):
                 return None
 
-            # 检查 hallucination
-            allowed_numbers = set(re.findall(r'\d+\.?\d*', data_table))
+            # 检查 hallucination（优先使用全局允许列表，支持跨章节数字引用）
             from fund_agent.service.chapter_generator import contains_non_year_numbers
+            if global_allowed_numbers:
+                allowed_numbers = global_allowed_numbers
+            else:
+                allowed_numbers = set(re.findall(r'\d+\.?\d*', data_table))
             if contains_non_year_numbers(llm_analysis, allowed_numbers):
                 return None
 
