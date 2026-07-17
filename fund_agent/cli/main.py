@@ -726,10 +726,9 @@ def _run_generate_command(args: argparse.Namespace, *, stdout: TextIO, stderr: T
     years = _parse_years(args.years)
     service = FundReadingService()
 
-    # 检查可用年份是否 >= 3
-    available_years = set(years) if years else set()
-    if len(available_years) < 3:
-        stderr.write(f"错误：需要至少 3 年数据，当前仅有 {len(available_years)} 年。请使用 import 命令补充导入更多年份的 PDF。\n")
+    # 检查可用年份是否 >= 3（仅在显式指定年份时检查；自动发现模式由 service 层检查）
+    if years and len(set(years)) < 3:
+        stderr.write(f"错误：需要至少 3 年数据，当前仅有 {len(set(years))} 年。请使用 import 命令补充导入更多年份的 PDF。\n")
         return CLASSIFIED_FAILURE_EXIT_CODE
 
     llm_client = None
