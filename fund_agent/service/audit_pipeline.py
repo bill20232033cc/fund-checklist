@@ -20,6 +20,84 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class Metric:
+    """指标定义（合并预计算 + 口径）。
+
+    参数:
+        name: 指标名称（如"份额×净值同比"）。
+        formula: 计算公式。
+        unit: 单位（%, 亿元, 万份等）。
+        threshold: 触发阈值描述。
+        source: 数据来源（scale_info, allocation 等）。
+        note: 口径说明（如"不可用权益投资规模替代"）。
+
+    返回:
+        不可变指标定义 DTO。
+    """
+
+    name: str
+    formula: str
+    unit: str
+    threshold: str
+    source: str
+    note: str = ""
+
+
+@dataclass(frozen=True)
+class CrossChapterRef:
+    """跨章节依赖。
+
+    参数:
+        target_chapter: 目标章节号。
+        ref_type: 引用类型（signal_score, risk_checklist 等）。
+        note: 说明（引用的是 signal_scoring.py 程序化结果）。
+
+    返回:
+        不可变跨章节引用 DTO。
+    """
+
+    target_chapter: int
+    ref_type: str
+    note: str = ""
+
+
+@dataclass(frozen=True)
+class DataVerificationRule:
+    """数据验证规则。
+
+    参数:
+        rule_type: 规则类型（number_citation, comma_handling 等）。
+        description: 规则描述。
+
+    返回:
+        不可变数据验证规则 DTO。
+    """
+
+    rule_type: str
+    description: str
+
+
+@dataclass(frozen=True)
+class ItemRule:
+    """条件写作规则（结构化元数据，供审计读取）。
+
+    用于检查 must_answer 缺失是否因数据缺失导致合理降级。
+
+    参数:
+        condition: 触发条件（如"investor_return_data 缺失"）。
+        affected_output: 受影响的 required_output_item。
+        degradation_note: 降级声明文本。
+
+    返回:
+        不可变条件规则 DTO。
+    """
+
+    condition: str
+    affected_output: str
+    degradation_note: str = ""
+
+
+@dataclass(frozen=True)
 class ChapterContract:
     """章节合同：声明式定义每章必须包含的内容。
 
@@ -31,6 +109,10 @@ class ChapterContract:
         required_output_items: 必须输出的项目。
         data_sources: 必须引用的数据来源。
         narrative_mode: 叙事模式。
+        metrics: 指标定义列表（合并预计算 + 口径）。
+        cross_chapter_refs: 跨章节依赖列表。
+        data_verification: 数据验证规则列表。
+        item_rules: 条件写作规则列表。
 
     返回:
         不可变章节合同 DTO。
@@ -43,6 +125,10 @@ class ChapterContract:
     required_output_items: tuple[str, ...]
     data_sources: tuple[str, ...]
     narrative_mode: str = ""
+    metrics: tuple[Metric, ...] = ()
+    cross_chapter_refs: tuple[CrossChapterRef, ...] = ()
+    data_verification: tuple[DataVerificationRule, ...] = ()
+    item_rules: tuple[ItemRule, ...] = ()
 
 
 # 从 docs/fund-analysis-template-draft.md 提取的章节合同
@@ -132,6 +218,22 @@ CHAPTER_CONTRACTS: dict[int, ChapterContract] = {
             "R=A+B-C 综合评估",
         ),
         data_sources=("performance", "fees"),
+        metrics=(
+            Metric(name="近1年净值增长率", formula="当年净值增长率", unit="%", threshold="无", source="performance", note="R值"),
+            Metric(name="近3年净值增长率", formula="最近3年净值增长率", unit="%", threshold="无", source="performance", note="R值，数据不足时声明"),
+            Metric(name="近5年净值增长率", formula="最近5年净值增长率", unit="%", threshold="无", source="performance", note="R值，数据不足时声明"),
+            Metric(name="超额收益", formula="R - B", unit="%", threshold="正且稳定", source="performance", note="A = R - B"),
+            Metric(name="总成本率", formula="管理费+托管费+销售服务费", unit="%", threshold="无", source="fees", note="C值"),
+            Metric(name="净超额收益", formula="A - C", unit="%", threshold="正", source="performance+fees", note="超额收益是否覆盖成本"),
+        ),
+        data_verification=(
+            DataVerificationRule(rule_type="number_citation", description="引用原始数字，不缩写"),
+            DataVerificationRule(rule_type="comma_handling", description="提取数字前去除逗号"),
+        ),
+        item_rules=(
+            ItemRule(condition="数据年份不足3年", affected_output="近3年/5年净值增长率", degradation_note="数据年份不足，声明局限性"),
+            ItemRule(condition="销售服务费缺失", affected_output="成本拆解", degradation_note="销售服务费数据缺失，仅展示管理费+托管费"),
+        ),
     ),
     3: ChapterContract(
         chapter_id=3,
@@ -200,6 +302,25 @@ CHAPTER_CONTRACTS: dict[int, ChapterContract] = {
             "接下来最该跟踪的变量",
         ),
         data_sources=("performance", "allocation", "scale_info"),
+        metrics=(
+            Metric(name="份额×净值同比", formula="(当年份额×当年净值 - 上年份额×上年净值) / (上年份额×上年净值)", unit="%", threshold=">30%触发膨胀期, <-30%触发萎缩期", source="scale_info+allocation", note="不可用权益投资规模替代"),
+            Metric(name="权益投资规模变动", formula="年报资产配置权益投资金额同比", unit="%", threshold="无（仅参考）", source="allocation", note="仅用于阶段判定参考，不用于阈值判定"),
+            Metric(name="前十大持仓换手率", formula="两年间前十大持仓中替换的股票数量 / 10", unit="%", threshold=">40%触发关键变化", source="holdings（多年）", note="需多年 holdings 比对"),
+            Metric(name="管理费变动", formula="当年管理费 - 上年管理费", unit="%", threshold=">0.1%触发关键变化", source="fees", note="绝对值变动"),
+            Metric(name="托管费变动", formula="当年托管费 - 上年托管费", unit="%", threshold=">0.1%触发关键变化", source="fees", note="绝对值变动"),
+        ),
+        cross_chapter_refs=(
+            CrossChapterRef(target_chapter=7, ref_type="signal_score", note="对比Ch7信号评分方向是否逆转，引用的是 signal_scoring.py 程序化结果"),
+        ),
+        data_verification=(
+            DataVerificationRule(rule_type="number_citation", description="引用原始数字，不缩写"),
+            DataVerificationRule(rule_type="comma_handling", description="提取数字前去除逗号"),
+            DataVerificationRule(rule_type="口径区分", description="权益投资规模变动≠份额×净值同比，不可混用"),
+        ),
+        item_rules=(
+            ItemRule(condition="份额×净值同比数据缺失", affected_output="规模变动阈值判定", degradation_note="规模变动阈值无法判定（口径数据缺失）"),
+            ItemRule(condition="前十大持仓换手率数据缺失", affected_output="持仓变动维度", degradation_note="持仓变动维度数据缺失，声明原因"),
+        ),
     ),
     6: ChapterContract(
         chapter_id=6,
@@ -225,6 +346,18 @@ CHAPTER_CONTRACTS: dict[int, ChapterContract] = {
             "下一轮先验证什么",
         ),
         data_sources=("performance", "holdings"),
+        metrics=(
+            Metric(name="持仓集中度", formula="前十大持仓合计占净值比", unit="%", threshold="异常值（如0.00%）需特别关注", source="holdings", note="需多年数据比对"),
+            Metric(name="业绩波动", formula="净值增长率年度标准差", unit="%", threshold="无", source="performance", note="超额收益稳定性"),
+        ),
+        data_verification=(
+            DataVerificationRule(rule_type="number_citation", description="引用原始数字，不缩写"),
+            DataVerificationRule(rule_type="missing_data", description="数据缺失时明确声明，不得跳过"),
+        ),
+        item_rules=(
+            ItemRule(condition="持仓集中度数据缺失或异常", affected_output="风险否决项", degradation_note="数据异常，声明信息缺口"),
+            ItemRule(condition="2023年数据缺失", affected_output="业绩波动分析", degradation_note="声明数据缺失及对结论的影响"),
+        ),
     ),
     7: ChapterContract(
         chapter_id=7,
