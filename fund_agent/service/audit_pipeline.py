@@ -388,7 +388,7 @@ CHAPTER_CONTRACTS: dict[int, ChapterContract] = {
 
 
 def get_chapter_contract(chapter_id: int) -> ChapterContract | None:
-    """获取指定章节的合同。
+    """获取指定章节的合同（优先从模板加载，回退到硬编码）。
 
     参数:
         chapter_id: 章节编号（0-7）。
@@ -397,7 +397,7 @@ def get_chapter_contract(chapter_id: int) -> ChapterContract | None:
         ChapterContract；未找到时返回 None。
     """
 
-    return CHAPTER_CONTRACTS.get(chapter_id)
+    return load_chapter_contract_from_template(chapter_id)
 
 
 def get_all_chapter_contracts() -> dict[int, ChapterContract]:
