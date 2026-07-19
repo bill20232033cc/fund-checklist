@@ -1412,7 +1412,7 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - `docs/dayu-agent-comparison-report.md`、`docs/agent-evolution-design.md` 与 `docs/dayu-agent-codiwiki-and-development-stage-analysis-20260614.md` 仅作为候选研究输入材料，不作为设计真源或已批准 roadmap。
 - 若后续需要推进其中任何用户侧新能力（如 `ask`、`interactive`、`streaming`、联网搜索、会话持久化），必须回到本文件与 `docs/implementation-control.md` 单独裁决。
 
-- **Slice 17N**：Ch5/Ch6 报告质量提升（模板优化 + 数字引用规范 + must_answer 补齐）。
+- **Slice 17N** ✅：Ch5/Ch6 报告质量提升（模板优化 + 数字引用规范 + must_answer 补齐）。
 
   **裁决记录**（2026-07-18）：
 
@@ -1439,4 +1439,88 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
   - 17N-3：Ch6 ChapterContract 补充 must_answer "哪个信息缺口最可能改变最终判断"
   - 17N-4：Ch6 模板增加投资建议边界清单
   - 17N-5：端到端验证（3年数据，Ch1-6 ≥75 passed 率 ≥4/6）
+
+
+- **Slice 18A**（Phase 3.6）：合同架构重构 — 将 ChapterContract 从 Python 硬编码迁移到模板 HTML 注释。
+
+  **裁决记录**（2026-07-19）：
+
+  | 编号 | 裁决 | 选项 | 理由 |
+  |------|------|------|------|
+  | 1 | 迁移范围 | 全部 8 章 | 一次性完成，避免新旧两套并存 |
+  | 2 | ITEM_RULE | 纳入，仅支持 `<when_missing>` 条件块 | 复用已有机制，不引入 facet 过滤 |
+  | 3 | preferred_lens | 暂不引入 | 基金是单一领域，narrative_mode 已覆盖。后续研究基金类型划分后再决定 |
+  | 4 | precomputed_metrics | 放在 contract 中 | 驱动预计算的核心输入，和 must_answer 并列 |
+  | 5 | 审计校验 | must_answer 程序化校验 | 消除 S2 违规 |
+  | 6 | Phase 3.5 关闭 | 现在正式关闭 | 验收标准已达成（4/6 ≥75） |
+
+  **设计目标**：
+  - 合同定义从 Python 代码迁移到模板 HTML 注释（`<!-- CHAPTER_CONTRACT ... END_CHAPTER_CONTRACT -->`）
+  - PromptComposer 解析 HTML 注释，提取结构化合同
+  - 审计管道根据合同做程序化校验（must_answer 完整性、数字引用规范）
+  - 预计算指标由 contract 中的 `precomputed_metrics` 驱动
+
+  **新增 contract 字段**：
+
+  ```python
+  precomputed_metrics: tuple[PrecomputedMetric, ...]  # 预计算指标清单
+  metric_definitions: tuple[MetricDefinition, ...]     # 口径定义
+  cross_chapter_refs: tuple[CrossChapterRef, ...]      # 跨章节依赖
+  data_verification: DataVerificationRule              # 数据验证规则
+  item_rules: tuple[ItemRule, ...]                     # 条件写作规则
+  ```
+
+  **模板格式**（以 Ch5 为例）：
+
+  ```markdown
+  <!--
+  CHAPTER_CONTRACT
+  narrative_mode: 变化→阶段→判断
+  must_answer:
+    - 当前阶段是什么（5选1）
+    - 过去一年最关键的1-3个变化
+    - 这些变化是否影响原始投资假设
+    - 接下来最该跟踪的1-3个变量
+  must_not_cover:
+    - 不做市场整体走势预测
+    - 不给最终持有/替换结论
+  required_output_items:
+    - 基金当前所处阶段（含判定依据）
+    - 过去一年最关键的变化（含触发阈值）
+  precomputed_metrics:
+    - name: 份额×净值同比
+      formula: (当年份额×当年净值 - 上年份额×上年净值) / (上年份额×上年净值)
+      unit: "%"
+      threshold: ">30%触发膨胀期, <-30%触发萎缩期"
+    - name: 前十大持仓换手率
+      formula: 两年间前十大持仓中替换的股票数量 / 10
+      unit: "%"
+      threshold: ">40%触发关键变化"
+  metric_definitions:
+    - name: 规模变动
+      source: 份额×净值同比
+      note: 不可用权益投资规模替代
+    - name: 权益投资规模变动
+      source: 年报资产配置权益投资金额同比
+      note: 仅用于阶段判定参考，不用于阈值判定
+  cross_chapter_refs:
+    - target_chapter: 7
+      ref_type: signal_score
+      note: 对比Ch7信号评分方向是否逆转
+  data_verification:
+    number_citation_rule: 引用原始数字，不缩写
+    comma_handling: 提取数字前去除逗号
+  END_CHAPTER_CONTRACT
+  -->
+
+  ### 阶段判定
+  ...
+  ```
+
+  **Phase 5 前置条件**（已满足）：
+  - ✅ 8 章报告全部非空
+  - ✅ 审计管道数据适配（_is_data_sufficient）
+  - ✅ 端到端验证通过
+
+  **后续研究**：基金类型划分 + preferred_lens 设计（下一阶段）。
 

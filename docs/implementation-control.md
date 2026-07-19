@@ -194,7 +194,7 @@ uv run pytest tests/fund/service/test_extraction.py tests/fund/service/test_llm_
   - Fix 5+6：禁止操作建议（买入/卖出/持有），允许风险提示（建议关注/需持续跟踪）。
   - 目标：passed 率 2/8 → 6/8。
 
-- **Slice 17N** 🔲：Ch5/Ch6 报告质量提升（模板优化 + 数字引用规范 + must_answer 补齐）。
+- **Slice 17N** ✅：Ch5/Ch6 报告质量提升（模板优化 + 数字引用规范 + must_answer 补齐）。
   - 17N-1：所有模板增加数字引用规范（引用原始数字，不缩写）。
   - 17N-2：Ch5 模板重写（数据验证 + 口径强调 + 阶段判定逐步核对）。
   - 17N-3：Ch6 ChapterContract 补充 must_answer "信息缺口"。
@@ -202,11 +202,83 @@ uv run pytest tests/fund/service/test_extraction.py tests/fund/service/test_llm_
   - 17N-5：端到端验证（Ch1-6 ≥75 passed 率 ≥4/6）。
   - 裁决：数字引用走方案 A（模板约束，不缩写）；目标 ≥75 passed（非 degradation）。
 
-**Phase 3.5 最终验收标准**：
-- 传 `--llm` 时，8 章报告全部有 LLM 分析（`## 分析` 段落）。
-- 审计得分 ≥ 75 的章节数 ≥ 4/6（Ch1-6）。当前阈值 17N 裁决。
-- 不传 `--llm` 时，报告包含结构化数据表（非纯 key-value 倾倒）。
-- 仅 1 年数据时，generate 命令拒绝执行。
+**Phase 3.5 最终验收** ✅ 已关闭（2026-07-19）：
+
+| 验收项 | 标准 | 结果 |
+|--------|------|------|
+| 8 章 LLM 分析 | 传 `--llm` 时全部有 `## 分析` 段落 | ✅ 8/8 |
+| 审计得分 | Ch1-6 ≥75 passed ≥4/6 | ✅ 4/6（Ch1=82.5, Ch2=75.5, Ch3=87.5, Ch4=86.0） |
+| 模板模式 | 不传 `--llm` 时包含结构化数据表 | ✅ |
+| 多年数据强制 | 仅 1 年时拒绝生成 | ✅ |
+| P2 误杀修复 | 逗号预处理 + 单位等价匹配 | ✅（Ch5 P2 从 5 个降至 1 个） |
+
+端到端验证数据（兴全 163415，5 年 2021-2025）：
+- Ch0=80.4 Ch1=82.5 Ch2=75.5 Ch3=87.5 Ch4=86.0 Ch5=66.5 Ch6=68.5 Ch7=80.4
+- Ch5/Ch6 未达 75 的根因是 LLM 内容质量问题（分析深度不足、逻辑矛盾），非 hallucination 或模板问题
+
+### Phase 3.6：合同架构重构（阻塞 Phase 5）
+
+> 将 ChapterContract 从 Python 硬编码迁移到模板 HTML 注释（学 dayu），实现"合同定义 → 模板渲染 → 审计验证"三层联动。
+> 本 Phase 完成后，Phase 5 可启动（前置条件已满足：8 章非空 + 审计数据适配 + 端到端通过）。
+
+**裁决记录**（2026-07-19）：
+
+| 编号 | 裁决 | 选项 | 理由 |
+|------|------|------|------|
+| 1 | 迁移范围 | 全部 8 章 | 一次性完成，避免新旧两套并存 |
+| 2 | ITEM_RULE | 纳入，仅支持 `<when_missing>` 条件块 | 复用已有机制，不引入 facet 过滤 |
+| 3 | preferred_lens | 暂不引入 | 基金是单一领域，narrative_mode 已覆盖。后续研究基金类型划分后再决定 |
+| 4 | precomputed_metrics | 放在 contract 中 | 驱动预计算的核心输入，和 must_answer 并列 |
+| 5 | 审计校验 | must_answer 程序化校验 | 消除 S2 违规，从 LLM 判断改为程序化匹配 |
+| 6 | Phase 3.5 关闭 | 现在正式关闭 | 验收标准已达成 |
+
+**实施内容**：
+
+- **3.6-1**：ChapterContract 数据类扩展
+  - 新增字段：`precomputed_metrics`（预计算指标清单）、`metric_definitions`（口径定义）、`cross_chapter_refs`（跨章节依赖）、`data_verification`（数据验证规则）、`item_rules`（条件写作规则）
+  - 保持现有字段：`narrative_mode`、`must_answer`、`must_not_cover`、`required_output_items`、`data_sources`
+
+- **3.6-2**：模板 HTML 注释迁移
+  - 8 个章节模板文件（ch0-ch7.md）中嵌入 `<!-- CHAPTER_CONTRACT ... END_CHAPTER_CONTRACT -->` 注释块
+  - 合同内容从 audit_pipeline.py CHAPTER_CONTRACTS 字典迁移到模板
+  - PromptComposer 解析 HTML 注释，提取结构化合同
+
+- **3.6-3**：预计算指标驱动
+  - `precomputed_metrics` 定义每个章节需要的预计算指标
+  - `generate_data_table` 根据 contract 中的 `precomputed_metrics` 自动生成指标
+  - Ch2：近 1/3/5 年 R 值、超额收益覆盖成本
+  - Ch5：份额×净值同比、阶段判定结果
+
+- **3.6-4**：must_answer 程序化校验
+  - 审计管道中 S2 检查从 LLM 判断改为程序化匹配
+  - 将 must_answer 字段列表与 LLM 输出的 must_answer JSON 逐项比对
+  - 缺失项自动标记 S2 违规
+
+- **3.6-5**：口径定义与数据验证
+  - `metric_definitions` 定义每个指标的名称、公式、单位、阈值、替代口径说明
+  - `data_verification` 定义数字引用规则（原始精度、不缩写）
+  - 审计管道 P2 检查使用 contract 中的 `data_verification` 规则
+
+- **3.6-6**：端到端验证
+  - 兴全 163415（5 年）+ 安信 004393（3 年）
+  - 目标：Ch1-6 ≥75 passed 率 ≥5/6
+  - 回归：现有 47 个单元测试不回退
+
+**allowed write set（3.6）**：
+- `fund_agent/service/audit_pipeline.py`
+- `fund_agent/service/prompt_composer.py`（新增解析逻辑）
+- `fund_agent/service/chapter_generator.py`（预计算驱动）
+- `fund_agent/service/prompts/ch0.md` ~ `ch7.md`
+- `fund_agent/service/prompts/system_base.md`
+- `tests/fund/service/test_audit_pipeline.py`
+- `tests/fund/service/test_prompt_composer.py`（新增）
+- `docs/design.md`
+- `docs/implementation-control.md`
+
+**验证命令（3.6）**：
+```bash
+uv run pytest tests/fund/service/test_audit_pipeline.py tests/fund/service/test_llm_chapter_generation.py tests/fund/service/test_prompt_composer.py -x -q --tb=short
+```
 
 ### Phase 4：分析能力扩展（低优先级）
 - ~~Slice 18A~~：已在 16A 实现，删除
