@@ -425,6 +425,13 @@ def _dict_to_chapter_contract(chapter_id: int, raw: dict) -> ChapterContract:
             return ()
         if isinstance(val, list):
             if cls and all(isinstance(item, dict) for item in val):
+                # CrossChapterRef.target_chapter 需要 int 转换
+                if cls is CrossChapterRef:
+                    return tuple(cls(
+                        target_chapter=int(item.get("target_chapter", 0)),
+                        ref_type=str(item.get("ref_type", "")),
+                        note=str(item.get("note", "")),
+                    ) for item in val)
                 return tuple(cls(**item) for item in val)
             return tuple(val)
         return (val,)
@@ -1076,9 +1083,9 @@ class ProgrammaticAuditor:
             "覆盖": r"(覆盖|是否为正|净超额)",
             "判定依据": r"(判定依据|依据|原因|理由)",
             "阈值": r"(阈值|触发|超过|低于)",
-            "投资假设": r"(投资假设|假设|判断|结论)",
+            "投资假设": r"(投资假设|原始假设|初始假设|假设是否改变)",
             "升级": r"(升级|降级|终止|阈值)",
-            "验证问题": r"(验证|核实|确认|最小验证)",
+            "验证问题": r"(验证问题|核实什么|确认什么|最小验证|先核实)",
         }
 
         if len(self._content) > 50:
