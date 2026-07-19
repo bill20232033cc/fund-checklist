@@ -172,3 +172,149 @@ def _replace_variables(
 
     result = _VARIABLE_PATTERN.sub(replacer, template)
     return result, missing
+
+
+# 合同解析：从模板 HTML 注释中提取 CHAPTER_CONTRACT
+_CHAPTER_CONTRACT_PATTERN = re.compile(
+    r"<!--\s*\n?CHAPTER_CONTRACT\s*\n(.*?)\nEND_CHAPTER_CONTRACT\s*\n?\s*-->",
+    re.DOTALL,
+)
+
+
+def extract_contract_from_template(template_text: str) -> dict[str, Any] | None:
+    """从模板文本中提取 CHAPTER_CONTRACT HTML 注释块。
+
+    参数:
+        template_text: 模板原始文本（含 HTML 注释）。
+
+    返回:
+        合同字段字典；未找到时返回 None。
+
+    异常:
+        无（解析失败时返回 None）。
+    """
+    match = _CHAPTER_CONTRACT_PATTERN.search(template_text)
+    if not match:
+        return None
+
+    raw_yaml = match.group(1).strip()
+    return _parse_contract_yaml(raw_yaml)
+
+
+def _strip_yaml_quotes(s: str) -> str:
+    """去除 YAML 值的外层引号。"""
+    s = s.strip()
+    if len(s) >= 2 and s[0] == '"' and s[-1] == '"':
+        return s[1:-1]
+    if len(s) >= 2 and s[0] == "'" and s[-1] == "'":
+        return s[1:-1]
+    return s
+
+
+def _parse_contract_yaml(raw: str) -> dict[str, Any]:
+    """解析合同 YAML-like 文本。
+
+    支持的格式：
+    - scalar: key: value
+    - list: key:\\n  - item1\\n  - item2
+    - nested list of dicts: key:\\n  - name: x\\n    formula: y
+
+    参数:
+        raw: YAML-like 文本。
+
+    返回:
+        解析后的字典。
+    """
+    result: dict[str, Any] = {}
+    lines = raw.split("\n")
+    i = 0
+
+    while i < len(lines):
+        line = lines[i]
+        # 跳过空行
+        if not line.strip():
+            i += 1
+            continue
+
+        # 判断缩进级别
+        indent = len(line) - len(line.lstrip())
+
+        # 顶层 key: value
+        if indent == 0 and ":" in line:
+            key, _, value = line.partition(":")
+            key = key.strip()
+            value = value.strip()
+
+            if value:
+                # scalar value
+                result[key] = _strip_yaml_quotes(value)
+                i += 1
+            else:
+                # list value (后续行以 - 开头)
+                items: list[Any] = []
+                i += 1
+                while i < len(lines):
+                    next_line = lines[i]
+                    next_stripped = next_line.strip()
+                    if not next_stripped:
+                        i += 1
+                        continue
+                    next_indent = len(next_line) - len(next_line.lstrip())
+                    if next_indent == 0 and ":" in next_line:
+                        break  # 下一个顶层 key
+                    if next_stripped.startswith("- "):
+                        # list item
+                        item_content = next_stripped[2:].strip()
+                        # 检查是否是 dict item（后续行有更深缩进的 key: value）
+                        sub_items: dict[str, str] = {}
+                        if ":" in item_content:
+                            sub_key, _, sub_val = item_content.partition(":")
+                            sub_items[sub_key.strip()] = _strip_yaml_quotes(sub_val)
+                            # 读取更深缩进的行
+                            j = i + 1
+                            while j < len(lines):
+                                sub_line = lines[j]
+                                sub_stripped = sub_line.strip()
+                                if not sub_stripped:
+                                    j += 1
+                                    continue
+                                sub_indent = len(sub_line) - len(sub_line.lstrip())
+                                if sub_indent <= next_indent:
+                                    break
+                                if ":" in sub_stripped:
+                                    sk, _, sv = sub_stripped.partition(":")
+                                    sub_items[sk.strip()] = _strip_yaml_quotes(sv)
+                                j += 1
+                            if len(sub_items) > 1:
+                                items.append(sub_items)
+                            else:
+                                items.append(_strip_yaml_quotes(item_content))
+                            i = j
+                        else:
+                            items.append(_strip_yaml_quotes(item_content))
+                            i += 1
+                    else:
+                        break
+                result[key] = items
+        else:
+            i += 1
+
+    return result
+
+
+def load_contract_from_file(template_path: Path) -> dict[str, Any] | None:
+    """从模板文件中提取 CHAPTER_CONTRACT。
+
+    参数:
+        template_path: 模板文件路径。
+
+    返回:
+        合同字段字典；未找到或文件不存在时返回 None。
+
+    异常:
+        无。
+    """
+    if not template_path.exists():
+        return None
+    text = template_path.read_text(encoding="utf-8")
+    return extract_contract_from_template(text)

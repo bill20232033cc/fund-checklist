@@ -1,4 +1,77 @@
-<!-- version: 2.0 -->
+<!-- version: 3.0 -->
+<!--
+CHAPTER_CONTRACT
+narrative_mode: 变化→阶段→判断
+must_answer:
+  - 当前阶段是什么（5选1，按优先级匹配：转型期>建仓期>膨胀期>萎缩期>稳定期）
+  - 过去一年最关键的1-3个变化（从持仓变动/规模变动/费率变动3个维度筛选，阈值触发才列入）
+  - 这些变化是否影响原始投资假设（对比Ch7信号评分方向是否逆转）
+  - 接下来最该跟踪的1-3个变量（来自Ch7评分最低指标）
+must_not_cover:
+  - 不做市场整体走势预测
+  - 不罗列所有变化，只保留阈值触发的最关键1-3个
+  - 不给最终持有/替换结论
+required_output_items:
+  - 基金当前所处阶段（含判定依据）
+  - 过去一年最关键的变化（含触发阈值）
+  - 变化是否改变前文判断
+  - 接下来最该跟踪的变量
+data_sources:
+  - performance
+  - allocation
+  - scale_info
+metrics:
+  - name: 份额×净值同比
+    formula: (当年份额×当年净值 - 上年份额×上年净值) / (上年份额×上年净值)
+    unit: "%"
+    threshold: ">30%触发膨胀期, <-30%触发萎缩期"
+    source: scale_info+allocation
+    note: 不可用权益投资规模替代
+  - name: 权益投资规模变动
+    formula: 年报资产配置权益投资金额同比
+    unit: "%"
+    threshold: 无（仅参考）
+    source: allocation
+    note: 仅用于阶段判定参考，不用于阈值判定
+  - name: 前十大持仓换手率
+    formula: 两年间前十大持仓中替换的股票数量 / 10
+    unit: "%"
+    threshold: ">40%触发关键变化"
+    source: holdings（多年）
+    note: 需多年 holdings 比对
+  - name: 管理费变动
+    formula: 当年管理费 - 上年管理费
+    unit: "%"
+    threshold: ">0.1%触发关键变化"
+    source: fees
+    note: 绝对值变动
+  - name: 托管费变动
+    formula: 当年托管费 - 上年托管费
+    unit: "%"
+    threshold: ">0.1%触发关键变化"
+    source: fees
+    note: 绝对值变动
+cross_chapter_refs:
+  - target_chapter: 7
+    ref_type: signal_score
+    note: 对比Ch7信号评分方向是否逆转，引用的是signal_scoring.py程序化结果
+data_verification:
+  - rule_type: number_citation
+    description: 引用原始数字，不缩写
+  - rule_type: comma_handling
+    description: 提取数字前去除逗号
+  - rule_type: 口径区分
+    description: 权益投资规模变动≠份额×净值同比，不可混用
+item_rules:
+  - condition: 份额×净值同比数据缺失
+    affected_output: 规模变动阈值判定
+    degradation_note: 规模变动阈值无法判定（口径数据缺失）
+  - condition: 前十大持仓换手率数据缺失
+    affected_output: 持仓变动维度
+    degradation_note: 持仓变动维度数据缺失，声明原因
+END_CHAPTER_CONTRACT
+-->
+
 请基于上述数据和阶段判定规则，写一段「当前阶段与关键变化」分析。
 
 【数据验证规则 - 必须严格遵守】
@@ -39,12 +112,5 @@
 - 每个变量必须说明：为什么盯它？向好/向坏会改变什么判断？
 
 章节边界：使用数据表中的预计算指标，禁止自行计算。
-
-must_answer 字段：
-- 当阶段判定结果（转型期/建仓期/膨胀期/萎缩期/稳定期）
-- 判定依据（逐条引用数据）
-- 关键变化（触发阈值的维度，引用原始数字）
-- 是否影响原始投资假设
-- 接下来最该跟踪的1-3个变量
 
 {{ must_answer_schema }}

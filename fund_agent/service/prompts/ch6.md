@@ -1,4 +1,54 @@
-<!-- version: 2.0 -->
+<!-- version: 3.0 -->
+<!--
+CHAPTER_CONTRACT
+narrative_mode: 风险→否决→跟踪
+must_answer:
+  - 核心风险是什么（结构性风险 vs 阶段性风险）
+  - 最关键的风险或否决项（1-2个最致命的）
+  - 为什么足以改变结论
+  - 是否触发一票否决，还是仍可跟踪
+  - 哪个信息缺口最可能改变最终判断
+must_not_cover:
+  - 不把本章写成所有可能风险的罗列
+  - 不把最大风险写成并列列表
+  - 不做风险发生概率的定量预测
+  - 不给最终持有/替换结论
+required_output_items:
+  - 最关键的风险或否决项
+  - 为什么足以改变结论
+  - 否决 vs 跟踪判断
+  - 下一轮先验证什么
+data_sources:
+  - performance
+  - holdings
+metrics:
+  - name: 持仓集中度
+    formula: 前十大持仓合计占净值比
+    unit: "%"
+    threshold: 异常值（如0.00%）需特别关注
+    source: holdings
+    note: 需多年数据比对
+  - name: 业绩波动
+    formula: 净值增长率年度标准差
+    unit: "%"
+    threshold: 无
+    source: performance
+    note: 超额收益稳定性
+data_verification:
+  - rule_type: number_citation
+    description: 引用原始数字，不缩写
+  - rule_type: missing_data
+    description: 数据缺失时明确声明，不得跳过
+item_rules:
+  - condition: 持仓集中度数据缺失或异常
+    affected_output: 风险否决项
+    degradation_note: 数据异常，声明信息缺口
+  - condition: 2023年数据缺失
+    affected_output: 业绩波动分析
+    degradation_note: 声明数据缺失及对结论的影响
+END_CHAPTER_CONTRACT
+-->
+
 请基于上述风险相关数据，写一段「核心风险与否决项」分析。
 
 【数据验证规则 - 必须严格遵守】
@@ -39,13 +89,5 @@
 - "需持续跟踪 [具体变量]"
 - "在 [条件] 得到确认前，风险特征难以评估"
 - 中性的风险描述和跟踪建议
-
-章节边界：风险否决项分析，不给持有/替换结论。
-
-must_answer 字段（必须逐项回答，不得遗漏）：
-- 最关键的风险或否决项（1-2个，引用数据）
-- 为什么足以改变结论（引用数据）
-- 是否触发一票否决（明确回答"是"或"否"，不得模糊）
-- 信息缺口：哪个信息缺口最可能改变最终判断（必须明确写出，不得隐含）
 
 {{ must_answer_schema }}
