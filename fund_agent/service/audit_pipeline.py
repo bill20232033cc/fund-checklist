@@ -410,6 +410,62 @@ def get_all_chapter_contracts() -> dict[int, ChapterContract]:
     return dict(CHAPTER_CONTRACTS)
 
 
+def _dict_to_chapter_contract(chapter_id: int, raw: dict) -> ChapterContract:
+    """将模板提取的原始字典转换为 ChapterContract 对象。
+
+    参数:
+        chapter_id: 章节编号。
+        raw: extract_contract_from_template 返回的字典。
+
+    返回:
+        ChapterContract 对象。
+    """
+    def _to_tuple(val, cls=None):
+        if val is None:
+            return ()
+        if isinstance(val, list):
+            if cls and all(isinstance(item, dict) for item in val):
+                return tuple(cls(**item) for item in val)
+            return tuple(val)
+        return (val,)
+
+    return ChapterContract(
+        chapter_id=chapter_id,
+        title=raw.get("title", ""),
+        narrative_mode=raw.get("narrative_mode", ""),
+        must_answer=_to_tuple(raw.get("must_answer")),
+        must_not_cover=_to_tuple(raw.get("must_not_cover")),
+        required_output_items=_to_tuple(raw.get("required_output_items")),
+        data_sources=_to_tuple(raw.get("data_sources")),
+        metrics=_to_tuple(raw.get("metrics"), Metric),
+        cross_chapter_refs=_to_tuple(raw.get("cross_chapter_refs"), CrossChapterRef),
+        data_verification=_to_tuple(raw.get("data_verification"), DataVerificationRule),
+        item_rules=_to_tuple(raw.get("item_rules"), ItemRule),
+    )
+
+
+def load_chapter_contract_from_template(chapter_id: int) -> ChapterContract | None:
+    """从模板文件中加载章节合同。
+
+    参数:
+        chapter_id: 章节编号（0-7）。
+
+    返回:
+        ChapterContract；模板中无合同时回退到硬编码字典。
+    """
+    from pathlib import Path
+    from fund_agent.service.prompt_composer import load_contract_from_file
+
+    template_dir = Path(__file__).parent / "prompts"
+    template_path = template_dir / f"ch{chapter_id}.md"
+    raw = load_contract_from_file(template_path)
+    if raw:
+        raw["title"] = CHAPTER_CONTRACTS.get(chapter_id, ChapterContract(chapter_id=chapter_id, title="", must_answer=(), must_not_cover=(), required_output_items=(), data_sources=())).title
+        return _dict_to_chapter_contract(chapter_id, raw)
+    # 回退到硬编码
+    return CHAPTER_CONTRACTS.get(chapter_id)
+
+
 # ============================================================
 # 违规分类体系（4类22项，对齐 dayu P/E/S/C）
 # ============================================================
