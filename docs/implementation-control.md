@@ -235,8 +235,13 @@ uv run pytest tests/fund/service/test_extraction.py tests/fund/service/test_llm_
 **实施内容**：
 
 - **3.6-1**：ChapterContract 数据类扩展
-  - 新增字段：`precomputed_metrics`（预计算指标清单）、`metric_definitions`（口径定义）、`cross_chapter_refs`（跨章节依赖）、`data_verification`（数据验证规则）、`item_rules`（条件写作规则）
+  - 新增字段及类型定义：
+    - `Metric`: name, formula, unit, threshold, source, note（合并预计算+口径）
+    - `CrossChapterRef`: target_chapter, ref_type, note（引用 signal_scoring.py 程序化结果）
+    - `DataVerificationRule`: rule_type, description
+    - `ItemRule`: condition, affected_output, degradation_note（供审计检查 must_answer 缺失是否因数据缺失导致合理降级）
   - 保持现有字段：`narrative_mode`、`must_answer`、`must_not_cover`、`required_output_items`、`data_sources`
+  - 新增字段：`metrics`、`cross_chapter_refs`、`data_verification`、`item_rules`
 
 - **3.6-2**：模板 HTML 注释迁移
   - 8 个章节模板文件（ch0-ch7.md）中嵌入 `<!-- CHAPTER_CONTRACT ... END_CHAPTER_CONTRACT -->` 注释块

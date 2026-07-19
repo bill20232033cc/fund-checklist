@@ -1463,11 +1463,10 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
   **新增 contract 字段**：
 
   ```python
-  precomputed_metrics: tuple[PrecomputedMetric, ...]  # 预计算指标清单
-  metric_definitions: tuple[MetricDefinition, ...]     # 口径定义
-  cross_chapter_refs: tuple[CrossChapterRef, ...]      # 跨章节依赖
-  data_verification: DataVerificationRule              # 数据验证规则
-  item_rules: tuple[ItemRule, ...]                     # 条件写作规则
+  metrics: tuple[Metric, ...]                         # 指标定义（合并预计算 + 口径）
+  cross_chapter_refs: tuple[CrossChapterRef, ...]      # 跨章节依赖（引用 signal_scoring.py 程序化结果）
+  data_verification: tuple[DataVerificationRule, ...]  # 数据验证规则（复数）
+  item_rules: tuple[ItemRule, ...]                     # 条件写作规则（结构化元数据，供审计检查 must_answer 缺失是否因数据缺失导致合理降级）
   ```
 
   **模板格式**（以 Ch5 为例）：
@@ -1487,21 +1486,24 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
   required_output_items:
     - 基金当前所处阶段（含判定依据）
     - 过去一年最关键的变化（含触发阈值）
-  precomputed_metrics:
+  metrics:
     - name: 份额×净值同比
       formula: (当年份额×当年净值 - 上年份额×上年净值) / (上年份额×上年净值)
       unit: "%"
       threshold: ">30%触发膨胀期, <-30%触发萎缩期"
+      source: scale_info + allocation
+      note: 不可用权益投资规模替代
     - name: 前十大持仓换手率
       formula: 两年间前十大持仓中替换的股票数量 / 10
       unit: "%"
       threshold: ">40%触发关键变化"
-  metric_definitions:
-    - name: 规模变动
-      source: 份额×净值同比
-      note: 不可用权益投资规模替代
+      source: holdings（多年）
+      note: 需多年 holdings 比对
     - name: 权益投资规模变动
-      source: 年报资产配置权益投资金额同比
+      formula: 年报资产配置权益投资金额同比
+      unit: "%"
+      threshold: 无（仅参考）
+      source: allocation
       note: 仅用于阶段判定参考，不用于阈值判定
   cross_chapter_refs:
     - target_chapter: 7
@@ -1517,10 +1519,12 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
   ...
   ```
 
-  **Phase 5 前置条件**（已满足）：
-  - ✅ 8 章报告全部非空
-  - ✅ 审计管道数据适配（_is_data_sufficient）
-  - ✅ 端到端验证通过
+  **Phase 5 前置条件**：
+  - ✅ 8 章报告全部非空（17G 已验证）
+  - ✅ 审计管道数据适配（17F 权重调整 + 阈值适配）
+  - ✅ 端到端验证通过（Phase 3.5 最终验收）
+  - 🔲 Phase 3.6 验收通过（Ch1-6 ≥75 passed 率 ≥5/6）
+  - Phase 5 范围定义（待裁决）
 
   **后续研究**：基金类型划分 + preferred_lens 设计（下一阶段）。
 
