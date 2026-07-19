@@ -1035,22 +1035,23 @@ class ProgrammaticAuditor:
         return violations
 
     def _check_required_fields(self) -> list[AuditViolation]:
-        """检查必须字段（只检查有 pattern 的条目，跳过无法程序化检查的）。"""
+        """检查必须字段（程序化校验 must_answer + required_output_items）。
+
+        两层检查：
+        1. required_output_items 中有 pattern 的条目 → 正则匹配
+        2. must_answer 关键词提取 → 内容中是否包含相关表述
+        """
         violations: list[AuditViolation] = []
 
-        # 只检查 ChapterContract.required_output_items 中能匹配 pattern 的条目
+        # 第一层：required_output_items pattern 匹配
         for item in self._contract.required_output_items:
             matched_pattern_key = None
             for pattern_key in _REQUIRED_FIELD_PATTERNS:
                 if pattern_key in item:
                     matched_pattern_key = pattern_key
                     break
-
-            # 没有匹配的 pattern key → 跳过（无法程序化检查）
             if matched_pattern_key is None:
                 continue
-
-            # 有匹配的 pattern key → 检查内容是否包含该 pattern
             pattern = _REQUIRED_FIELD_PATTERNS[matched_pattern_key]
             if not re.search(pattern, self._content) and len(self._content) > 50:
                 violations.append(AuditViolation(
@@ -1061,6 +1062,39 @@ class ProgrammaticAuditor:
                     location=f"Ch{self._chapter_id}",
                     suggested_fix=f"补充 {item} 相关内容",
                 ))
+
+        # 第二层：must_answer 关键词检查
+        # 从 must_answer 文本中提取关键词，检查内容是否包含相关表述
+        _MUST_ANSWER_KEYWORDS = {
+            "阶段": r"(阶段|稳定期|转型期|建仓期|膨胀期|萎缩期)",
+            "变化": r"(变化|变动|调整|转型)",
+            "风险": r"(风险|否决|隐患|暴露)",
+            "信息缺口": r"(信息缺口|数据缺失|缺口|缺失)",
+            "跟踪": r"(跟踪|监测|观察|验证)",
+            "超额收益": r"(超额收益|跑赢|超越基准|A\s*=\s*R\s*-\s*B)",
+            "成本": r"(管理费|托管费|销售服务费|成本)",
+            "覆盖": r"(覆盖|是否为正|净超额)",
+            "判定依据": r"(判定依据|依据|原因|理由)",
+            "阈值": r"(阈值|触发|超过|低于)",
+            "投资假设": r"(投资假设|假设|判断|结论)",
+            "升级": r"(升级|降级|终止|阈值)",
+            "验证问题": r"(验证|核实|确认|最小验证)",
+        }
+
+        if len(self._content) > 50:
+            for must_item in self._contract.must_answer:
+                for kw, pattern in _MUST_ANSWER_KEYWORDS.items():
+                    if kw in must_item:
+                        if not re.search(pattern, self._content):
+                            violations.append(AuditViolation(
+                                code="S2",
+                                category=ViolationCategory.STRUCTURE,
+                                severity=ViolationSeverity.MAJOR,
+                                description=f"必须字段缺失：合同要求「{must_item[:50]}」，但内容中未找到「{kw}」相关表述",
+                                location=f"Ch{self._chapter_id}",
+                                suggested_fix=f"补充 {kw} 相关分析",
+                            ))
+                        break  # 每个 must_item 只检查第一个匹配的关键词
 
         return violations
 
