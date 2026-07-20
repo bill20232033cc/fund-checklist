@@ -973,6 +973,20 @@ class ProgrammaticAuditor:
         score = max(0.0, min(100.0, base_score))
         return score, tuple(violations)
 
+    def _has_data_verification_rule(self, rule_type: str) -> bool:
+        """检查合同中是否存在指定类型的 data_verification 规则。
+
+        参数:
+            rule_type: 规则类型（如 "number_citation"）。
+
+        返回:
+            True 表示合同包含该规则。
+        """
+        for rule in self._contract.data_verification:
+            if rule.rule_type == rule_type:
+                return True
+        return False
+
     def _check_data_compliance(self) -> list[AuditViolation]:
         """检查数据合规性。"""
         violations: list[AuditViolation] = []
@@ -988,44 +1002,45 @@ class ProgrammaticAuditor:
             ))
 
         # P2: 数字编造（LLM输出包含数据表中没有的数字）
-        # 使用全局 allowed_numbers（支持跨章节引用），否则用本章 data_table
-        from fund_agent.service.chapter_generator import _normalize_number
-        if self._global_allowed_numbers:
-            data_numbers_norm = {_normalize_number(n) for n in self._global_allowed_numbers}
-        else:
-            data_numbers_norm = {_normalize_number(n) for n in re.findall(r'\d+\.?\d*', self._data_table.replace(',', ''))}
-        content_numbers = set(re.findall(r'\d+\.?\d*', self._content.replace(',', '')))
-        # 排除年份（20xx）和小数字（1-99）
-        suspicious = set()
-        for n in content_numbers:
-            normalized = _normalize_number(n)
-            if re.match(r'^(20[12]\d)$', normalized):
-                continue
-            if re.match(r'^[1-9]\d?$', normalized):
-                continue
-            if normalized not in data_numbers_norm:
-                suspicious.add(n)
+        # 仅当合同中定义了 number_citation 数据验证规则时执行
+        if self._has_data_verification_rule("number_citation"):
+            from fund_agent.service.chapter_generator import _normalize_number
+            if self._global_allowed_numbers:
+                data_numbers_norm = {_normalize_number(n) for n in self._global_allowed_numbers}
+            else:
+                data_numbers_norm = {_normalize_number(n) for n in re.findall(r'\d+\.?\d*', self._data_table.replace(',', ''))}
+            content_numbers = set(re.findall(r'\d+\.?\d*', self._content.replace(',', '')))
+            # 排除年份（20xx）和小数字（1-99）
+            suspicious = set()
+            for n in content_numbers:
+                normalized = _normalize_number(n)
+                if re.match(r'^(20[12]\d)$', normalized):
+                    continue
+                if re.match(r'^[1-9]\d?$', normalized):
+                    continue
+                if normalized not in data_numbers_norm:
+                    suspicious.add(n)
 
-        # 单位等价过滤：检查可疑数字是否是 allowed_numbers 的亿元/万元缩写
-        # 例如 LLM 输出 "100.95" 匹配数据表中的 "10,095,099,672.67"（÷1亿）
-        if suspicious:
-            raw_allowed = self._global_allowed_numbers or set(re.findall(r'\d+\.?\d*', self._data_table.replace(',', '')))
-            filtered = set()
-            for s in suspicious:
-                if _is_unit_equivalent(s, raw_allowed):
-                    continue  # 等价匹配，不算 hallucination
-                filtered.add(s)
-            suspicious = filtered
+            # 单位等价过滤：检查可疑数字是否是 allowed_numbers 的亿元/万元缩写
+            # 例如 LLM 输出 "100.95" 匹配数据表中的 "10,095,099,672.67"（÷1亿）
+            if suspicious:
+                raw_allowed = self._global_allowed_numbers or set(re.findall(r'\d+\.?\d*', self._data_table.replace(',', '')))
+                filtered = set()
+                for s in suspicious:
+                    if _is_unit_equivalent(s, raw_allowed):
+                        continue  # 等价匹配，不算 hallucination
+                    filtered.add(s)
+                suspicious = filtered
 
-        if suspicious:
-            violations.append(AuditViolation(
-                code="P2",
-                category=ViolationCategory.PLACEHOLDER,
-                severity=ViolationSeverity.CRITICAL,
-                description=f"发现未见数字: {', '.join(list(suspicious)[:5])}",
-                location=f"Ch{self._chapter_id}",
-                evidence=f"可疑数字: {', '.join(list(suspicious)[:10])}",
-            ))
+            if suspicious:
+                violations.append(AuditViolation(
+                    code="P2",
+                    category=ViolationCategory.PLACEHOLDER,
+                    severity=ViolationSeverity.CRITICAL,
+                    description=f"发现未见数字: {', '.join(list(suspicious)[:5])}",
+                    location=f"Ch{self._chapter_id}",
+                    evidence=f"可疑数字: {', '.join(list(suspicious)[:10])}",
+                ))
 
         # P3: 模板残留（占位符未替换）
         placeholders = re.findall(r'\{\{[^}]+\}\}', self._content)

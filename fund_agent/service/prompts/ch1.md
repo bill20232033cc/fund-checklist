@@ -21,6 +21,11 @@ required_output_items:
 data_sources:
   - basic_info
   - fund_manager
+data_verification:
+  - rule_type: number_citation
+    description: 引用原始数字，不缩写
+  - rule_type: comma_handling
+    description: 提取数字前去除逗号
 END_CHAPTER_CONTRACT
 -->
 

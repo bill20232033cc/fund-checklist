@@ -2,6 +2,13 @@
 <!--
 CHAPTER_CONTRACT
 narrative_mode: 数据→行为→差距
+metrics:
+  - name: 产品收益概况
+    formula: 当年净值增长率 vs 业绩基准
+    unit: "%"
+    threshold: 无
+    source: performance
+    note: 投资者实际收益数据为2026年新规字段，2024/2025年报不披露
 must_answer:
   - 投资者实际收益数据是否可用
   - 产品收益概况（净值增长率 vs 基准）
@@ -13,6 +20,11 @@ required_output_items:
   - 产品收益概况
 data_sources:
   - performance
+data_verification:
+  - rule_type: number_citation
+    description: 引用原始数字，不缩写
+  - rule_type: comma_handling
+    description: 提取数字前去除逗号
 item_rules:
   - condition: investor_return_data 缺失（2026年之前年报）
     affected_output: 行为损益分析

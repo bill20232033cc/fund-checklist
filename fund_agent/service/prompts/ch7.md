@@ -23,6 +23,24 @@ data_sources:
   - holdings
   - fees
   - fund_manager
+metrics:
+  - name: 综合评分
+    formula: signal_scoring 程序化计算
+    unit: "分"
+    threshold: ">=80 通过, 50-79 需修复, <50 需重写"
+    source: signal_scoring
+    note: 由 signal_scoring.py 程序化生成，LLM 不得自行计算
+  - name: 6指标评分详情
+    formula: 6个子指标各自评分
+    unit: "分"
+    threshold: 无
+    source: signal_scoring
+    note: LLM 只解读，不计算
+data_verification:
+  - rule_type: number_citation
+    description: 引用原始数字，不缩写
+  - rule_type: comma_handling
+    description: 提取数字前去除逗号
 END_CHAPTER_CONTRACT
 -->
 

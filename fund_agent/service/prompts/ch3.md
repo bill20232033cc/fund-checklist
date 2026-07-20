@@ -2,6 +2,19 @@
 <!--
 CHAPTER_CONTRACT
 narrative_mode: 画像→验证→判断
+metrics:
+  - name: 持仓集中度
+    formula: 前十大持仓合计占净值比
+    unit: "%"
+    threshold: 异常值（如0.00%）需特别关注
+    source: holdings
+    note: 集中度趋势需跨年对比
+  - name: 利益一致性
+    formula: 基金经理持有本基金份额
+    unit: 万份
+    threshold: 无
+    source: fund_manager
+    note: 持有为0或未披露时声明
 must_answer:
   - 宣称投资策略核心要素总结
   - 言行一致性判断（一致/部分一致/不一致）
@@ -19,6 +32,11 @@ required_output_items:
 data_sources:
   - fund_manager
   - holdings
+data_verification:
+  - rule_type: number_citation
+    description: 引用原始数字，不缩写
+  - rule_type: comma_handling
+    description: 提取数字前去除逗号
 END_CHAPTER_CONTRACT
 -->
 
