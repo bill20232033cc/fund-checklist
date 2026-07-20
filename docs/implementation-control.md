@@ -285,6 +285,23 @@ uv run pytest tests/fund/service/test_extraction.py tests/fund/service/test_llm_
 uv run pytest tests/fund/service/test_audit_pipeline.py tests/fund/service/test_llm_chapter_generation.py tests/fund/service/test_prompt_composer.py -x -q --tb=short
 ```
 
+**Phase 3.6 最终验收** ✅ 已关闭（2026-07-21）：
+
+| 验收项 | 标准 | 结果 |
+|--------|------|------|
+| 8 章 data_verification | 全部 8 章模板 contract 含 data_verification | ✅ |
+| 8 章 metrics | Ch2/Ch3/Ch4/Ch5/Ch6/Ch7 含 metrics（Ch0/Ch1 定性无指标） | ✅ |
+| P2 contract-aware | P2 检查读 contract data_verification 规则 | ✅ |
+| P2 推导数字 | _is_derived_number 支持加减推导（如 1.75=1.50+0.25） | ✅ |
+| LLM 审计降级 | LLM_ERROR 时权重降级为纯程序审计（1.0/0.0） | ✅ |
+| Ch1-6 审计得分 | ≥75 passed ≥5/6 | ✅ 6/6 |
+| 单元测试 | 107 passed | ✅ |
+| Ch6 模板矛盾修复 | 否决→风险分级，禁一票否决/致命等绝对化表述 | ✅ |
+
+端到端验证数据（兴全 163415，5 年 2021-2025）：
+- Ch0=80.4 Ch1=82.5 Ch2=82.5 Ch3=87.5 Ch4=87.5 Ch5=75.5 Ch6=80.4 Ch7=80.4
+- Ch1-6 全部 ≥75，6/6 达标
+
 ### Phase 4：分析能力扩展（低优先级）
 - ~~Slice 18A~~：已在 16A 实现，删除
 - ~~Slice 18D~~：已在 16A 覆盖，删除
