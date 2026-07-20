@@ -1,10 +1,10 @@
 <!-- version: 3.0 -->
 <!--
 CHAPTER_CONTRACT
-narrative_mode: 风险→否决→跟踪
+narrative_mode: 风险→分级→跟踪
 must_answer:
   - 核心风险是什么（结构性风险 vs 阶段性风险）
-  - 最关键的风险或否决项（1-2个最关键的）
+  - 最关键的风险（1-2个最关键的）
   - 为什么足以改变结论
   - 风险严重程度分级（高/中/低）+ 依据
   - 哪个信息缺口最可能改变最终判断
@@ -14,7 +14,7 @@ must_not_cover:
   - 不做风险发生概率的定量预测
   - 不给最终持有/替换结论
 required_output_items:
-  - 最关键的风险或否决项
+  - 最关键的风险
   - 为什么足以改变结论
   - 风险严重程度分级
   - 下一轮先验证什么
@@ -41,7 +41,7 @@ data_verification:
     description: 数据缺失时明确声明，不得跳过
 item_rules:
   - condition: 持仓集中度数据缺失或异常
-    affected_output: 风险否决项
+    affected_output: 风险评估
     degradation_note: 数据异常，声明信息缺口
   - condition: 2023年数据缺失
     affected_output: 业绩波动分析
@@ -49,7 +49,7 @@ item_rules:
 END_CHAPTER_CONTRACT
 -->
 
-请基于上述风险相关数据，写一段「核心风险与否决项」分析。
+请基于上述风险相关数据，写一段「核心风险与风险分级」分析。
 
 【数据验证规则 - 必须严格遵守】
 1. 引用数据表中的数字时，必须使用原始精度（如 "10,095,099,672.67"），不得缩写（如 "100.95亿"）
