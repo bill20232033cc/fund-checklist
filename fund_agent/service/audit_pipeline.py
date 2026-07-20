@@ -902,6 +902,45 @@ def _is_unit_equivalent(suspicious: str, allowed_numbers: set[str], tolerance: f
     return False
 
 
+def _is_derived_number(suspicious: str, allowed_numbers: set[str], tolerance: float = 0.05) -> bool:
+    """检查可疑数字是否是 allowed_numbers 中任意两个数字的加减结果。
+
+    例如：1.75 = 1.50 + 0.25（管理费+托管费），不是幻觉。
+
+    参数:
+        suspicious: LLM 输出中的可疑数字字符串。
+        allowed_numbers: 数据表中允许的数字集合（原始精度）。
+        tolerance: 绝对误差容忍度，默认 0.05。
+
+    返回:
+        如果是推导数字返回 True。
+    """
+    try:
+        susp_val = float(suspicious)
+    except (ValueError, TypeError):
+        return False
+
+    values = []
+    for raw_str in allowed_numbers:
+        try:
+            values.append(float(raw_str))
+        except (ValueError, TypeError):
+            continue
+
+    for i, a in enumerate(values):
+        for j, b in enumerate(values):
+            if i >= j:
+                continue
+            if abs((a + b) - susp_val) < tolerance:
+                return True
+            if abs((a - b) - susp_val) < tolerance:
+                return True
+            if abs((b - a) - susp_val) < tolerance:
+                return True
+
+    return False
+
+
 class ProgrammaticAuditor:
     """程序审计器（第一层）。
 
@@ -1027,8 +1066,8 @@ class ProgrammaticAuditor:
                 raw_allowed = self._global_allowed_numbers or set(re.findall(r'\d+\.?\d*', self._data_table.replace(',', '')))
                 filtered = set()
                 for s in suspicious:
-                    if _is_unit_equivalent(s, raw_allowed):
-                        continue  # 等价匹配，不算 hallucination
+                    if _is_unit_equivalent(s, raw_allowed) or _is_derived_number(s, raw_allowed):
+                        continue  # 等价匹配或推导数字，不算 hallucination
                     filtered.add(s)
                 suspicious = filtered
 
@@ -2042,11 +2081,18 @@ class ReportGenerationCoordinator:
             llm_auditor = LlmAuditor(self._llm_client, chapter_id, content, audit_data_table, contract)
             llm_score, llm_violations = llm_auditor.audit()
 
+            # LLM 审计失败时降级为纯程序审计
+            _has_llm_error = any(v.code == "LLM_ERROR" for v in llm_violations)
+
             # 数据充足性检测
             data_sufficient = _is_data_sufficient(chapter_id, data_table, contract)
 
-            # 综合分数（根据数据充足性调整权重）
-            if data_sufficient:
+            # 综合分数（LLM_ERROR → 纯程序审计，否则按数据充足性分配权重）
+            if _has_llm_error:
+                weight_prog = 1.0
+                weight_llm = 0.0
+                score_pass = SCORE_PASS_DEGRADED
+            elif data_sufficient:
                 weight_prog = WEIGHT_PROG_NORMAL
                 weight_llm = WEIGHT_LLM_NORMAL
                 score_pass = SCORE_PASS

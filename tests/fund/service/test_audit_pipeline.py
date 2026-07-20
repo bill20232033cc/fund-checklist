@@ -706,3 +706,92 @@ def test_is_unit_equivalent_zero():
     assert _is_unit_equivalent("0", {"100"}) is False
     assert _is_unit_equivalent("100", {"0"}) is False
     assert _is_unit_equivalent("abc", {"100"}) is False
+
+
+# ============================================================
+# Fix 1: LLM_ERROR 权重降级测试
+# ============================================================
+
+
+def test_llm_error_fallback_to_program_only(tmp_path: Path) -> None:
+    """LLM_ERROR 时权重降级为 prog=1.0 llm=0.0，final_score == prog_score。"""
+    from fund_agent.service.audit_pipeline import ReportGenerationCoordinator
+    from fund_agent.service.models import FeeRateItem
+
+    # Stateful fake: succeeds on first call (content gen), fails on second (LLM audit)
+    class StatefulFakeClient:
+        def __init__(self, success_response: str):
+            self._success_response = success_response
+            self.call_count = 0
+
+        def generate_text(self, *, system_prompt: str, user_prompt: str, temperature: float = 0) -> str:
+            self.call_count += 1
+            if self.call_count == 1:
+                return self._success_response
+            raise RuntimeError("LLM API error (simulated)")
+
+    llm_response = "该基金2024年净值增长率为17.32%，超越基准14.45%，超额收益2.87%。"
+    client = StatefulFakeClient(llm_response)
+    coordinator = ReportGenerationCoordinator(client, tmp_path)
+
+    performance = {2024: {"nav_growth_rate": "17.32%", "benchmark_return_rate": "14.45%", "excess_return": "2.87%"}}
+    fees = {2024: (FeeRateItem(fee_name="管理费", rate="1.50%"), FeeRateItem(fee_name="托管费", rate="0.25%"))}
+
+    result = coordinator._generate_and_audit_chapter_inner(
+        chapter_id=2,
+        fund_code="000001",
+        fund_name="测试基金",
+        report_year=2024,
+        performance=performance,
+        holdings={},
+        allocation={},
+        fees=fees,
+    )
+
+    assert result is not None
+    decision = coordinator._artifact_store.load_audit_decision(2)
+    assert decision is not None
+    # LLM_ERROR 时权重降级为纯程序审计：final_score == prog_score
+    assert decision.score == decision.programmatic_score
+
+
+# ============================================================
+# Fix 2: 推导数字不触发 P2 测试
+# ============================================================
+
+
+def test_derived_number_not_flagged_as_p2() -> None:
+    """推导数字（如 1.75=1.50+0.25）不应被 P2 误杀。"""
+    from fund_agent.service.audit_pipeline import ProgrammaticAuditor, get_chapter_contract, _is_derived_number
+
+    # 基础：_is_derived_number 函数测试
+    assert _is_derived_number("1.75", {"1.50", "0.25"}) is True
+    assert _is_derived_number("1.25", {"1.50", "0.25"}) is True  # 1.50 - 0.25
+    assert _is_derived_number("2.50", {"1.00", "1.50", "0.75"}) is True  # 1.00 + 1.50
+    assert _is_derived_number("3.14", {"1.50", "0.25"}) is False  # 不相关数字
+
+    # 集成：ProgrammaticAuditor 不应为推导数字触发 P2
+    contract = get_chapter_contract(2)
+    data_table = "| 年份 | 管理费 | 托管费 |\n|------|--------|--------|\n| 2024 | 1.50% | 0.25% |"
+    content = "管理费+托管费在多数年份维持在1.75%左右。基金2024年表现良好。"
+
+    auditor = ProgrammaticAuditor(2, content, data_table, contract)
+    score, violations = auditor.audit()
+
+    p2_violations = [v for v in violations if v.code == "P2"]
+    assert len(p2_violations) == 0, f"推导数字 1.75 不应触发 P2，但实际触发了: {p2_violations}"
+
+
+def test_derived_number_non_derived_still_flagged() -> None:
+    """非推导数字仍应被 P2 捕获（确保推导逻辑未过度放宽）。"""
+    from fund_agent.service.audit_pipeline import ProgrammaticAuditor, get_chapter_contract
+
+    contract = get_chapter_contract(2)
+    data_table = "| 年份 | 管理费 | 托管费 |\n|------|--------|--------|\n| 2024 | 1.50% | 0.25% |"
+    content = "该基金管理规模约999.99亿元，远超同类平均。"
+
+    auditor = ProgrammaticAuditor(2, content, data_table, contract)
+    score, violations = auditor.audit()
+
+    p2_violations = [v for v in violations if v.code == "P2"]
+    assert len(p2_violations) > 0, "非推导数字 999.99 应触发 P2"
