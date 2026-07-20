@@ -734,7 +734,7 @@ def _run_generate_command(args: argparse.Namespace, *, stdout: TextIO, stderr: T
     llm_client = None
     if getattr(args, "llm", False):
         llm_client = DeepSeekLlmClient()
-    else:
+    elif args.output_format != "json":
         stderr.write("⚠ 报告以模板模式生成（无 LLM 分析），使用 --llm 启用 AI 分析\n")
 
     result = service.generate_report(
