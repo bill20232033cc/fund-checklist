@@ -152,6 +152,7 @@ _SHARE_CLASS_SCOPES = (_SHARE_SCOPE_A, _SHARE_SCOPE_C)
 
 _HOLDINGS_TOP_N = 10
 _HOLDINGS_QUERY = "股票投资明细"
+_BOND_HOLDINGS_QUERY = "前五名债券投资明细"
 _HOLDINGS_TABLE_MAX_ROWS = 15
 
 
@@ -1117,6 +1118,7 @@ class FundReadingService:
         document_id: str,
         store: DoclingDocumentStore,
         report_year: int,
+        fund_name: str = "",
     ) -> AnnualHoldingsResult:
         """从单年度年报中抽取前十大持仓表。
 
@@ -1124,6 +1126,7 @@ class FundReadingService:
             document_id: 文档 ID。
             store: 已加载的 DoclingDocumentStore。
             report_year: 报告年份。
+            fund_name: 基金名称，用于债券基金 fallback 判断。
 
         返回:
             AnnualHoldingsResult；失败时 failure 非空。
@@ -1131,11 +1134,22 @@ class FundReadingService:
 
         tool_service = FundDocumentToolService({document_id: store})
         host = self._host_factory(tool_service)
+
+        query = _HOLDINGS_QUERY
         routed = self._run_with_query_candidates(
             host=host,
             document_id=document_id,
-            query=_HOLDINGS_QUERY,
+            query=query,
         )
+        if routed.agent_result.failure is not None and fund_name:
+            fund_type, _ = infer_fund_type(fund_name)
+            if fund_type == "bond_fund":
+                query = _BOND_HOLDINGS_QUERY
+                routed = self._run_with_query_candidates(
+                    host=host,
+                    document_id=document_id,
+                    query=query,
+                )
         if routed.agent_result.failure is not None:
             return AnnualHoldingsResult(
                 document_id=document_id,
@@ -1216,6 +1230,7 @@ class FundReadingService:
                         document_id=document.document_id,
                         store=store,
                         report_year=year,
+                        fund_name=request.fund_name,
                     )
                     if result.failure is not None:
                         missing_years.append(year)
@@ -1537,9 +1552,11 @@ class FundReadingService:
             catalog_reports = repository.list_reports()
 
             document_id = None
+            fund_name = ""
             for report in catalog_reports:
                 if report.get("fund_code") == request.fund_code and report.get("year") == request.year:
                     document_id = str(report["document_id"])
+                    fund_name = str(report.get("fund_name", ""))
                     break
 
             if document_id is None:
@@ -1555,7 +1572,7 @@ class FundReadingService:
 
             disclosures: list[DisclosureAuditItem] = []
 
-            disclosures.append(self._audit_holdings(host, document_id, request.year))
+            disclosures.append(self._audit_holdings(host, document_id, request.year, fund_name))
             disclosures.append(self._audit_asset_allocation(host, document_id, request.year))
             disclosures.append(self._audit_fee_rates(host, document_id, request.year))
             disclosures.append(self._audit_performance(host, document_id, request.year))
@@ -1587,10 +1604,14 @@ class FundReadingService:
                 failure=ToolFailure(code=FailureCode.UNAVAILABLE, message="披露完整性审计暂不可用"),
             )
 
-    def _audit_holdings(self, host: MinimalHost, document_id: str, year: int) -> DisclosureAuditItem:
+    def _audit_holdings(self, host: MinimalHost, document_id: str, year: int, fund_name: str = "") -> DisclosureAuditItem:
         """审计持仓披露。"""
 
         routed = self._run_with_query_candidates(host=host, document_id=document_id, query="股票投资明细")
+        if routed.agent_result.failure is not None and fund_name:
+            fund_type, _ = infer_fund_type(fund_name)
+            if fund_type == "bond_fund":
+                routed = self._run_with_query_candidates(host=host, document_id=document_id, query=_BOND_HOLDINGS_QUERY)
         if routed.agent_result.failure is not None:
             return DisclosureAuditItem(name="holdings", status="missing", chapter=False, message="持仓章节未找到")
 

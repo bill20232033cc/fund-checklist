@@ -324,13 +324,13 @@ CHAPTER_CONTRACTS: dict[int, ChapterContract] = {
     ),
     6: ChapterContract(
         chapter_id=6,
-        title="核心风险与否决项",
-        narrative_mode="风险→否决→跟踪",
+        title="核心风险与风险分级",
+        narrative_mode="风险→分级→跟踪",
         must_answer=(
             "核心风险是什么（结构性风险 vs 阶段性风险）。",
-            "最关键的风险或否决项（1-2个最致命的）。",
+            "最关键的风险（1-2个最关键的）。",
             "为什么足以改变结论。",
-            "是否触发一票否决，还是仍可跟踪。",
+            "风险严重程度分级（高/中/低）+ 依据。",
             "哪个信息缺口最可能改变最终判断。",
         ),
         must_not_cover=(
@@ -340,9 +340,9 @@ CHAPTER_CONTRACTS: dict[int, ChapterContract] = {
             "不给最终持有/替换结论。",
         ),
         required_output_items=(
-            "最关键的风险或否决项",
+            "最关键的风险",
             "为什么足以改变结论",
-            "否决 vs 跟踪判断",
+            "风险严重程度分级",
             "下一轮先验证什么",
         ),
         data_sources=("performance", "holdings"),
@@ -355,7 +355,7 @@ CHAPTER_CONTRACTS: dict[int, ChapterContract] = {
             DataVerificationRule(rule_type="missing_data", description="数据缺失时明确声明，不得跳过"),
         ),
         item_rules=(
-            ItemRule(condition="持仓集中度数据缺失或异常", affected_output="风险否决项", degradation_note="数据异常，声明信息缺口"),
+            ItemRule(condition="持仓集中度数据缺失或异常", affected_output="风险评估", degradation_note="数据异常，声明信息缺口"),
             ItemRule(condition="2023年数据缺失", affected_output="业绩波动分析", degradation_note="声明数据缺失及对结论的影响"),
         ),
     ),
@@ -1136,7 +1136,7 @@ class ProgrammaticAuditor:
             # 通用（兜底）
             "阶段": r"(阶段|稳定期|转型期|建仓期|膨胀期|萎缩期)",
             "变化": r"(变化|变动|调整|转型)",
-            "风险": r"(风险|否决|隐患|暴露)",
+            "风险": r"(风险|分级|隐患|暴露)",
             "信息缺口": r"(信息缺口|数据缺失|缺口|缺失)",
             "跟踪": r"(跟踪|监测|观察|验证)",
             "超额收益": r"(超额收益|跑赢|超越基准|A\s*=\s*R\s*-\s*B)",
@@ -2431,7 +2431,7 @@ class ReportGenerationCoordinator:
                 lines.append("规模信息暂不可用。")
             base_content = "\n".join(lines) + "\n"
         elif chapter_id == 6:
-            lines = ["## 核心风险与否决项\n"]
+            lines = ["## 核心风险与风险分级\n"]
             # 压力测试（如果有）
             if stress_test:
                 fund_type_labels = {"index_fund": "指数基金", "bond_fund": "债券基金", "active_fund": "主动基金"}

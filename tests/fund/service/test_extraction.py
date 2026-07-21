@@ -3734,3 +3734,98 @@ class TestAnnualPerformanceSectionSplitCompat:
             specs=specs,
         )
         assert "table-0010" in refs
+
+
+# ============================================================
+# KI-3: 债券基金持仓抽取 fallback
+# ============================================================
+
+
+def test_bond_holdings_query_constant() -> None:
+    """_BOND_HOLDINGS_QUERY 常量必须存在且为非空字符串。"""
+    assert hasattr(reading_service_module, "_BOND_HOLDINGS_QUERY")
+    assert reading_service_module._BOND_HOLDINGS_QUERY == "前五名债券投资明细"
+
+
+def test_extract_holdings_from_store_bond_fallback(tmp_path: Path) -> None:
+    """债券基金在股票持仓查询失败时 fallback 到债券持仓查询。"""
+    _FakeConverter.calls.clear()
+    _RoutingHost.calls.clear()
+    _RoutingHost.success_query = "前五名债券投资明细"
+    _RoutingHost.success_answer = "5.4 期末按公允价值占基金资产净值比例大小排序的前五名债券投资明细"
+    _RoutingHost.success_locator_kind = LocatorKind.TABLE
+
+    pdf_path = tmp_path / "bond-report.pdf"
+    work_dir = tmp_path / "bond-work"
+    _write_pdf(pdf_path)
+    service = FundReadingService(
+        converter_factory=_FakeConverter,
+        host_factory=_RoutingHost,
+    )
+
+    imported = service.import_local_report(
+        ImportLocalReportRequest(
+            pdf_path=pdf_path,
+            fund_code="123456",
+            fund_name="某某债券型证券投资基金",
+            year=2024,
+            work_dir=work_dir,
+        )
+    )
+
+    repo = reading_service_module._repository(work_dir)
+    store = repo.load_store(imported.document_id)
+
+    _ = service._extract_holdings_from_store(
+        document_id=imported.document_id,
+        store=store,
+        report_year=2024,
+        fund_name="某某债券型证券投资基金",
+    )
+
+    queries = [call["query"] for call in _RoutingHost.calls]
+    assert "前五名债券投资明细" in queries, (
+        f"债券基金应 fallback 到 bond query，实际 queries: {queries}"
+    )
+
+
+def test_extract_holdings_from_store_equity_unaffected(tmp_path: Path) -> None:
+    """股票基金不应触发债券持仓 fallback。"""
+    _FakeConverter.calls.clear()
+    _RoutingHost.calls.clear()
+    _RoutingHost.success_query = "股票投资明细"
+    _RoutingHost.success_answer = "8.3 期末按公允价值占基金资产净值比例大小排序的所有股票投资明细"
+    _RoutingHost.success_locator_kind = LocatorKind.TABLE
+
+    pdf_path = tmp_path / "equity-report.pdf"
+    work_dir = tmp_path / "equity-work"
+    _write_pdf(pdf_path)
+    service = FundReadingService(
+        converter_factory=_FakeConverter,
+        host_factory=_RoutingHost,
+    )
+
+    imported = service.import_local_report(
+        ImportLocalReportRequest(
+            pdf_path=pdf_path,
+            fund_code="004393",
+            fund_name="安信企业价值优选混合型证券投资基金",
+            year=2024,
+            work_dir=work_dir,
+        )
+    )
+
+    repo = reading_service_module._repository(work_dir)
+    store = repo.load_store(imported.document_id)
+
+    _ = service._extract_holdings_from_store(
+        document_id=imported.document_id,
+        store=store,
+        report_year=2024,
+        fund_name="安信企业价值优选混合型证券投资基金",
+    )
+
+    queries = [call["query"] for call in _RoutingHost.calls]
+    assert "前五名债券投资明细" not in queries, (
+        f"股票基金不应触发 bond fallback，实际 queries: {queries}"
+    )

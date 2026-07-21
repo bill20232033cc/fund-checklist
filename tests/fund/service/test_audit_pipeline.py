@@ -795,3 +795,46 @@ def test_derived_number_non_derived_still_flagged() -> None:
 
     p2_violations = [v for v in violations if v.code == "P2"]
     assert len(p2_violations) > 0, "非推导数字 999.99 应触发 P2"
+
+
+# ============================================================
+# KI-2: Ch6 contract 分级语言不产生误判
+# ============================================================
+
+
+def test_ch6_contract_grading_language_no_false_positives() -> None:
+    """S2: 新 Ch6 contract 使用分级语言时 ProgrammaticAuditor 不应误判。"""
+    contract = get_chapter_contract(6)
+    content = (
+        "## 核心风险与风险分级\n\n"
+        "该基金核心风险为持仓集中度过高（结构性风险），前五大持仓合计占比超60%。\n"
+        "最关键的风险是规模较小带来的清盘风险。风险严重程度分级：高，依据为规模接近清盘线。\n"
+        "当前信息缺口为2023年业绩数据缺失，这可能改变最终判断。\n"
+    )
+    data_table = "| 年份 | 前五大持仓集中度 |\n|------|-----------------|\n| 2024 | 62.50% |"
+
+    auditor = ProgrammaticAuditor(6, content, data_table, contract)
+    score, violations = auditor.audit()
+
+    assert score >= 70, f"分级语言不应触发误判，score={score}, violations={violations}"
+    critical = [v for v in violations if v.severity == ViolationSeverity.CRITICAL]
+    assert len(critical) == 0, f"分级语言不应触发 CRITICAL 违规: {critical}"
+
+
+def test_ch6_contract_rejects_veto_language() -> None:
+    """Ch6 contract 不含否决/致命/一票否决等旧语言。"""
+    contract = get_chapter_contract(6)
+
+    assert "否决" not in contract.title
+    assert "否决" not in contract.narrative_mode
+    for item in contract.must_answer:
+        assert "否决" not in item
+        assert "致命" not in item
+        assert "一票否决" not in item
+    for item in contract.required_output_items:
+        assert "否决" not in item
+
+    assert "分级" in contract.title
+    assert "分级" in contract.narrative_mode
+    assert any("分级" in item for item in contract.must_answer)
+    assert any("分级" in item for item in contract.required_output_items)
