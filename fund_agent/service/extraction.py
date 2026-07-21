@@ -1119,6 +1119,7 @@ class FundReadingService:
         store: DoclingDocumentStore,
         report_year: int,
         fund_name: str = "",
+        repository: FilesystemReportRepository | None = None,
     ) -> AnnualHoldingsResult:
         """从单年度年报中抽取前十大持仓表。
 
@@ -1203,11 +1204,63 @@ class FundReadingService:
                 table_citation = citation
                 break
 
+        # 联接基金持仓继承：从目标 ETF 年报获取持仓
+        holding_source = ""
+        if not holdings and fund_name and repository is not None:
+            fund_type, _ = infer_fund_type(fund_name)
+            if fund_type == "index_fund":
+                etf_info = _extract_target_etf_code(document_id, store)
+                if etf_info is not None:
+                    etf_code, etf_name = etf_info
+                    etf_doc_id: str | None = None
+                    own_fund_code = store._identity.fund_code
+                    for report in repository.list_reports():
+                        if report.get("year") != report_year:
+                            continue
+                        if report.get("fund_code") == own_fund_code:
+                            continue  # 排除联接基金自身
+                        # 按代码匹配（优先）或按名称匹配
+                        if etf_code and report.get("fund_code") == etf_code:
+                            etf_doc_id = str(report["document_id"])
+                            if not etf_name:
+                                etf_name = str(report.get("fund_name", ""))
+                            break
+                        elif not etf_code and etf_name and etf_name in str(report.get("fund_name", "")):
+                            etf_doc_id = str(report["document_id"])
+                            etf_code = str(report.get("fund_code", ""))
+                            break
+                    if etf_doc_id is not None:
+                        try:
+                            etf_store = repository.load_store(etf_doc_id)
+                            etf_result = self._extract_holdings_from_store(
+                                document_id=etf_doc_id,
+                                store=etf_store,
+                                report_year=report_year,
+                                fund_name=etf_name,
+                            )
+                            if etf_result.holdings:
+                                holdings = etf_result.holdings
+                                table_citation = etf_result.citation
+                                holding_source = f"持仓数据来源：目标 ETF（{etf_code}）"
+                        except DocumentToolError:
+                            pass
+                    if not holdings:
+                        return AnnualHoldingsResult(
+                            document_id=document_id,
+                            year=report_year,
+                            holdings=(),
+                            failure=ToolFailure(
+                                code=FailureCode.NOT_FOUND,
+                                message="目标 ETF 年报未导入，无法获取持仓数据",
+                            ),
+                        )
+
         return AnnualHoldingsResult(
             document_id=document_id,
             year=report_year,
             holdings=holdings,
             citation=table_citation,
+            holding_source=holding_source,
         )
 
     def extract_multi_year_holdings(
@@ -1250,6 +1303,7 @@ class FundReadingService:
                         store=store,
                         report_year=year,
                         fund_name=request.fund_name,
+                        repository=repository,
                     )
                     if result.failure is not None:
                         missing_years.append(year)
@@ -1932,8 +1986,8 @@ class FundReadingService:
                 )
 
             # 2. 提取各项数据（带 citation）
-            holdings_data, holdings_citations = self._extract_report_holdings_with_citations(
-                request.fund_code, annual_docs, request.work_dir,
+            holdings_data, holdings_citations, holdings_sources = self._extract_report_holdings_with_citations(
+                request.fund_code, annual_docs, request.work_dir, fund_name=request.fund_name,
             )
             fee_data, fee_citations = self._extract_report_fees_with_citations(
                 request.fund_code, annual_docs, request.work_dir,
@@ -2053,6 +2107,7 @@ class FundReadingService:
                     "data_years": sorted(docs_by_year.keys()),
                     "template_version": "v2" if llm_client else "v1",
                     "generation_mode": "llm" if llm_client else "template",
+                    "holdings_sources": holdings_sources,
                 },
             )
 
@@ -2084,11 +2139,12 @@ class FundReadingService:
         fund_code: str,
         annual_docs: list[AnnualReportDocument],
         work_dir: Path,
-    ) -> tuple[dict[int, tuple[HoldingExtraction, ...]], dict[int, Citation | None]]:
+        fund_name: str = "",
+    ) -> tuple[dict[int, tuple[HoldingExtraction, ...]], dict[int, Citation | None], dict[int, str]]:
         """提取多年度持仓数据及 citation。
 
         返回:
-            (持仓数据字典, citation 字典)。
+            (持仓数据字典, citation 字典, 持仓来源字典)。
         """
 
         result = self.extract_multi_year_holdings(ExtractHoldingsRequest(
@@ -2096,12 +2152,14 @@ class FundReadingService:
             requested_years=[d.year for d in annual_docs],
             annual_report_documents=annual_docs,
             work_dir=work_dir,
+            fund_name=fund_name,
         ))
         if result.series is None:
-            return {}, {}
+            return {}, {}, {}
         holdings = {h.year: h.holdings for h in result.series.annual_holdings}
         citations = {h.year: h.citation for h in result.series.annual_holdings}
-        return holdings, citations
+        sources = {h.year: h.holding_source for h in result.series.annual_holdings if h.holding_source}
+        return holdings, citations, sources
 
     def _extract_report_fees_with_citations(
         self,
@@ -4300,6 +4358,59 @@ def _catalog_document_ids(catalog_path: Path) -> tuple[str, ...]:
 _HOLDINGS_COLUMN_NAMES = ("序号", "股票代码", "股票名称", "数量", "公允价值", "占基金资产净值比例")
 
 
+def _extract_target_etf_code(document_id: str, store: DoclingDocumentStore) -> tuple[str, str] | None:
+    """从年报提取目标 ETF 代码和名称。
+
+    搜索「投资目标」「投资范围」「基金基本情况」「基金简介」章节，
+    匹配「目标ETF」「联接基金」相关描述，提取 ETF 名称或代码。
+
+    返回:
+        (etf_fund_code, etf_fund_name) 或 None。
+    """
+    sections = store.list_sections()
+    target_refs: list[str] = []
+    keywords = ("投资目标", "投资范围", "基金基本情况", "基金简介")
+    for section in sections:
+        title = section.title or ""
+        if any(kw in title for kw in keywords):
+            target_refs.append(section.section_ref)
+
+    combined = ""
+    for ref in target_refs:
+        try:
+            sec = store.read_section(ref, max_chars=5000)
+            combined += sec.text + "\n"
+        except DocumentToolError:
+            pass
+
+    if not combined:
+        return None
+
+    own_code = store._identity.fund_code
+
+    # Pattern 1: ETF name + code in parens
+    m = re.search(r'([\u4e00-\u9fa5A-Za-z]+ETF)\s*[（(](\d{6})[）)]', combined)
+    if m:
+        code, name = m.group(2), m.group(1)
+        if code != own_code:
+            return code, name
+
+    # Pattern 2: 提取「交易型开放式指数证券投资基金」完整名称
+    m2 = re.search(r'([\u4e00-\u9fa5A-Za-z]+交易型开放式指数证券投资基金)', combined)
+    if m2:
+        etf_name = m2.group(1).replace("联接基金", "")
+        return "", etf_name
+
+    # Pattern 3: 6-digit code near ETF mention
+    for cm in re.finditer(r'\b(\d{6})\b', combined):
+        code = cm.group(1)
+        if code == own_code:
+            continue
+        nearby = combined[max(0, cm.start() - 40):cm.end() + 40]
+        if "ETF" in nearby:
+            return code, ""
+
+    return None
 def _extract_holdings_from_agent_result(
     *,
     document_id: str,

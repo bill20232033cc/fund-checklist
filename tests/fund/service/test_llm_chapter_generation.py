@@ -244,7 +244,7 @@ def test_generate_report_with_llm_uses_data_tables(monkeypatch, tmp_path: Path) 
 
     service = FundReadingService()
 
-    monkeypatch.setattr(service, "_extract_report_holdings_with_citations", lambda *a, **k: (_sample_holdings(), {}))
+    monkeypatch.setattr(service, "_extract_report_holdings_with_citations", lambda *a, **k: (_sample_holdings(), {}, {}))
     monkeypatch.setattr(service, "_extract_report_fees_with_citations", lambda *a, **k: (_sample_fees(), {}))
     monkeypatch.setattr(service, "_extract_report_performance_with_citations", lambda *a, **k: (_sample_performance(), {}))
     monkeypatch.setattr(service, "_extract_report_allocation_with_citations", lambda *a, **k: (_sample_allocation(), {}))
@@ -316,7 +316,7 @@ def test_generate_report_llm_fallback_to_template(monkeypatch, tmp_path: Path) -
 
     service = FundReadingService()
 
-    monkeypatch.setattr(service, "_extract_report_holdings_with_citations", lambda *a, **k: (_sample_holdings(), {}))
+    monkeypatch.setattr(service, "_extract_report_holdings_with_citations", lambda *a, **k: (_sample_holdings(), {}, {}))
     monkeypatch.setattr(service, "_extract_report_fees_with_citations", lambda *a, **k: (_sample_fees(), {}))
     monkeypatch.setattr(service, "_extract_report_performance_with_citations", lambda *a, **k: (_sample_performance(), {}))
     monkeypatch.setattr(service, "_extract_report_allocation_with_citations", lambda *a, **k: (_sample_allocation(), {}))

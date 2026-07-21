@@ -451,6 +451,7 @@ class AnnualHoldingsResult:
     holdings: tuple[HoldingExtraction, ...]
     citation: Citation | None = None
     failure: ToolFailure | None = None
+    holding_source: str = ""
 
 
 @dataclass(frozen=True)
@@ -499,6 +500,7 @@ class ExtractHoldingsRequest:
     requested_years: tuple[int, ...] | list[int]
     annual_report_documents: tuple[AnnualReportDocument, ...] | list[AnnualReportDocument]
     work_dir: Path
+    fund_name: str = ""
 
 
 @dataclass(frozen=True)
