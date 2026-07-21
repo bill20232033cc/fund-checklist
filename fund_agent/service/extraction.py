@@ -1141,9 +1141,11 @@ class FundReadingService:
             document_id=document_id,
             query=query,
         )
-        if routed.agent_result.failure is not None and fund_name:
+        # equity query 失败或债券基金持仓为空时，尝试债券持仓查询
+        equity_failed = routed.agent_result.failure is not None
+        if (equity_failed or True) and fund_name:
             fund_type, _ = infer_fund_type(fund_name)
-            if fund_type == "bond_fund":
+            if fund_type == "bond_fund" and equity_failed:
                 query = _BOND_HOLDINGS_QUERY
                 routed = self._run_with_query_candidates(
                     host=host,
@@ -1163,6 +1165,23 @@ class FundReadingService:
                 result=routed.agent_result,
                 tool_service=tool_service,
             )
+            # equity 成功但持仓为空且为债券基金时，尝试债券持仓查询
+            if not holdings and fund_name:
+                fund_type, _ = infer_fund_type(fund_name)
+                if fund_type == "bond_fund":
+                    bond_routed = self._run_with_query_candidates(
+                        host=host,
+                        document_id=document_id,
+                        query=_BOND_HOLDINGS_QUERY,
+                    )
+                    if bond_routed.agent_result.failure is None:
+                        bond_holdings = _extract_holdings_from_agent_result(
+                            document_id=document_id,
+                            result=bond_routed.agent_result,
+                            tool_service=tool_service,
+                        )
+                        if bond_holdings:
+                            holdings = bond_holdings
         except DocumentToolError as exc:
             return AnnualHoldingsResult(
                 document_id=document_id,
@@ -1616,6 +1635,16 @@ class FundReadingService:
             return DisclosureAuditItem(name="holdings", status="missing", chapter=False, message="持仓章节未找到")
 
         has_table = any(c.locator.locator_kind is LocatorKind.TABLE for c in routed.agent_result.citations)
+        # equity 无表格且为债券基金时，尝试债券持仓查询
+        if not has_table and fund_name:
+            fund_type, _ = infer_fund_type(fund_name)
+            if fund_type == "bond_fund":
+                bond_routed = self._run_with_query_candidates(host=host, document_id=document_id, query=_BOND_HOLDINGS_QUERY)
+                if bond_routed.agent_result.failure is None:
+                    bond_has_table = any(c.locator.locator_kind is LocatorKind.TABLE for c in bond_routed.agent_result.citations)
+                    if bond_has_table:
+                        routed = bond_routed
+                        has_table = True
         fields = []
         if has_table:
             fields = ["stock_code", "stock_name", "percentage"]
