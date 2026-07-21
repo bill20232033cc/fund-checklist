@@ -3570,3 +3570,167 @@ class TestMetadataSidecar:
         data = json.loads(sidecar_path.read_text(encoding="utf-8"))
         assert data["signal"] is None
         assert data["normalized_score"] is None
+
+
+class TestAnnualPerformanceSectionSplitCompat:
+    """Docling section 分裂时，标题和表格归属不同 section 的兼容测试。"""
+
+    def test_table_refs_accepts_adjacent_section(self):
+        """当 table citation 的 section_ref 不在 source_section_refs 时应接受回退匹配。"""
+        from fund_agent.service.extraction import (
+            _annual_performance_table_refs,
+            _PerformanceReturnExtractionSpec,
+        )
+
+        def _make_locator(kind, section_ref=None, table_ref=None):
+            return Locator(
+                document_id="test-2022",
+                locator_kind=kind,
+                section_ref=section_ref,
+                table_ref=table_ref,
+                page_no=None,
+                page_range=None,
+                internal_ref=None,
+                internal_ref_available=False,
+            )
+
+        # 构造 mock result：section citation 在 section-0036，table citation 在 section-0037
+        section_citation = Citation(
+            document_id="test-2022",
+            fund_code="512890",
+            fund_name="测试基金",
+            year=2022,
+            report_type="annual_report",
+            locator=_make_locator(LocatorKind.SECTION, section_ref="section-0036"),
+        )
+        table_citation = Citation(
+            document_id="test-2022",
+            fund_code="512890",
+            fund_name="测试基金",
+            year=2022,
+            report_type="annual_report",
+            locator=_make_locator(LocatorKind.TABLE, section_ref="section-0037", table_ref="table-0009"),
+        )
+        result = AgentRunResult(
+            answer="3.2.1 基金份额净值增长率及其与同期业绩比较基准收益率的比较\ntable here",
+            citations=(section_citation, table_citation),
+            tool_trace=(),
+        )
+
+        # mock tool_service.read_table 返回有正确列签名的表格
+        class MockToolService:
+            def read_table(self, document_id, table_ref, max_rows=30):
+                from fund_agent.fund.document_tools.models import TableContent
+                return TableContent(
+                    table_ref=table_ref,
+                    caption=None,
+                    section_ref="section-0037",
+                    rows=(
+                        ("阶段", "份额净值增长率①", "业绩比较基准收益率③"),
+                        ("过去一年", "2.72%", "-1.90%"),
+                    ),
+                    truncated=False,
+                    locator=_make_locator(LocatorKind.TABLE, section_ref="section-0037", table_ref=table_ref),
+                    citation=table_citation,
+                )
+
+        specs = (
+            _PerformanceReturnExtractionSpec(
+                field_name="annual_nav_growth_rate",
+                column_keywords=("份额净值增长率",),
+                excluded_keywords=("标准差",),
+            ),
+            _PerformanceReturnExtractionSpec(
+                field_name="annual_benchmark_return_rate",
+                column_keywords=("业绩比较基准收益率",),
+                excluded_keywords=("标准差",),
+            ),
+        )
+
+        refs = _annual_performance_table_refs(
+            document_id="test-2022",
+            result=result,
+            tool_service=MockToolService(),
+            source_section_refs=("section-0036",),
+            specs=specs,
+        )
+        assert "table-0009" in refs
+
+    def test_table_refs_strict_match_preferred(self):
+        """严格匹配存在时优先使用严格匹配。"""
+        from fund_agent.service.extraction import (
+            _annual_performance_table_refs,
+            _PerformanceReturnExtractionSpec,
+        )
+
+        def _make_locator(kind, section_ref=None, table_ref=None):
+            return Locator(
+                document_id="test-2021",
+                locator_kind=kind,
+                section_ref=section_ref,
+                table_ref=table_ref,
+                page_no=None,
+                page_range=None,
+                internal_ref=None,
+                internal_ref_available=False,
+            )
+
+        section_citation = Citation(
+            document_id="test-2021",
+            fund_code="512890",
+            fund_name="测试基金",
+            year=2021,
+            report_type="annual_report",
+            locator=_make_locator(LocatorKind.SECTION, section_ref="section-0040"),
+        )
+        table_citation = Citation(
+            document_id="test-2021",
+            fund_code="512890",
+            fund_name="测试基金",
+            year=2021,
+            report_type="annual_report",
+            locator=_make_locator(LocatorKind.TABLE, section_ref="section-0040", table_ref="table-0010"),
+        )
+        result = AgentRunResult(
+            answer="3.2.1 基金份额净值增长率及其与同期业绩比较基准收益率的比较\ntable",
+            citations=(section_citation, table_citation),
+            tool_trace=(),
+        )
+
+        class MockToolService:
+            def read_table(self, document_id, table_ref, max_rows=30):
+                from fund_agent.fund.document_tools.models import TableContent
+                return TableContent(
+                    table_ref=table_ref,
+                    caption=None,
+                    section_ref="section-0040",
+                    rows=(
+                        ("阶段", "份额净值增长率①", "业绩比较基准收益率③"),
+                        ("过去一年", "19.56%", "10.80%"),
+                    ),
+                    truncated=False,
+                    locator=_make_locator(LocatorKind.TABLE, section_ref="section-0040", table_ref=table_ref),
+                    citation=table_citation,
+                )
+
+        specs = (
+            _PerformanceReturnExtractionSpec(
+                field_name="annual_nav_growth_rate",
+                column_keywords=("份额净值增长率",),
+                excluded_keywords=("标准差",),
+            ),
+            _PerformanceReturnExtractionSpec(
+                field_name="annual_benchmark_return_rate",
+                column_keywords=("业绩比较基准收益率",),
+                excluded_keywords=("标准差",),
+            ),
+        )
+
+        refs = _annual_performance_table_refs(
+            document_id="test-2021",
+            result=result,
+            tool_service=MockToolService(),
+            source_section_refs=("section-0040",),
+            specs=specs,
+        )
+        assert "table-0010" in refs

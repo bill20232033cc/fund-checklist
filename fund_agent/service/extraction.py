@@ -3739,8 +3739,7 @@ def _extract_annual_performance_fields(
         table = tool_service.read_table(document_id, table_ref, max_rows=_PERFORMANCE_TABLE_MAX_ROWS)
         if isinstance(table, ToolFailure):
             raise DocumentToolError(table.code, table.message)
-        if table.section_ref not in source_section_refs:
-            continue
+        # section 分裂兼容：不在此处过滤，由 _annual_performance_table_refs 已处理
         tables.append(table)
 
     header_tables = tuple(table for table in tables if _performance_column_indexes(table.rows, specs))
@@ -3833,8 +3832,7 @@ def _extract_annual_excess_return_fields(
         table = tool_service.read_table(document_id, table_ref, max_rows=_PERFORMANCE_TABLE_MAX_ROWS)
         if isinstance(table, ToolFailure):
             raise DocumentToolError(table.code, table.message)
-        if table.section_ref not in source_section_refs:
-            continue
+        # section 分裂兼容：不在此处过滤，由 _annual_performance_table_refs 已处理
         tables.append(table)
 
     header_tables = tuple(table for table in tables if _performance_column_indexes(table.rows, signature_specs))
@@ -4045,7 +4043,17 @@ def _annual_performance_table_refs(
 ) -> tuple[str, ...]:
     """从 title-family section 内定位满足 10F signature 的候选表格。"""
 
-    cited_table_refs = tuple(
+    # 优先严格匹配（table section 在 source_section_refs 内）；
+    # Docling section 分裂时标题和表格可能归属不同 section，回退到所有 TABLE citation
+    all_table_citation_refs = tuple(
+        dict.fromkeys(
+            citation.locator.table_ref
+            for citation in result.citations
+            if citation.locator.locator_kind is LocatorKind.TABLE
+            and citation.locator.table_ref
+        )
+    )
+    strict_table_refs = tuple(
         dict.fromkeys(
             citation.locator.table_ref
             for citation in result.citations
@@ -4054,6 +4062,7 @@ def _annual_performance_table_refs(
             and citation.locator.table_ref
         )
     )
+    cited_table_refs = strict_table_refs if strict_table_refs else all_table_citation_refs
     if not cited_table_refs:
         raise DocumentToolError(FailureCode.NOT_FOUND, "annual performance table citation 缺失")
     refs: list[str] = []
@@ -4061,7 +4070,8 @@ def _annual_performance_table_refs(
         table = tool_service.read_table(document_id, table_ref, max_rows=_PERFORMANCE_TABLE_MAX_ROWS)
         if isinstance(table, ToolFailure):
             raise DocumentToolError(table.code, table.message)
-        if table.section_ref not in source_section_refs:
+        # 回退模式下跳过 section 校验，仅校验列签名
+        if strict_table_refs and table.section_ref not in source_section_refs:
             continue
         if _performance_column_indexes(table.rows, specs) is None:
             continue
