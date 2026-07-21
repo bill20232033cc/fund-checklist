@@ -3829,3 +3829,237 @@ def test_extract_holdings_from_store_equity_unaffected(tmp_path: Path) -> None:
     assert "前五名债券投资明细" not in queries, (
         f"股票基金不应触发 bond fallback，实际 queries: {queries}"
     )
+
+
+# ============================================================
+# KI-3 债券持仓表格解析
+# ============================================================
+
+
+def test_bond_holdings_column_indexes_identifies_bond_table():
+    """_bond_holdings_column_indexes 正确识别债券持仓表的列映射。"""
+    from fund_agent.service.extraction import _bond_holdings_column_indexes
+
+    rows = (
+        ("序号", "债券品种", "公允价值", "占基金资产净值比例（%）"),
+        ("1", "中期票据", "1,301,165,882.67", "10.33"),
+    )
+    result = _bond_holdings_column_indexes(rows)
+    assert result is not None
+    assert result["stock_code"] == 0
+    assert result["stock_name"] == 1
+    assert result["fair_value"] == 2
+    assert result["percentage"] == 3
+
+
+def test_bond_holdings_column_indexes_rejects_stock_table():
+    """_bond_holdings_column_indexes 对股票持仓表返回 None。"""
+    from fund_agent.service.extraction import _bond_holdings_column_indexes
+
+    rows = (
+        ("股票代码", "股票名称", "数量（股）", "公允价值", "占基金资产净值比例（%）"),
+        ("000001", "平安银行", "1,000", "10,000", "5.0"),
+    )
+    result = _bond_holdings_column_indexes(rows)
+    assert result is None
+
+
+def test_bond_holdings_column_indexes_rejects_empty():
+    """_bond_holdings_column_indexes 对空表返回 None。"""
+    from fund_agent.service.extraction import _bond_holdings_column_indexes
+
+    assert _bond_holdings_column_indexes(()) is None
+
+
+def test_extract_holdings_parses_bond_table():
+    """债券持仓表能被正确解析为 HoldingExtraction。"""
+    from fund_agent.service.extraction import _extract_holdings_from_agent_result
+    from fund_agent.fund.document_tools.models import TableContent
+
+    def _make_locator(kind, section_ref=None, table_ref=None):
+        return Locator(
+            document_id="test-bond",
+            locator_kind=kind,
+            section_ref=section_ref,
+            table_ref=table_ref,
+            page_no=None,
+            page_range=None,
+            internal_ref=None,
+            internal_ref_available=False,
+        )
+
+    table_citation = Citation(
+        document_id="test-bond",
+        fund_code="006597",
+        fund_name="某某债券基金",
+        year=2024,
+        report_type="annual_report",
+        locator=_make_locator(LocatorKind.TABLE, section_ref="section-bond", table_ref="table-bond"),
+    )
+
+    result = AgentRunResult(
+        answer="8.6 期末按公允价值占基金资产净值比例大小排序的前五名债券投资明细",
+        citations=(table_citation,),
+        tool_trace=(),
+    )
+
+    class MockToolService:
+        def read_table(self, document_id, table_ref, max_rows=30):
+            return TableContent(
+                table_ref=table_ref,
+                caption=None,
+                section_ref="section-bond",
+                rows=(
+                    ("序号", "债券品种", "公允价值", "占基金资产净值比例（%）"),
+                    ("1", "中期票据", "1,301,165,882.67", "10.33"),
+                    ("2", "可转债（可交换债）", "543,392,188.50", "4.31"),
+                    ("3", "同业存单", "200,000,000.00", "1.59"),
+                ),
+                truncated=False,
+                locator=_make_locator(LocatorKind.TABLE, section_ref="section-bond", table_ref=table_ref),
+                citation=table_citation,
+            )
+
+        def list_tables(self, document_id):
+            return ()
+
+    holdings = _extract_holdings_from_agent_result(
+        document_id="test-bond",
+        result=result,
+        tool_service=MockToolService(),
+    )
+
+    assert len(holdings) == 3
+    assert holdings[0].stock_code == "1"
+    assert holdings[0].stock_name == "中期票据"
+    assert holdings[0].quantity == ""
+    assert holdings[0].fair_value == "1,301,165,882.67"
+    assert holdings[0].percentage == "10.33"
+    assert holdings[1].stock_name == "可转债（可交换债）"
+    assert holdings[2].stock_name == "同业存单"
+
+
+def test_extract_holdings_bond_skips_total_row():
+    """债券持仓解析跳过 合计 行。"""
+    from fund_agent.service.extraction import _extract_holdings_from_agent_result
+    from fund_agent.fund.document_tools.models import TableContent
+
+    def _make_locator(kind, section_ref=None, table_ref=None):
+        return Locator(
+            document_id="test-bond",
+            locator_kind=kind,
+            section_ref=section_ref,
+            table_ref=table_ref,
+            page_no=None,
+            page_range=None,
+            internal_ref=None,
+            internal_ref_available=False,
+        )
+
+    table_citation = Citation(
+        document_id="test-bond",
+        fund_code="006597",
+        fund_name="某某债券基金",
+        year=2024,
+        report_type="annual_report",
+        locator=_make_locator(LocatorKind.TABLE, section_ref="section-bond", table_ref="table-bond"),
+    )
+
+    result = AgentRunResult(
+        answer="8.6 期末按公允价值占基金资产净值比例大小排序的前五名债券投资明细",
+        citations=(table_citation,),
+        tool_trace=(),
+    )
+
+    class MockToolService:
+        def read_table(self, document_id, table_ref, max_rows=30):
+            return TableContent(
+                table_ref=table_ref,
+                caption=None,
+                section_ref="section-bond",
+                rows=(
+                    ("序号", "债券品种", "公允价值", "占基金资产净值比例（%）"),
+                    ("1", "中期票据", "1,301,165,882.67", "10.33"),
+                    ("2", "合计", "1,301,165,882.67", "10.33"),
+                ),
+                truncated=False,
+                locator=_make_locator(LocatorKind.TABLE, section_ref="section-bond", table_ref=table_ref),
+                citation=table_citation,
+            )
+
+        def list_tables(self, document_id):
+            return ()
+
+    holdings = _extract_holdings_from_agent_result(
+        document_id="test-bond",
+        result=result,
+        tool_service=MockToolService(),
+    )
+
+    assert len(holdings) == 1
+    assert holdings[0].stock_name == "中期票据"
+
+
+def test_extract_holdings_stock_table_regression():
+    """股票持仓表解析不受债券逻辑影响（回归测试）。"""
+    from fund_agent.service.extraction import _extract_holdings_from_agent_result
+    from fund_agent.fund.document_tools.models import TableContent
+
+    def _make_locator(kind, section_ref=None, table_ref=None):
+        return Locator(
+            document_id="test-equity",
+            locator_kind=kind,
+            section_ref=section_ref,
+            table_ref=table_ref,
+            page_no=None,
+            page_range=None,
+            internal_ref=None,
+            internal_ref_available=False,
+        )
+
+    table_citation = Citation(
+        document_id="test-equity",
+        fund_code="004393",
+        fund_name="某某股票基金",
+        year=2024,
+        report_type="annual_report",
+        locator=_make_locator(LocatorKind.TABLE, section_ref="section-equity", table_ref="table-equity"),
+    )
+
+    result = AgentRunResult(
+        answer="8.3 期末按公允价值占基金资产净值比例大小排序的所有股票投资明细",
+        citations=(table_citation,),
+        tool_trace=(),
+    )
+
+    class MockToolService:
+        def read_table(self, document_id, table_ref, max_rows=30):
+            return TableContent(
+                table_ref=table_ref,
+                caption=None,
+                section_ref="section-equity",
+                rows=(
+                    ("股票代码", "股票名称", "数量（股）", "公允价值", "占基金资产净值比例（%）"),
+                    ("000001", "平安银行", "1,000,000", "10,000,000.00", "5.00"),
+                    ("000002", "万科A", "500,000", "5,000,000.00", "2.50"),
+                ),
+                truncated=False,
+                locator=_make_locator(LocatorKind.TABLE, section_ref="section-equity", table_ref=table_ref),
+                citation=table_citation,
+            )
+
+        def list_tables(self, document_id):
+            return ()
+
+    holdings = _extract_holdings_from_agent_result(
+        document_id="test-equity",
+        result=result,
+        tool_service=MockToolService(),
+    )
+
+    assert len(holdings) == 2
+    assert holdings[0].stock_code == "000001"
+    assert holdings[0].stock_name == "平安银行"
+    assert holdings[0].quantity == "1,000,000"
+    assert holdings[0].fair_value == "10,000,000.00"
+    assert holdings[0].percentage == "5.00"

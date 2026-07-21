@@ -4330,18 +4330,54 @@ def _extract_holdings_from_agent_result(
 
         column_indexes = _holdings_column_indexes(table.rows)
         if column_indexes is None:
+            column_indexes = _bond_holdings_column_indexes(table.rows)
+            is_bond_table = column_indexes is not None
+        else:
+            is_bond_table = False
+
+        # 表格无 header 时（如跨页续表），搜索相邻表格的 header
+        # 限制：只搜索 table_ref 编号在 [当前-5, 当前) 范围内的表格
+        header_from_other_table = False
+        if column_indexes is None and not is_bond_table:
+            try:
+                current_num = int(table_ref.split("-")[-1])
+            except (ValueError, IndexError):
+                current_num = 0
+            all_tables = tool_service.list_tables(document_id)
+            for candidate in all_tables:
+                try:
+                    cand_num = int(candidate.table_ref.split("-")[-1])
+                except (ValueError, IndexError):
+                    continue
+                if cand_num >= current_num or current_num - cand_num > 5:
+                    continue
+                candidate_table = tool_service.read_table(document_id, candidate.table_ref, max_rows=1)
+                if isinstance(candidate_table, ToolFailure):
+                    continue
+                bond_idx = _bond_holdings_column_indexes(candidate_table.rows)
+                if bond_idx is not None:
+                    column_indexes = bond_idx
+                    is_bond_table = True
+                    header_from_other_table = True
+                    break
+
+        if column_indexes is None:
             continue
 
         primary_table_ref = table_ref
         primary_section_ref = table.section_ref
         primary_page = table.locator.page_no
 
-        data_rows = table.rows[1:]
+        # header 来自其他表时（续表无 header），从第一行开始
+        data_start = 0 if header_from_other_table else 1
+        data_rows = table.rows[data_start:]
         for row in data_rows:
             if len(row) <= max(column_indexes.values()):
                 continue
             stock_code = row[column_indexes["stock_code"]].strip()
             stock_name = row[column_indexes["stock_name"]].strip()
+            if is_bond_table and stock_name == "合计":
+                continue
             quantity = row[column_indexes.get("quantity", 0)].strip() if "quantity" in column_indexes else ""
             fair_value = row[column_indexes.get("fair_value", 0)].strip() if "fair_value" in column_indexes else ""
             percentage = row[column_indexes["percentage"]].strip()
@@ -4492,6 +4528,33 @@ def _holdings_column_indexes(rows: tuple[tuple[str, ...], ...]) -> dict[str, int
         elif "数量" in cell_clean:
             mapping["quantity"] = idx
         elif "公允价值" in cell_clean:
+            mapping["fair_value"] = idx
+        elif "占基金资产净值比例" in cell_clean or "占比" in cell_clean:
+            mapping["percentage"] = idx
+
+    required = ("stock_code", "stock_name", "percentage")
+    if all(k in mapping for k in required):
+        return mapping
+    return None
+
+
+def _bond_holdings_column_indexes(rows: tuple[tuple[str, ...], ...]) -> dict[str, int] | None:
+    """识别债券持仓表的列索引映射。
+
+    债券表格列：序号 | 债券品种 | 公允价值 | 占基金资产净值比例
+    映射到 HoldingExtraction：stock_code=序号, stock_name=债券品种, quantity="", fair_value=公允价值, percentage=占比
+    """
+    if not rows:
+        return None
+    header = rows[0]
+    mapping: dict[str, int] = {}
+    for idx, cell in enumerate(header):
+        cell_clean = cell.strip().replace(" ", "")
+        if cell_clean == "序号":
+            mapping["stock_code"] = idx
+        elif "债券品种" in cell_clean:
+            mapping["stock_name"] = idx
+        elif "公允价值" in cell_clean and "占基金资产净值比例" not in cell_clean:
             mapping["fair_value"] = idx
         elif "占基金资产净值比例" in cell_clean or "占比" in cell_clean:
             mapping["percentage"] = idx
