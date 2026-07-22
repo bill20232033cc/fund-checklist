@@ -1614,3 +1614,96 @@ Slice 10L git diff --check: passed
 - **根因**：模板未区分基金类型。0.00% 对权益基金异常，对债券基金正常
 - **优先级**：低（需引入 fund-type-awareness 机制后统一处理）
 - **建议**：Phase 5 引入基金类型分类后，在 Ch6 data_table 中增加基金类型标注，指导 LLM 正确解读数据
+
+---
+
+## Phase 5：LLM 自主工具调用 + 单次问答
+
+> 裁决时间：2026-07-22
+> 前置条件：Phase 3.5 ✅（2026-07-19 关闭）、Phase 3.6 ✅（2026-07-21 关闭）
+> 设计来源：docs/agent-evolution-design.md §1
+
+### Phase 5 裁决 Gate
+
+| Gate | 条件 | 状态 |
+|------|------|------|
+| Gate 1 | `ask` 子命令裁决：LLM provider 稳定性 + citation 校验不回退 + 不破坏 `read` 心智模型 | ✅ 已裁决通过 |
+| Gate 2 | Phase 5 scope/write set/verification/stop conditions 写入本文件 | ✅ 本文档记录 |
+| Gate 3 | 持仓抽取验证通过（四类基金×5年，失败率 <10%） | ✅ 通过（23/23 全部通过，0% 失败率） |
+
+### Scope
+
+- 将 `LlmToolLoopRunner` 从测试层 fake/injected contract 升级为 production 可用路径
+- 新增 `ask` 子命令，与现有 `read` 并存
+- `ask` 走 LLM 自主工具调用路径，`read` 保持确定性路径不变
+- 不新建 Agent 类，复用 `LlmToolLoopRunner`
+- LLM 工具允许列表：6 个 reading tools 开放，2 个 extraction tools 不开放
+
+### Allowed Write Set
+
+| 文件 | 变更类型 |
+|------|---------|
+| `fund_agent/agent/llm_tool_loop.py` | production readiness 补齐 |
+| `fund_agent/agent/__init__.py` | 导出更新 |
+| `fund_agent/service/extraction.py` | 新增 `ask_question` use case |
+| `fund_agent/host/minimal_host.py` | 适配 LLM agent 模式 |
+| `fund_agent/cli/main.py` | 新增 `ask` 子命令 |
+| `tests/fund/agent/test_llm_tool_loop.py` | 补充 production 场景测试 |
+| `tests/fund/cli/test_cli.py` | `ask` 子命令端到端测试 |
+| `docs/implementation-control.md` | 本文件 |
+
+### Stop Conditions
+
+- LLM 路径 citation/evidence 四层校验回退到 fallback → 停止
+- `ask` 破坏 `read` 子命令现有行为 → 停止
+- 真实 LLM smoke 失败且根因在 provider 侧 → 停止等待 provider 修复
+
+### Verification Commands
+
+```bash
+# 最小验证
+uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.py tests/fund/cli/test_cli.py
+
+# LLM tool loop 测试
+uv run pytest tests/fund/agent/test_llm_tool_loop.py -v
+
+# 全量回归
+uv run pytest tests/ -q
+
+# 真实 LLM smoke（opt-in）
+FUND_CHECKLIST_RUN_LIVE_DEEPSEEK=1 DEEPSEEK_API_KEY=... uv run pytest tests/fund/agent/test_deepseek_live_smoke.py -v
+```
+
+### Candidate Slices
+
+| Slice | 内容 | 状态 |
+|-------|------|------|
+| **Phase5-A** | `LlmToolLoopRunner` production readiness 评估 | 待启动 |
+| **Phase5-B** | Service 层 `ask_question` use case | 依赖 Phase5-A |
+| **Phase5-C** | CLI `ask` 子命令 | 依赖 Phase5-B |
+| **Phase5-D** | Host 适配 LLM agent 模式 | 依赖 Phase5-B |
+| **Phase5-E** | 真实 LLM 端到端 smoke | 依赖 Phase5-C + Phase5-D |
+
+---
+
+## Phase 3.5/3.6 关闭记录
+
+**Phase 3.5**（报告质量稳定化）：2026-07-19 关闭。Ch1-6 审计得分全部 ≥75（6/6），三基金（512890/006597/012346）端到端验证通过。
+
+**Phase 3.6**（审计管道数据适配）：2026-07-21 关闭。data_sources 缺失时 LLM 审计权重 70%→50%，数据不足场景通过阈值降至 ≥70。
+
+
+### Phase 5 Gate 审计结果（2026-07-22）
+
+> **结论：Phase 5 前置条件不成立，Gate 阻塞。**
+
+Phase 3.5/3.6 声称的 "6/6 达标" 基于降级路径掩盖了持仓抽取层系统性缺陷：
+
+- 23 个基金×年份组合中 9 个持仓抽取失败（39%）
+- 兴全 2024/2025 持仓表存在但被表格选择逻辑误选为资产配置表
+- 国泰全部年份持仓抽取失败（债券基金 query 不匹配 + 表格选择错误）
+- 根因：`tool_loop.py` 的 `_score_table_summary` 按页码近邻性打分，同页非持仓表压制跨页持仓表
+
+**阻塞条件**：修复持仓抽取 Bug 1-3 + 补充端到端自动化测试 + 重新验证后，Phase 5 Gate 方可解除。
+
+详见 `.checkpoint-2026-07-22-prephase5-audit.md`。

@@ -4465,6 +4465,12 @@ def _extract_holdings_from_agent_result(
                 candidate_table = tool_service.read_table(document_id, candidate.table_ref, max_rows=1)
                 if isinstance(candidate_table, ToolFailure):
                     continue
+                stock_idx = _holdings_column_indexes(candidate_table.rows)
+                if stock_idx is not None:
+                    column_indexes = stock_idx
+                    is_bond_table = False
+                    header_from_other_table = True
+                    break
                 bond_idx = _bond_holdings_column_indexes(candidate_table.rows)
                 if bond_idx is not None:
                     column_indexes = bond_idx
@@ -4652,23 +4658,38 @@ def _holdings_column_indexes(rows: tuple[tuple[str, ...], ...]) -> dict[str, int
 def _bond_holdings_column_indexes(rows: tuple[tuple[str, ...], ...]) -> dict[str, int] | None:
     """识别债券持仓表的列索引映射。
 
-    债券表格列：序号 | 债券品种 | 公允价值 | 占基金资产净值比例
-    映射到 HoldingExtraction：stock_code=序号, stock_name=债券品种, quantity="", fair_value=公允价值, percentage=占比
+    支持两种格式：
+    1. 汇总表：序号 | 债券品种 | 公允价值 | 占基金资产净值比例
+    2. 明细表：序号 | 债券代码 | 债券名称 | 数量(张) | 公允价值 | 占净值比例
+
+    映射到 HoldingExtraction：stock_code=债券代码(或序号), stock_name=债券名称(或债券品种), quantity=数量, fair_value=公允价值, percentage=占比
     """
     if not rows:
         return None
     header = rows[0]
     mapping: dict[str, int] = {}
+    has_bond_code = False
     for idx, cell in enumerate(header):
         cell_clean = cell.strip().replace(" ", "")
-        if cell_clean == "序号":
+        if "债券代码" in cell_clean:
             mapping["stock_code"] = idx
-        elif "债券品种" in cell_clean:
+            has_bond_code = True
+        elif "债券名称" in cell_clean:
             mapping["stock_name"] = idx
+        elif "债券品种" in cell_clean and "stock_name" not in mapping:
+            mapping["stock_name"] = idx
+        elif "数量" in cell_clean:
+            mapping["quantity"] = idx
         elif "公允价值" in cell_clean and "占基金资产净值比例" not in cell_clean:
             mapping["fair_value"] = idx
         elif "占基金资产净值比例" in cell_clean or "占比" in cell_clean:
             mapping["percentage"] = idx
+    # 无债券代码时用序号作为 stock_code（汇总表格式）
+    if not has_bond_code:
+        for idx, cell in enumerate(header):
+            if cell.strip() == "序号":
+                mapping["stock_code"] = idx
+                break
 
     required = ("stock_code", "stock_name", "percentage")
     if all(k in mapping for k in required):

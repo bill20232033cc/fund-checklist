@@ -23,6 +23,12 @@ ToolArgumentValue = str | int | None
 _NO_SEARCH_HIT_MESSAGE = "未找到可读取的匹配章节"
 _TABLE_PAGE_WINDOW = 1
 _MAX_TABLE_CANDIDATES = 3
+
+# 持仓表结构特征：典型持仓表有 5+ 列（序号/代码/名称/数量/公允价值/占比）和 10+ 行
+_HOLDINGS_MIN_COLUMNS = 5
+_HOLDINGS_MIN_ROWS = 10
+_HOLDINGS_QUERY_KEYWORDS = ("股票", "债券", "持仓", "重仓")
+_HOLDINGS_BONUS = 4  # 持仓表结构匹配加分
 _MAX_TABLE_ROWS = 15
 
 
@@ -220,7 +226,7 @@ class MinimalFundDocumentAgent:
             if score > 0:
                 read_tables.append((score, table_result))
 
-        read_tables.sort(key=lambda item: (-item[0], item[1].table_ref))
+        read_tables.sort(key=lambda item: (-item[0], -len(item[1].rows), item[1].table_ref))
         return tuple(table for _, table in read_tables[:1])
 
 
@@ -307,6 +313,10 @@ def _score_table_summary(table: TableSummary, *, query: str, section: SectionCon
         score += 5
     elif _page_near(table.locator.page_no, section.locator.page_no):
         score += 3
+    # 持仓表结构特征加分：查询含持仓关键词时，列数和行数多的表格更可能是持仓明细表
+    if normalized_query and any(kw in normalized_query for kw in _HOLDINGS_QUERY_KEYWORDS):
+        if (table.column_count or 0) >= _HOLDINGS_MIN_COLUMNS and (table.row_count or 0) >= _HOLDINGS_MIN_ROWS:
+            score += _HOLDINGS_BONUS
     return score
 
 

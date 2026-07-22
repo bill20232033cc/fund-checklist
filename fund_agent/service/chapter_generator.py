@@ -323,7 +323,7 @@ def generate_data_table(
             top1_name = ""
             for h in year_holdings:
                 try:
-                    pct = float(h.percentage)
+                    pct = float(h.percentage) if h.percentage and h.percentage.strip() not in ("-", "—") else 0.0
                 except (ValueError, TypeError):
                     pct = 0.0
                 top10_sum += pct
@@ -512,7 +512,7 @@ def generate_data_table(
         lines = ["## 风险相关数据"]
         # 持仓集中度
         for year in sorted(holdings.keys()):
-            top5_pct = sum(float(h.percentage.rstrip("%") or "0") for h in holdings[year][:5])
+            top5_pct = sum(float(h.percentage.rstrip("%") or "0") if h.percentage and h.percentage.strip() not in ("-", "—") else 0.0 for h in holdings[year][:5])
             lines.append(f"\n{year}年前五大持仓集中度: {top5_pct:.2f}%")
         # 业绩波动
         lines.extend(["", "## 业绩波动"])

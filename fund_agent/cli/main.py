@@ -13,6 +13,7 @@ from typing import Sequence, TextIO
 from fund_agent.fund.document_tools.constants import FailureCode, ReportType
 from fund_agent.fund.document_tools.errors import DocumentToolError
 from fund_agent.fund.document_tools.models import ToolFailure
+from fund_agent.fund.document_tools.eid_downloader import EidDownloadError, download_annual_report
 from fund_agent.fund.document_tools.persistent_repository import (
     CATALOG_FILENAME,
     FilesystemReportRepository,
@@ -87,6 +88,8 @@ def run_cli(
             return _run_import_command(args, stdout=stdout, stderr=stderr)
         if args.command == "holdings":
             return _run_holdings_command(args, stdout=stdout, stderr=stderr)
+        if args.command == "download":
+            return _run_download_command(args, stdout=stdout, stderr=stderr)
         if args.command == "allocation":
             return _run_allocation_command(args, stdout=stdout, stderr=stderr)
         if args.command == "fees":
@@ -149,6 +152,12 @@ def build_parser() -> argparse.ArgumentParser:
     holdings_parser.add_argument("--fund-code", required=True)
     holdings_parser.add_argument("--years", required=True)
     holdings_parser.add_argument("--work-dir", default=Path(DEFAULT_WORK_DIR), type=Path)
+
+    download_parser = subparsers.add_parser("download")
+    download_parser.add_argument("--fund-code", required=True, help="基金代码")
+    download_parser.add_argument("--year", required=True, type=int, help="报告年份")
+    download_parser.add_argument("--output-dir", default=Path("基金年报"), type=Path, help="PDF 输出目录")
+    download_parser.add_argument("--force", action="store_true", help="强制重新下载")
 
     allocation_parser = subparsers.add_parser("allocation")
     allocation_parser.add_argument("--fund-code", required=True)
@@ -515,6 +524,58 @@ def _run_multi_year_command(args: argparse.Namespace, *, stdout: TextIO, stderr:
     return SUCCESS_EXIT_CODE
 
 
+def _fund_name_from_catalog(work_dir: Path, fund_code: str) -> str:
+    """从 catalog 中获取基金名称。"""
+    repository = FilesystemReportRepository(
+        catalog_path=work_dir / CATALOG_FILENAME,
+        blob_root=work_dir / "pdf_blobs",
+        docling_json_root=work_dir / "docling_json",
+    )
+    for report in repository.list_reports():
+        if report.get("fund_code") == fund_code:
+            return str(report.get("fund_name", ""))
+    return ""
+
+
+def _run_download_command(args: argparse.Namespace, *, stdout: TextIO, stderr: TextIO) -> int:
+    """从 EID 下载基金年报 PDF。
+
+    参数:
+        args: argparse 解析出的 download 参数。
+        stdout: 成功输出流。
+        stderr: 失败输出流。
+
+    返回:
+        成功返回 0；失败返回 2。
+    """
+    try:
+        result = download_annual_report(
+            fund_code=args.fund_code,
+            year=args.year,
+            output_dir=Path(args.output_dir),
+            force=args.force,
+        )
+        output = {
+            "fund_code": result.fund_code,
+            "fund_name": result.fund_name,
+            "year": result.year,
+            "status": result.status,
+            "file_path": str(result.file_path) if result.file_path else None,
+            "source_url": result.source_url,
+        }
+        print(json.dumps(output, ensure_ascii=False, indent=2), file=stdout)
+        return SUCCESS_EXIT_CODE
+    except EidDownloadError as exc:
+        # 将 EidDownloadError.code 映射到 FailureCode 枚举
+        try:
+            error_code = FailureCode(exc.code)
+        except ValueError:
+            error_code = FailureCode.UNAVAILABLE
+        failure = ToolFailure(code=error_code, message=str(exc))
+        _write_classified_failure(failure, stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+
 def _run_holdings_command(args: argparse.Namespace, *, stdout: TextIO, stderr: TextIO) -> int:
     """从 catalog 查找已导入年报并聚合多年度持仓数据。
 
@@ -539,6 +600,9 @@ def _run_holdings_command(args: argparse.Namespace, *, stdout: TextIO, stderr: T
         _write_classified_failure(failure, stderr)
         return CLASSIFIED_FAILURE_EXIT_CODE
 
+    # 从 catalog 获取 fund_name（用于债券基金 fallback 判断）
+    fund_name = _fund_name_from_catalog(work_dir, args.fund_code)
+
     service = FundReadingService()
     result = service.extract_multi_year_holdings(
         ExtractHoldingsRequest(
@@ -546,6 +610,7 @@ def _run_holdings_command(args: argparse.Namespace, *, stdout: TextIO, stderr: T
             requested_years=requested_years,
             annual_report_documents=tuple(matching_docs),
             work_dir=work_dir,
+            fund_name=fund_name,
         )
     )
     if result.failure is not None:

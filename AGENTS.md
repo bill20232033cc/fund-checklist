@@ -104,7 +104,7 @@ MVP 阅读工具层已于 Slice 4 验收通过并 close。项目现已进入 **�
 - 披露完整性审计 (12B/12C)
 - CLI 9 个子命令：`read` / `multi-year` / `import` / `holdings` / `allocation` / `fees` / `audit` / `deep-audit` / `generate`
 
-**17C 验证结果（2026-07-15）**：单年 PDF 端到端 smoke 发现 Ch2/Ch3/Ch5 生成失败、Ch4 为硬编码占位符。根因：(1) Ch2 单年数据无降级策略；(2) Ch3 LLM 分析约束不足（从持仓反推基金经理意图被 audit 否决）；(3) Ch4 投资者实际收益数据为 2026 新规字段，2024 年报不披露；(4) Ch5 must_answer 结构化规则未定义。Phase 3.5（报告质量稳定化）已启动，完成后 Phase 4 才可推进。详见 `docs/design.md` §6.6/§6.7 和 `docs/implementation-control.md` Phase 3.5。
+**Phase 3.5/3.6 已关闭（2026-07-21）**：报告质量稳定化 + 审计管道数据适配全部完成。三基金（512890/006597/012346）Ch1-6 审计得分全部 ≥75，端到端验证通过。**Phase 5 Gate 已解除**（持仓抽取 23/23 全部通过）。Phase 5 可启动。详见 `docs/implementation-control.md` Phase 5 Gate 审计结果和 `docs/agent-evolution-design.md` §1。
 
 详细 phase 与裁决记录见 `docs/implementation-control.md`。
 
