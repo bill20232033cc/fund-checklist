@@ -114,6 +114,39 @@ LLM_ANALYSIS_PROMPTS: dict[int, str] = {
     ),
 }
 
+# 被动基金（index_etf/index_fund/index_feeder）专用 LLM prompt，覆盖 Ch2/Ch3/Ch6
+LLM_PASSIVE_CHAPTER_PROMPTS: dict[int, str] = {
+    2: (
+        "请基于上述成本数据，写一段「成本分析（C 的深度拆解）」分析。要求：\n"
+        "- 被动基金的核心是成本 C，超额收益 A≈0（目标为跟踪指数）\n"
+        "- 拆解管理费、托管费、销售服务费等各项成本\n"
+        "- 对比同类基金的费率水平，判断费率是否处于合理区间\n"
+        "- 分析费率对长期复利收益的侵蚀效应\n"
+        "- 说明本基金费率的竞争力（偏低/中等/偏高）\n"
+        "- 可以引用数据表中的数字，但不得编造数据表中不存在的数字"
+    ),
+    3: (
+        "请基于上述持仓数据和指数信息，写一段「指数特征」分析。要求：\n"
+        "- 说明本基金跟踪的指数及其编制规则\n"
+        "- 分析指数的成分股结构（行业分布、权重分布、集中度）\n"
+        "- 说明指数历史收益特征和波动特征\n"
+        "- 分析指数的调仓频率和调仓机制\n"
+        "- 说明该指数在当前市场环境下的适用性\n"
+        "- 被动基金不涉及基金经理画像，聚焦指数本身\n"
+        "- 可以引用数据表中的数字，但不得编造数据表中不存在的数字"
+    ),
+    6: (
+        "请基于上述风险相关数据，写一段「核心风险与风险分级」分析。要求：\n"
+        "- 覆盖三类被动基金特有风险：清盘风险、跟踪偏离长期趋势、指数风险\n"
+        "- 清盘风险：规模过小可能导致清盘，评估基金规模是否在安全区间\n"
+        "- 跟踪偏离长期趋势：分析跟踪误差是否有持续扩大趋势，是否影响投资目标\n"
+        "- 指数风险：说明跟踪的指数本身的结构性风险（如行业集中度、估值水平等）\n"
+        "- 判断风险严重程度分级（高/中/低）+ 依据\n"
+        "- 包含标准风险声明（过往业绩不代表未来表现）\n"
+        "- 可以引用数据表中的数字，但不得编造数据表中不存在的数字"
+    ),
+}
+
 
 def generate_data_table(
     chapter_id: int,
@@ -129,6 +162,7 @@ def generate_data_table(
     evidence: ChapterEvidence | None = None,
     stress_test: StressTestResult | None = None,
     signal_judgment: SignalJudgment | None = None,
+    fund_type: str = "",
 ) -> str:
     """程序化生成数据表格（数字 100% 从数据 dict 提取，不经过 LLM）。
 
@@ -139,10 +173,13 @@ def generate_data_table(
         fund_manager: 基金经理信息。
         scale_info: 规模信息。
         evidence: 证据来源汇总（可选）。
+        fund_type: 基金类型（用于条件渲染）。
 
     返回:
         Markdown 格式的数据表格文本（含证据来源小节）。
     """
+    is_passive = fund_type in ("index_etf", "index_feeder", "index_fund") and "增强" not in fund_name
+    is_bond = fund_type == "bond_fund"
 
     base_content = ""
 
@@ -522,31 +559,86 @@ def generate_data_table(
             p = performance[year]
             lines.append(f"| {year} | {p.get('nav_growth_rate', 'N/A')} | {p.get('excess_return', 'N/A')} |")
 
-        # 压力测试
-        if stress_test:
-            lines.extend(["", "## 压力测试"])
-            fund_type_labels = {"index_fund": "指数基金", "index_etf": "ETF", "index_feeder": "联接基金", "bond_fund": "债券基金", "active_fund": "主动基金"}
-            lines.append(f"- 基金类型: {fund_type_labels.get(stress_test.fund_type, stress_test.fund_type)}")
-            lines.append(f"- 类型判定: {'关键词推断' if stress_test.fund_type_inferred else '显式指定'}")
-            if stress_test.current_scale_billion is not None:
-                lines.append(f"- 当前规模: {stress_test.current_scale_billion:.2f}亿元")
-                lines.extend(["", "| 场景 | 阈值 | 损失金额(亿元) |",
-                              "|------|------|--------------|"])
-                for name in ("normal", "extreme", "worst"):
-                    sc = stress_test.stress_scenarios[name]
-                    lines.append(
-                        f"| {name} | {sc['threshold']:.0%} | {sc['loss_billion']:.4f} |"
-                    )
-            if stress_test.excess_return is not None:
-                lines.append(f"\n- 超额收益: {stress_test.excess_return:.2%}")
-            if stress_test.stress_level is not None:
-                level_labels = {
-                    "outperform": "跑赢基准",
-                    "inline": "基本持平",
-                    "underperform": "跑输基准",
-                    "severe_underperform": "严重跑输",
-                }
-                lines.append(f"- 压力等级: {level_labels.get(stress_test.stress_level, stress_test.stress_level)}")
+        # 被动基金：三类特有风险数据
+        if is_passive:
+            lines.extend(["", "## 被动基金三类风险（must_answer）"])
+            lines.extend([
+                "",
+                "**1. 清盘风险**：",
+                "- 触发条件：基金规模连续低于5000万或持有人数不足",
+            ])
+            if scale_info and scale_info.estimated_aum:
+                lines.append(f"- 当前规模：{scale_info.estimated_aum}")
+                lines.append("- 评估：规模是否在安全区间（>2亿为安全）")
+            else:
+                lines.append("- 当前规模：数据暂不可用，无法评估")
+            lines.extend([
+                "",
+                "**2. 跟踪偏离长期趋势**：",
+                "- 跟踪误差是衡量被动基金管理质量的核心指标",
+                "- 需关注跟踪误差是否有持续扩大趋势",
+            ])
+            if performance:
+                latest = performance.get(report_year, {})
+                excess = latest.get("excess_return", "N/A")
+                lines.append(f"- 最新超额收益（负值表示跑输基准）：{excess}")
+            lines.extend([
+                "",
+                "**3. 指数风险**：",
+                "- 跟踪指数本身的结构性风险（行业集中度、估值水平、成分股质量等）",
+                "- 需关注指数的编制规则变更、成分股调整对跟踪的影响",
+            ])
+            # 被动基金压力测试：使用被动基金专用阈值
+            if stress_test:
+                lines.extend(["", "## 压力测试"])
+                fund_type_labels = {"index_fund": "指数基金", "index_etf": "ETF", "index_feeder": "联接基金", "bond_fund": "债券基金", "active_fund": "主动基金", "qdii_fund": "QDII基金"}
+                lines.append(f"- 基金类型: {fund_type_labels.get(stress_test.fund_type, stress_test.fund_type)}")
+                lines.append(f"- 类型判定: {'关键词推断' if stress_test.fund_type_inferred else '显式指定'}")
+                if stress_test.current_scale_billion is not None:
+                    lines.append(f"- 当前规模: {stress_test.current_scale_billion:.2f}亿元")
+                    lines.extend(["", "| 场景 | 阈值 | 损失金额(亿元) |",
+                                  "|------|------|--------------|"])
+                    for name in ("normal", "extreme", "worst"):
+                        sc = stress_test.stress_scenarios[name]
+                        lines.append(
+                            f"| {name} | {sc['threshold']:.0%} | {sc['loss_billion']:.4f} |"
+                        )
+                if stress_test.excess_return is not None:
+                    lines.append(f"\n- 超额收益: {stress_test.excess_return:.2%}")
+                if stress_test.stress_level is not None:
+                    level_labels = {
+                        "outperform": "跑赢基准",
+                        "inline": "基本持平",
+                        "underperform": "跑输基准",
+                        "severe_underperform": "严重跑输",
+                    }
+                    lines.append(f"- 压力等级: {level_labels.get(stress_test.stress_level, stress_test.stress_level)}")
+        else:
+            # 压力测试（主动基金）
+            if stress_test:
+                lines.extend(["", "## 压力测试"])
+                fund_type_labels = {"index_fund": "指数基金", "index_etf": "ETF", "index_feeder": "联接基金", "bond_fund": "债券基金", "active_fund": "主动基金", "qdii_fund": "QDII基金"}
+                lines.append(f"- 基金类型: {fund_type_labels.get(stress_test.fund_type, stress_test.fund_type)}")
+                lines.append(f"- 类型判定: {'关键词推断' if stress_test.fund_type_inferred else '显式指定'}")
+                if stress_test.current_scale_billion is not None:
+                    lines.append(f"- 当前规模: {stress_test.current_scale_billion:.2f}亿元")
+                    lines.extend(["", "| 场景 | 阈值 | 损失金额(亿元) |",
+                                  "|------|------|--------------|"])
+                    for name in ("normal", "extreme", "worst"):
+                        sc = stress_test.stress_scenarios[name]
+                        lines.append(
+                            f"| {name} | {sc['threshold']:.0%} | {sc['loss_billion']:.4f} |"
+                        )
+                if stress_test.excess_return is not None:
+                    lines.append(f"\n- 超额收益: {stress_test.excess_return:.2%}")
+                if stress_test.stress_level is not None:
+                    level_labels = {
+                        "outperform": "跑赢基准",
+                        "inline": "基本持平",
+                        "underperform": "跑输基准",
+                        "severe_underperform": "严重跑输",
+                    }
+                    lines.append(f"- 压力等级: {level_labels.get(stress_test.stress_level, stress_test.stress_level)}")
 
         base_content = "\n".join(lines)
 
@@ -718,6 +810,7 @@ class LlmChapterGenerator:
         evidence: ChapterEvidence | None = None,
         stress_test: StressTestResult | None = None,
         signal_judgment: SignalJudgment | None = None,
+        fund_type: str = "",
     ) -> str | None:
         """生成单个章节（程序表格 + LLM 分析）。
 
@@ -728,17 +821,19 @@ class LlmChapterGenerator:
             fund_manager: 基金经理信息。
             scale_info: 规模信息。
             evidence: 证据来源汇总（可选）。
+            fund_type: 基金类型（index_etf/index_feeder/index_fund/bond_fund/active_fund）。
 
         返回:
             完整的章节 Markdown；LLM 失败时返回 None（调用方应回退模板）。
         """
+        is_passive = fund_type in ("index_etf", "index_feeder", "index_fund") and "增强" not in fund_name
 
         # 阶段 1：程序生成数据表格
         data_table = generate_data_table(
             chapter_id, fund_code, fund_name, report_year,
             performance, holdings, allocation, fees,
             fund_manager, scale_info, evidence, stress_test,
-            signal_judgment,
+            signal_judgment, fund_type=fund_type,
         )
 
         # 阶段 2：使用 PromptComposer 渲染模板
@@ -762,13 +857,14 @@ class LlmChapterGenerator:
             "must_answer_schema": must_answer_schema,
         }
 
-        # 条件变量（用于 <when_missing> 条件块）
+        # 条件变量（用于 <when_missing> 条件块和 fund_type 条件渲染）
         if chapter_id == 2:
             template_context["multi_year_note"] = "yes" if len(performance) >= 3 else ""
         if chapter_id == 3:
             template_context["investment_strategy"] = getattr(fund_manager, "investment_strategy", "") if fund_manager else ""
         if chapter_id == 4:
             template_context["investor_return_data"] = "" if report_year < 2026 else "yes"
+        template_context["is_passive"] = "yes" if is_passive else ""
 
         # 渲染 system prompt（基础模板）
         try:
@@ -777,14 +873,21 @@ class LlmChapterGenerator:
         except Exception:
             system_prompt = LLM_CHAPTER_SYSTEM_PROMPT  # fallback 到旧硬编码
 
-        # 渲染 chapter prompt
+        # 渲染 chapter prompt（被动基金优先使用被动专用提示词）
+        chapter_prompt = ""
         template_name = f"ch{chapter_id}.md"
         try:
             chapter_composed = _PROMPT_COMPOSER.compose(template_name, template_context)
             chapter_prompt = chapter_composed.system_message
         except Exception:
-            # fallback 到旧硬编码
-            chapter_prompt = LLM_ANALYSIS_PROMPTS.get(chapter_id, "")
+            pass  # fallback 到硬编码
+
+        if not chapter_prompt:
+            # 被动基金：优先用被动专用 prompt
+            if is_passive and chapter_id in LLM_PASSIVE_CHAPTER_PROMPTS:
+                chapter_prompt = LLM_PASSIVE_CHAPTER_PROMPTS[chapter_id]
+            else:
+                chapter_prompt = LLM_ANALYSIS_PROMPTS.get(chapter_id, "")
             if not chapter_prompt:
                 return data_table if data_table else None
 

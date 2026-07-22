@@ -31,7 +31,7 @@ PDF
  -> Service 层受控 profile routing + disclosure target contract
  -> 结构化字段抽取 (performance / fee_rates / holdings / allocation)
  -> 多年度聚合 (3-5 年 bounded coverage)
- -> 确定性信号评分 (6 指标，135→100 归一化)
+ -> 确定性信号评分 (基金类型感知：主动基金 6 指标 135→100 归一化；被动基金 3 指标 100 分制)
  -> 8 章分析报告生成 (程序数据表格 + LLM 定性分析)
  -> 三层审计管道 (程序+LLM+复核，4 类 22 项)
 ```
@@ -97,7 +97,7 @@ MVP 阅读工具层已于 Slice 4 验收通过并 close。项目现已进入 **�
 - 结构化字段抽取：费率 (10C)、年度业绩 (10F/10G)、持仓 (11C)、资产配置 (11D)
 - 多年度聚合 (3-5 年 bounded coverage, 10I/10L)
 - 批量 PDF 导入 (10M)
-- 确定性信号评分 (6 指标, 135→100 归一化)
+- 确定性信号评分 (基金类型感知：主动基金 6 指标 135→100 归一化；被动基金 3 指标 100 分制)
 - 8 章分析报告生成 (13A 模板填充 + 13B LLM 定性分析)
 - 三层审计管道 (14C: 程序+LLM+复核, 4 类 22 项)
 - Host 生命周期 (12A: timeout/event tracing)

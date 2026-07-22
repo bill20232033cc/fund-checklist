@@ -11,7 +11,7 @@
 
 - 本仓库已实现 `fund_agent/` 完整分层（fund / service / host / agent / cli），`tests/` 覆盖 document_tools / service / agent / cli，`docs/design.md` 与 `docs/implementation-control.md` 为真源文档。
 - CLI 已实现 9 个子命令：`read` / `multi-year` / `import` / `holdings` / `allocation` / `fees` / `audit` / `deep-audit` / `generate`。
-- 已实现能力：本地 PDF 导入、Docling 转换、7 个 reading tools、Service 层 profile routing + disclosure target contract、结构化字段抽取（费率/业绩/持仓/资产配置）、多年度聚合、确定性信号评分（6 指标）、8 章分析报告生成、三层审计管道。
+- 已实现能力：本地 PDF 导入、Docling 转换、7 个 reading tools、Service 层 profile routing + disclosure target contract、结构化字段抽取（费率/业绩/持仓/资产配置）、多年度聚合、确定性信号评分（基金类型感知：主动基金 6 指标；被动基金 3 指标 100 分制）、8 章分析报告生成、三层审计管道。
 - 当前样本材料位于 `基金年报/`，包含多只基金多个年度的 PDF；已通过受控 import 管理。
 - `docs/fund-analysis-template-draft.md` 存在，按 `AGENTS.md` 规则，在报告生成、字段抽取或投资判断路径中使用。
 
@@ -28,7 +28,7 @@ PDF
  -> Service 层受控 profile routing + disclosure target contract
  -> 结构化字段抽取 (performance / fee_rates / holdings / allocation)
  -> 多年度聚合 (3-5 年 bounded coverage)
- -> 确定性信号评分 (6 指标，135→100 归一化)
+ -> 确定性信号评分 (基金类型感知：主动基金 6 指标 135→100 归一化；被动基金 3 指标 100 分制)
  -> 8 章分析报告生成 (程序数据表格 + LLM 定性分析)
  -> 三层审计管道 (程序+LLM+复核，4 类 22 项)
 ```
@@ -689,7 +689,7 @@ Slice 6 非目标：
 - Agent loop 验证
 - Service 层受控 profile routing
 - 多年度聚合（3-5 年 bounded coverage）
-- 确定性信号评分（6 指标，135→100 归一化）
+- 确定性信号评分（基金类型感知：主动基金 6 指标 135→100 归一化；被动基金 3 指标 100 分制）
 - 8 章分析报告生成
 - 三层审计管道（程序+LLM+复核，4 类 22 项）
 

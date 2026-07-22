@@ -100,6 +100,7 @@ from .signal_scoring import (
     _holdings_overlap_rate,
     _parse_aum_yi,
     _parse_percent,
+    _ScoredIndicator,
     score_concentration,
     score_excess_returns,
     score_fee_rate,
@@ -1742,11 +1743,14 @@ class FundReadingService:
             fund_type, _ = infer_fund_type(fund_name)
             if fund_type == "bond_fund":
                 routed = self._run_with_query_candidates(host=host, document_id=document_id, query=_BOND_HOLDINGS_QUERY)
+            elif fund_type in ("index_etf",) or (fund_type == "index_fund" and "QDII" in fund_name):
+                # QDII 基金持仓节标题为"所有权益投资明细"而非"股票投资明细"
+                routed = self._run_with_query_candidates(host=host, document_id=document_id, query=_QDII_HOLDINGS_QUERY)
         if routed.agent_result.failure is not None:
             return DisclosureAuditItem(name="holdings", status="missing", chapter=False, message="持仓章节未找到")
 
         has_table = any(c.locator.locator_kind is LocatorKind.TABLE for c in routed.agent_result.citations)
-        # equity 无表格且为债券基金时，尝试债券持仓查询
+        # equity 无表格时，按基金类型 fallback
         if not has_table and fund_name:
             fund_type, _ = infer_fund_type(fund_name)
             if fund_type == "bond_fund":
@@ -1755,6 +1759,13 @@ class FundReadingService:
                     bond_has_table = any(c.locator.locator_kind is LocatorKind.TABLE for c in bond_routed.agent_result.citations)
                     if bond_has_table:
                         routed = bond_routed
+                        has_table = True
+            elif fund_type in ("index_etf",) or (fund_type == "index_fund" and "QDII" in fund_name):
+                qdii_routed = self._run_with_query_candidates(host=host, document_id=document_id, query=_QDII_HOLDINGS_QUERY)
+                if qdii_routed.agent_result.failure is None:
+                    qdii_has_table = any(c.locator.locator_kind is LocatorKind.TABLE for c in qdii_routed.agent_result.citations)
+                    if qdii_has_table:
+                        routed = qdii_routed
                         has_table = True
         fields = []
         if has_table:
@@ -2078,6 +2089,7 @@ class FundReadingService:
                 fund_manager=fund_manager,
                 scale_info=scale_info,
                 report_year=request.report_year,
+                fund_name=request.fund_name,
             )
             risk_checklist = self.compute_risk_checklist(
                 fees=fee_data,
@@ -2085,6 +2097,7 @@ class FundReadingService:
                 fund_manager=fund_manager,
                 scale_info=scale_info,
                 report_year=request.report_year,
+                fund_name=request.fund_name,
             )
 
             # 3. 生成报告章节
@@ -2650,8 +2663,12 @@ class FundReadingService:
         fund_manager: FundManagerInfo | None = None,
         scale_info: ScaleInfo | None = None,
         report_year: int = 2024,
+        fund_name: str = "",
     ) -> SignalJudgment:
-        """计算确定性信号判断（6 指标评分模型，总分 135 归一化到 100）。
+        """计算确定性信号判断（fund_type 感知路由）。
+
+        被动基金（index_etf/index_fund/index_feeder）：3 指标 100 分制，
+        债券基金：5 指标（无风格漂移），主动基金：6 指标 135→100。
 
         参数:
             performance: 多年度业绩数据。
@@ -2660,32 +2677,160 @@ class FundReadingService:
             fund_manager: 基金经理信息（可选）。
             scale_info: 规模信息（可选）。
             report_year: 报告年份。
+            fund_name: 基金名称（用于 fund_type 推断）。
 
         返回:
             SignalJudgment，包含信号、归一化分数、指标明细和警告。
         """
-        scored = [
-            score_excess_returns(performance),
-            score_fee_rate(fees, report_year),
-            score_style_drift(holdings),
-            score_scale_risk(scale_info),
-            score_manager_change(fund_manager, report_year),
-            score_concentration(holdings),
-        ]
+        from .signal_scoring import _infer_fee_kwargs, get_applicable_indicators
 
-        indicators = tuple(to_signal_indicator(s) for s in scored)
-        warnings = tuple(
-            f"{s.name}：{s.detail}" for s in scored if not s.calculable
+        # 推断基金类型
+        fund_type = ""
+        if fund_name:
+            fund_type, _ = infer_fund_type(fund_name)
+
+        # 被动基金路由（非增强指数基金）
+        if fund_type in ("index_etf", "index_feeder") or (
+            fund_type == "index_fund" and fund_name and "增强" not in fund_name
+        ):
+            fee_kw = _infer_fee_kwargs(fund_name, fund_type)
+            return self._compute_passive_signal(
+                fees=fees,
+                holdings=holdings,
+                scale_info=scale_info,
+                report_year=report_year,
+                fee_kwargs=fee_kw,
+            )
+
+        # 债券基金路由
+        if fund_type == "bond_fund":
+            fee_kw = _infer_fee_kwargs(fund_name, fund_type)
+            return self._compute_bond_signal(
+                performance=performance,
+                fees=fees,
+                holdings=holdings,
+                fund_manager=fund_manager,
+                scale_info=scale_info,
+                report_year=report_year,
+                fee_kwargs=fee_kw,
+            )
+
+        # 主动基金 / 增强指数基金：现有 6 指标模型
+        applicable = dict(get_applicable_indicators(fund_type))
+        if fund_type == "index_fund" and fund_name and "增强" in fund_name:
+            applicable["超额收益趋势"] = True
+            applicable["风格漂移"] = True
+            applicable["基金经理变更"] = True
+
+        return self._compute_active_signal(
+            performance=performance,
+            fees=fees,
+            holdings=holdings,
+            fund_manager=fund_manager,
+            scale_info=scale_info,
+            report_year=report_year,
+            applicable=applicable,
         )
-        calculable_count = sum(1 for s in scored if s.calculable)
 
-        total_score = sum(s.score for s in scored)
-        total_max = sum(s.max_score for s in scored)
+    def _compute_active_signal(
+        self,
+        *,
+        performance: dict[int, dict[str, str]],
+        fees: dict[int, tuple[FeeRateItem, ...]],
+        holdings: dict[int, tuple[HoldingExtraction, ...]],
+        fund_manager: FundManagerInfo | None,
+        scale_info: ScaleInfo | None,
+        report_year: int,
+        applicable: dict[str, bool],
+    ) -> SignalJudgment:
+        """主动基金 6 指标评分（135→100 归一化）。"""
+
+        all_scored: list[tuple[str, _ScoredIndicator, bool]] = []
+        all_scored.append(("超额收益趋势", score_excess_returns(performance), applicable.get("超额收益趋势", True)))
+        all_scored.append(("费率水平", score_fee_rate(fees, report_year), applicable.get("费率水平", True)))
+        all_scored.append(("风格漂移", score_style_drift(holdings), applicable.get("风格漂移", True)))
+        all_scored.append(("规模风险", score_scale_risk(scale_info), applicable.get("规模风险", True)))
+        all_scored.append(("基金经理变更", score_manager_change(fund_manager, report_year), applicable.get("基金经理变更", True)))
+        all_scored.append(("持仓集中度", score_concentration(holdings), applicable.get("持仓集中度", True)))
+
+        applicable_scored = [(name, s) for name, s, appl in all_scored if appl]
+        skipped = [(name, s) for name, s, appl in all_scored if not appl]
+
+        total_applicable = len(applicable_scored)
+        indicators = tuple(to_signal_indicator(s) for _, s in applicable_scored)
+        indicators = indicators + tuple(
+            SignalIndicator(name=name, score=0, max_score=0, detail="不适用（该基金类型无需评估此指标）")
+            for name, _ in skipped
+        )
+        warnings = tuple(
+            f"{s.name}：{s.detail}" for _, s, _ in all_scored if not s.calculable
+        )
+        calculable_count = sum(1 for _, s, _ in all_scored if s.calculable)
+
+        total_score = sum(s.score for _, s in applicable_scored)
+        total_max = sum(s.max_score for _, s in applicable_scored)
         normalized = round(total_score / total_max * 100) if total_max > 0 else 0
 
-        if calculable_count < 3:
+        if total_applicable == 0:
+            signal = "🟡 需要关注"
+            warnings = ("无适用指标，默认 🟡 需要关注",) + warnings
+        elif calculable_count < 3:
             signal = "🟡 需要关注"
             warnings = (f"数据不足（可计算指标 {calculable_count}/6 < 3），默认 🟡 需要关注",) + warnings
+        elif normalized >= 75:
+            signal = "🟢 值得持有"
+        elif normalized >= 50:
+            signal = "🟡 需要关注"
+        else:
+            signal = "🔴 建议替换"
+
+        upgrade_event, downgrade_event = _compute_threshold_events(
+            [s for _, s in applicable_scored]
+        )
+
+        return SignalJudgment(
+            signal=signal,
+            normalized_score=normalized,
+            indicators=indicators,
+            data_completeness=calculable_count / 6,
+            warnings=warnings,
+            upgrade_event=upgrade_event,
+            downgrade_event=downgrade_event,
+        )
+
+    def _compute_passive_signal(
+        self,
+        *,
+        fees: dict[int, tuple[FeeRateItem, ...]],
+        holdings: dict[int, tuple[HoldingExtraction, ...]],
+        scale_info: ScaleInfo | None,
+        report_year: int,
+        fee_kwargs: dict,
+    ) -> SignalJudgment:
+        """被动基金 3 指标评分（40+30+30=100 直接分制）。"""
+        fee = score_fee_rate(fees, report_year, **fee_kwargs)
+        scale = score_scale_risk(scale_info, max_score=30)
+        concentration = score_concentration(holdings, max_score=30)
+
+        scored = [fee, scale, concentration]
+        total_score = fee.score + scale.score + concentration.score
+        total_max = fee.max_score + scale.max_score + concentration.max_score  # 100
+        normalized = round(total_score / total_max * 100) if total_max > 0 else 0
+        calculable_count = sum(1 for s in scored if s.calculable)
+
+        indicators = (
+            to_signal_indicator(fee),
+            to_signal_indicator(scale),
+            to_signal_indicator(concentration),
+            SignalIndicator(name="超额收益趋势", score=0, max_score=0, detail="不适用（被动基金目标为跟踪指数）"),
+            SignalIndicator(name="风格漂移", score=0, max_score=0, detail="不适用（被动基金应跟踪指数）"),
+            SignalIndicator(name="基金经理变更", score=0, max_score=0, detail="不适用（经理变更对被动基金影响较小）"),
+        )
+
+        warnings = tuple(s.detail for s in scored if not s.calculable)
+        if calculable_count < 2:
+            signal = "🟡 需要关注"
+            warnings = ("数据不足（可计算指标 < 2），默认 🟡 需要关注",) + warnings
         elif normalized >= 75:
             signal = "🟢 值得持有"
         elif normalized >= 50:
@@ -2699,7 +2844,63 @@ class FundReadingService:
             signal=signal,
             normalized_score=normalized,
             indicators=indicators,
-            data_completeness=calculable_count / 6,
+            data_completeness=calculable_count / 3,
+            warnings=warnings,
+            upgrade_event=upgrade_event,
+            downgrade_event=downgrade_event,
+        )
+
+    def _compute_bond_signal(
+        self,
+        *,
+        performance: dict[int, dict[str, str]],
+        fees: dict[int, tuple[FeeRateItem, ...]],
+        holdings: dict[int, tuple[HoldingExtraction, ...]],
+        fund_manager: FundManagerInfo | None,
+        scale_info: ScaleInfo | None,
+        report_year: int,
+        fee_kwargs: dict,
+    ) -> SignalJudgment:
+        """债券基金 5 指标评分（无风格漂移，110→100 归一化）。"""
+        excess = score_excess_returns(performance)
+        fee = score_fee_rate(fees, report_year, **fee_kwargs)
+        scale = score_scale_risk(scale_info)
+        manager = score_manager_change(fund_manager, report_year)
+        concentration = score_concentration(holdings)
+
+        scored = [excess, fee, scale, manager, concentration]
+        total_score = sum(s.score for s in scored)
+        total_max = sum(s.max_score for s in scored)  # 110
+        normalized = round(total_score / total_max * 100) if total_max > 0 else 0
+        calculable_count = sum(1 for s in scored if s.calculable)
+
+        indicators = (
+            to_signal_indicator(excess),
+            to_signal_indicator(fee),
+            to_signal_indicator(scale),
+            to_signal_indicator(manager),
+            to_signal_indicator(concentration),
+            SignalIndicator(name="风格漂移", score=0, max_score=0, detail="不适用（债券基金无需评估股票持仓重叠率）"),
+        )
+
+        warnings = tuple(s.detail for s in scored if not s.calculable)
+        if calculable_count < 2:
+            signal = "🟡 需要关注"
+            warnings = ("数据不足（可计算指标 < 2），默认 🟡 需要关注",) + warnings
+        elif normalized >= 75:
+            signal = "🟢 值得持有"
+        elif normalized >= 50:
+            signal = "🟡 需要关注"
+        else:
+            signal = "🔴 建议替换"
+
+        upgrade_event, downgrade_event = _compute_threshold_events(scored)
+
+        return SignalJudgment(
+            signal=signal,
+            normalized_score=normalized,
+            indicators=indicators,
+            data_completeness=calculable_count / 5,
             warnings=warnings,
             upgrade_event=upgrade_event,
             downgrade_event=downgrade_event,
@@ -2713,8 +2914,11 @@ class FundReadingService:
         fund_manager: FundManagerInfo | None = None,
         scale_info: ScaleInfo | None = None,
         report_year: int = 2024,
+        fund_name: str = "",
     ) -> tuple[RiskChecklistItem, ...]:
-        """计算 6 项风险清单检查。
+        """计算 6 项风险清单检查（fund_type 感知）。
+
+        不适用指标标记为「🟢 不适用」。
 
         参数:
             fees: 多年度费率数据。
@@ -2722,10 +2926,18 @@ class FundReadingService:
             fund_manager: 基金经理信息（可选）。
             scale_info: 规模信息（可选）。
             report_year: 报告年份。
+            fund_name: 基金名称（用于 fund_type 推断）。
 
         返回:
             6 项 RiskChecklistItem 的 tuple。
         """
+        from .signal_scoring import get_applicable_indicators
+
+        fund_type = ""
+        if fund_name:
+            fund_type, _ = infer_fund_type(fund_name)
+        applicable = get_applicable_indicators(fund_type)
+
         scored = [
             score_scale_risk(scale_info),
             score_manager_change(fund_manager, report_year),
@@ -2736,10 +2948,13 @@ class FundReadingService:
             score_concentration(holdings),
         ]
         risk_names = ["清盘风险", "基金经理变更", "风格漂移", "费率远超同类", "换手率异常", "持仓过度集中"]
+        indicator_keys = ["规模风险", "基金经理变更", "风格漂移", "费率水平", None, "持仓集中度"]
 
         items = []
-        for s, name in zip(scored, risk_names):
-            if s is None:
+        for s, name, key in zip(scored, risk_names, indicator_keys):
+            if key is not None and not applicable.get(key, True):
+                items.append(RiskChecklistItem(name, "🟢", "不适用（该基金类型无需评估）"))
+            elif s is None:
                 items.append(RiskChecklistItem(name, "🟢", "数据暂不可用"))
             else:
                 items.append(to_risk_item(s, risk_name=name))
@@ -2787,6 +3002,11 @@ class FundReadingService:
         warnings: list[str] = []
         chapters: list[ReportChapter] = []
 
+        # 推断基金类型（用于章节条件渲染）
+        fund_type = ""
+        if fund_name:
+            fund_type, _ = infer_fund_type(fund_name)
+
         # 计算压力测试
         stress_test = _compute_ch6_stress_test(performance, report_year, scale_info, fund_name)
 
@@ -2815,6 +3035,7 @@ class FundReadingService:
                 scale_info=scale_info,
                 stress_test=stress_test if chapter_id == 6 else None,
                 signal_judgment=signal_judgment,
+                fund_type=fund_type,
             )
 
             if content is None:
@@ -2905,12 +3126,16 @@ class FundReadingService:
         # Ch1-Ch6: 统一调用 generate_data_table() 获取结构化数据表
         if 1 <= chapter_id <= 6:
             from fund_agent.service.chapter_generator import generate_data_table
+            fund_type = ""
+            if fund_name:
+                fund_type, _ = infer_fund_type(fund_name)
             st = _compute_ch6_stress_test(performance, report_year, scale_info, fund_name) if chapter_id == 6 else None
             data_table = generate_data_table(
                 chapter_id, fund_code, fund_name, report_year,
                 performance, holdings, allocation, fees,
                 fund_manager, scale_info, evidence,
                 stress_test=st, signal_judgment=signal_judgment,
+                fund_type=fund_type,
             )
             if data_table:
                 return data_table

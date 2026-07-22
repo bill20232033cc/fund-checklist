@@ -4063,3 +4063,350 @@ def test_extract_holdings_stock_table_regression():
     assert holdings[0].quantity == "1,000,000"
     assert holdings[0].fair_value == "10,000,000.00"
     assert holdings[0].percentage == "5.00"
+
+
+# ── fund_type 感知评分框架测试 ─────────────────────────────────────
+
+
+class TestScoringFundTypeAware:
+    """评分框架 fund_type 感知：被动/QDII/债券基金指标适用性。"""
+
+    def test_applicable_indicators_active_fund(self):
+        """主动基金：全部 6 个指标适用。"""
+        from fund_agent.service.signal_scoring import get_applicable_indicators
+
+        app = get_applicable_indicators("active_fund")
+        assert app["超额收益趋势"] is True
+        assert app["费率水平"] is True
+        assert app["风格漂移"] is True
+        assert app["规模风险"] is True
+        assert app["基金经理变更"] is True
+        assert app["持仓集中度"] is True
+        assert sum(1 for v in app.values() if v) == 6
+
+    def test_applicable_indicators_index_etf(self):
+        """被动 ETF：超额收益、风格漂移、基金经理变更不适用。"""
+        from fund_agent.service.signal_scoring import get_applicable_indicators
+
+        app = get_applicable_indicators("index_etf")
+        assert app["超额收益趋势"] is False
+        assert app["费率水平"] is True
+        assert app["风格漂移"] is False
+        assert app["规模风险"] is True
+        assert app["基金经理变更"] is False
+        assert app["持仓集中度"] is True
+        assert sum(1 for v in app.values() if v) == 3
+
+    def test_applicable_indicators_index_fund(self):
+        """被动指数基金（非增强）：同 ETF，3 个指标不适用。
+        增强指数基金在评分时单独恢复全部指标。
+        """
+        from fund_agent.service.signal_scoring import get_applicable_indicators
+
+        app = get_applicable_indicators("index_fund")
+        assert app["超额收益趋势"] is False
+        assert app["风格漂移"] is False
+        assert app["基金经理变更"] is False
+        assert app["费率水平"] is True
+        assert app["规模风险"] is True
+        assert app["持仓集中度"] is True
+        assert sum(1 for v in app.values() if v) == 3
+
+    def test_applicable_indicators_index_feeder(self):
+        """联接基金：同被动 ETF，3 个指标不适用。"""
+        from fund_agent.service.signal_scoring import get_applicable_indicators
+
+        app = get_applicable_indicators("index_feeder")
+        assert app["超额收益趋势"] is False
+        assert app["风格漂移"] is False
+        assert app["基金经理变更"] is False
+        assert sum(1 for v in app.values() if v) == 3
+
+    def test_applicable_indicators_bond_fund(self):
+        """债券基金：风格漂移不适用（基于股票代码重叠率）。"""
+        from fund_agent.service.signal_scoring import get_applicable_indicators
+
+        app = get_applicable_indicators("bond_fund")
+        assert app["风格漂移"] is False
+        assert app["超额收益趋势"] is True
+        assert app["基金经理变更"] is True
+        assert sum(1 for v in app.values() if v) == 5
+
+    def test_applicable_indicators_unknown_type(self):
+        """未知基金类型：默认全部适用（兼容性）。"""
+        from fund_agent.service.signal_scoring import get_applicable_indicators
+
+        app = get_applicable_indicators("unknown_type")
+        assert app["超额收益趋势"] is True
+        assert sum(1 for v in app.values() if v) == 6
+
+    def test_signal_judgment_etf_skips_inapplicable(self):
+        """被动 ETF 评分：3 指标 100 分制（费率 40+规模 30+集中度 30），
+        不适用指标追加为「不适用」提示。
+        """
+        from fund_agent.service.models import FeeRateItem, HoldingExtraction, ScaleInfo
+
+        service = FundReadingService()
+        # 构建数据：费率 0.15%（A 股 ETF 绿档）、规模 5 亿、持仓集中度 7%
+        fees = {2025: (FeeRateItem(fee_name="管理费", rate="0.15%"),)}
+        holdings = {
+            2025: (
+                HoldingExtraction(
+                    rank=1, stock_code="000001", stock_name="平安银行",
+                    quantity="100", fair_value="500000",
+                    percentage="7.0%",
+                ),
+            ),
+        }
+        performance: dict = {}
+        scale_info = ScaleInfo(
+            total_shares_a="", total_shares_c="",
+            individual_investor_ratio="", management_holds="",
+            estimated_aum="5.0亿元",
+        )
+
+        result = service.compute_signal_judgment(
+            performance=performance, fees=fees, holdings=holdings,
+            scale_info=scale_info,
+            fund_name="华泰柏瑞中证红利低波动交易型开放式指数证券投资基金",
+            report_year=2025,
+        )
+
+        # 3 适用指标（40+30+30=100）+ 3 不适用
+        assert len(result.indicators) == 6
+        applicable = [i for i in result.indicators if i.max_score > 0]
+        skipped = [i for i in result.indicators if i.max_score == 0]
+        assert len(applicable) == 3
+        assert len(skipped) == 3
+        for s in skipped:
+            assert "不适用" in s.detail
+
+        # 费率 0.15% (<0.20 绿档) → 40/40, 规模 5亿 → 30/30, 集中度 7% → 30/30 = 100
+        assert result.normalized_score == 100
+
+    def test_signal_judgment_active_fund_all_applicable(self):
+        """主动基金：6 指标全部适用（回归测试）。"""
+        from fund_agent.service.models import FeeRateItem, HoldingExtraction
+
+        service = FundReadingService()
+        fees = {2025: (FeeRateItem(fee_name="管理费", rate="1.20%"),)}
+        holdings = {
+            2024: (
+                HoldingExtraction(rank=1, stock_code="000001", stock_name="A", quantity="100", fair_value="5000", percentage="6%"),
+                HoldingExtraction(rank=2, stock_code="000002", stock_name="B", quantity="100", fair_value="5000", percentage="5%"),
+            ),
+            2025: (
+                HoldingExtraction(rank=1, stock_code="000001", stock_name="A", quantity="100", fair_value="5000", percentage="6%"),
+                HoldingExtraction(rank=2, stock_code="000002", stock_name="B", quantity="100", fair_value="5000", percentage="5%"),
+            ),
+        }
+        performance = {2024: {"excess_return": "5%"}, 2025: {"excess_return": "3%"}}
+
+        result = service.compute_signal_judgment(
+            performance=performance, fees=fees, holdings=holdings,
+            fund_name="兴全商业模式优选混合型证券投资基金（LOF）",
+            report_year=2025,
+        )
+
+        assert len(result.indicators) == 6
+        # 全部适用 → 满分 135
+        applicable = [i for i in result.indicators if i.max_score > 0]
+        assert len(applicable) == 6
+
+    def test_signal_judgment_enhanced_index_all_applicable(self):
+        """增强指数基金：恢复全部 6 个指标。"""
+        from fund_agent.service.models import FeeRateItem, HoldingExtraction, ScaleInfo
+
+        service = FundReadingService()
+        fees = {2025: (FeeRateItem(fee_name="管理费", rate="1.00%"),)}
+        holdings = {
+            2024: (
+                HoldingExtraction(rank=1, stock_code="000001", stock_name="A", quantity="100", fair_value="5000", percentage="6%"),
+                HoldingExtraction(rank=2, stock_code="000002", stock_name="B", quantity="100", fair_value="5000", percentage="5%"),
+            ),
+            2025: (
+                HoldingExtraction(rank=1, stock_code="000001", stock_name="A", quantity="100", fair_value="5000", percentage="6%"),
+                HoldingExtraction(rank=2, stock_code="000002", stock_name="B", quantity="100", fair_value="5000", percentage="5%"),
+            ),
+        }
+        performance = {2024: {"excess_return": "5%"}, 2025: {"excess_return": "3%"}}
+        scale_info = ScaleInfo(total_shares_a="", total_shares_c="", individual_investor_ratio="", management_holds="", estimated_aum="3.0亿元")
+
+        result = service.compute_signal_judgment(
+            performance=performance, fees=fees, holdings=holdings,
+            scale_info=scale_info,
+            fund_name="招商中证1000指数增强型证券投资基金",
+            report_year=2025,
+        )
+        # 增强指数：全部 6 个指标适用
+        applicable = [i for i in result.indicators if i.max_score > 0]
+        assert len(applicable) == 6
+        # 确认超额收益 / 风格漂移 / 经理变更 未被标记为不适用
+        skipped = [i for i in result.indicators if "不适用" in i.detail]
+        assert len(skipped) == 0
+
+    def test_risk_checklist_etf_marks_inapplicable(self):
+        """被动 ETF 风险清单：不适用项标记为「不适用」。"""
+        from fund_agent.service.models import FeeRateItem, HoldingExtraction
+
+        service = FundReadingService()
+        fees = {2025: (FeeRateItem(fee_name="管理费", rate="0.50%"),)}
+        holdings = {
+            2025: (HoldingExtraction(rank=1, stock_code="000001", stock_name="A", quantity="100", fair_value="5000", percentage="7%"),),
+        }
+
+        items = service.compute_risk_checklist(
+            fees=fees, holdings=holdings,
+            fund_name="华泰柏瑞中证红利低波动交易型开放式指数证券投资基金",
+            report_year=2025,
+        )
+
+        assert len(items) == 6
+        # 基金经理变更、风格漂移 → 不适用
+        manager_item = [i for i in items if i.name == "基金经理变更"][0]
+        assert "不适用" in manager_item.detail
+        drift_item = [i for i in items if i.name == "风格漂移"][0]
+        assert "不适用" in drift_item.detail
+
+    def test_passive_etf_medium_fee_scores_yellow(self):
+        """被动 A 股 ETF 费率 0.35%（黄档 0.20-0.50）：得分 84/100。"""
+        from fund_agent.service.models import FeeRateItem, HoldingExtraction, ScaleInfo
+
+        service = FundReadingService()
+        fees = {2025: (FeeRateItem(fee_name="管理费", rate="0.35%"),)}
+        holdings = {
+            2025: (HoldingExtraction(rank=1, stock_code="000001", stock_name="A", quantity="100", fair_value="5000", percentage="7.0%"),),
+        }
+        scale_info = ScaleInfo(total_shares_a="", total_shares_c="", individual_investor_ratio="", management_holds="", estimated_aum="5.0亿元")
+
+        result = service.compute_signal_judgment(
+            performance={}, fees=fees, holdings=holdings, scale_info=scale_info,
+            fund_name="华泰柏瑞中证红利低波动交易型开放式指数证券投资基金",
+            report_year=2025,
+        )
+
+        # 费率 24/40 + 规模 30/30 + 集中度 30/30 = 84
+        assert result.normalized_score == 84
+        fee_ind = [i for i in result.indicators if i.name == "费率水平"][0]
+        assert fee_ind.max_score == 40
+        assert fee_ind.score == 24
+
+    def test_passive_qdii_etf_uses_qdii_thresholds(self):
+        """QDII ETF 使用 QDII 费率阈值（<0.80 绿档）。"""
+        from fund_agent.service.models import FeeRateItem, HoldingExtraction, ScaleInfo
+
+        service = FundReadingService()
+        # 0.75% → QDII 绿档 (<0.80)，但在 A 股 ETF 阈值下应为红档
+        fees = {2025: (FeeRateItem(fee_name="管理费", rate="0.75%"),)}
+        holdings = {
+            2025: (HoldingExtraction(rank=1, stock_code="000001", stock_name="A", quantity="100", fair_value="5000", percentage="7.0%"),),
+        }
+        scale_info = ScaleInfo(total_shares_a="", total_shares_c="", individual_investor_ratio="", management_holds="", estimated_aum="5.0亿元")
+
+        result = service.compute_signal_judgment(
+            performance={}, fees=fees, holdings=holdings, scale_info=scale_info,
+            fund_name="华安纳斯达克100ETF（QDII）",
+            report_year=2025,
+        )
+
+        fee_ind = [i for i in result.indicators if i.name == "费率水平"][0]
+        assert fee_ind.max_score == 40
+        assert fee_ind.score == 40  # <0.80 → 绿档满分
+        assert result.normalized_score == 100
+
+    def test_passive_feeder_uses_feeder_thresholds(self):
+        """联接基金使用联接基金费率阈值（<0.50 绿档）。"""
+        from fund_agent.service.models import FeeRateItem, HoldingExtraction, ScaleInfo
+
+        service = FundReadingService()
+        # 0.45% → 联接基金绿档 (<0.50)
+        fees = {2025: (FeeRateItem(fee_name="管理费", rate="0.45%"),)}
+        holdings = {
+            2025: (HoldingExtraction(rank=1, stock_code="000001", stock_name="A", quantity="100", fair_value="5000", percentage="7.0%"),),
+        }
+        scale_info = ScaleInfo(total_shares_a="", total_shares_c="", individual_investor_ratio="", management_holds="", estimated_aum="5.0亿元")
+
+        result = service.compute_signal_judgment(
+            performance={}, fees=fees, holdings=holdings, scale_info=scale_info,
+            fund_name="华泰柏瑞中证红利低波动ETF联接基金",
+            report_year=2025,
+        )
+
+        fee_ind = [i for i in result.indicators if i.name == "费率水平"][0]
+        assert fee_ind.max_score == 40
+        assert fee_ind.score == 40  # <0.50 → 绿档
+        assert result.normalized_score == 100
+
+    def test_bond_fund_uses_5_indicator_scoring(self):
+        """债券基金 5 指标评分（无风格漂移），bond 费率阈值。"""
+        from fund_agent.service.models import FeeRateItem, HoldingExtraction, ScaleInfo, FundManagerInfo
+
+        service = FundReadingService()
+        fees = {2025: (FeeRateItem(fee_name="管理费", rate="0.25%"),)}  # bond 绿档 <0.30
+        holdings = {
+            2024: (HoldingExtraction(rank=1, stock_code="000001", stock_name="A", quantity="100", fair_value="5000", percentage="6.0%"),),
+            2025: (HoldingExtraction(rank=1, stock_code="000001", stock_name="A", quantity="100", fair_value="5000", percentage="7.0%"),),
+        }
+        performance = {2024: {"excess_return": "3%"}, 2025: {"excess_return": "2%"}}
+        scale_info = ScaleInfo(total_shares_a="", total_shares_c="", individual_investor_ratio="", management_holds="", estimated_aum="10.0亿元")
+        fund_manager = FundManagerInfo(name="张三", tenure_start="2019-05-10", years_of_service="6", investment_strategy="", holds_fund="")
+
+        result = service.compute_signal_judgment(
+            performance=performance, fees=fees, holdings=holdings,
+            scale_info=scale_info, fund_manager=fund_manager,
+            fund_name="某某债券型证券投资基金",
+            report_year=2025,
+        )
+
+        assert len(result.indicators) == 6
+        applicable = [i for i in result.indicators if i.max_score > 0]
+        assert len(applicable) == 5  # 超额+费率+规模+经理+集中度
+        # 风格漂移不适用
+        drift_ind = [i for i in result.indicators if i.name == "风格漂移"][0]
+        assert "不适用" in drift_ind.detail
+        assert drift_ind.max_score == 0
+
+    def test_passive_total_max_is_100(self):
+        """被动基金 3 指标满分 = 100。"""
+        from fund_agent.service.models import FeeRateItem, HoldingExtraction, ScaleInfo
+
+        service = FundReadingService()
+        fees = {2025: (FeeRateItem(fee_name="管理费", rate="0.10%"),)}  # A 股 ETF 绿档
+        holdings = {
+            2025: (HoldingExtraction(rank=1, stock_code="000001", stock_name="A", quantity="100", fair_value="5000", percentage="7.0%"),),
+        }
+        scale_info = ScaleInfo(total_shares_a="", total_shares_c="", individual_investor_ratio="", management_holds="", estimated_aum="5.0亿元")
+
+        result = service.compute_signal_judgment(
+            performance={}, fees=fees, holdings=holdings, scale_info=scale_info,
+            fund_name="华泰柏瑞中证红利低波动交易型开放式指数证券投资基金",
+            report_year=2025,
+        )
+
+        applicable = [i for i in result.indicators if i.max_score > 0]
+        total_max = sum(i.max_score for i in applicable)
+        assert total_max == 100  # 40+30+30
+
+    def test_active_fund_unchanged_6_indicators(self):
+        """主动基金保持 6 指标 135→100 不变。"""
+        from fund_agent.service.models import FeeRateItem, HoldingExtraction, ScaleInfo
+
+        service = FundReadingService()
+        fees = {2025: (FeeRateItem(fee_name="管理费", rate="0.80%"),)}
+        holdings = {
+            2024: (HoldingExtraction(rank=1, stock_code="000001", stock_name="A", quantity="100", fair_value="5000", percentage="6.0%"),),
+            2025: (HoldingExtraction(rank=1, stock_code="000001", stock_name="A", quantity="100", fair_value="5000", percentage="7.0%"),),
+        }
+        performance = {2024: {"excess_return": "5%"}, 2025: {"excess_return": "3%"}}
+        scale_info = ScaleInfo(total_shares_a="", total_shares_c="", individual_investor_ratio="", management_holds="", estimated_aum="3.0亿元")
+
+        result = service.compute_signal_judgment(
+            performance=performance, fees=fees, holdings=holdings, scale_info=scale_info,
+            fund_name="兴全商业模式优选混合型证券投资基金（LOF）",
+            report_year=2025,
+        )
+
+        applicable = [i for i in result.indicators if i.max_score > 0]
+        assert len(applicable) == 6
+        total_max = sum(i.max_score for i in applicable)
+        assert total_max == 135
