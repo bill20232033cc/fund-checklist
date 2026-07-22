@@ -322,6 +322,7 @@ def _extract_year_from_filename(filename: str) -> int | None:
 _FUND_NAME_STOP_WORDS = (
     "交易型开放式", "证券投资基金", "联接基金", "灵活配置",
     "混合型", "债券型", "股票型", "指数型", "发起式",
+    "纯债", "混合", "债券",
 )
 
 
@@ -332,15 +333,18 @@ def _extract_fund_name_keyword(fund_name: str) -> str:
         fund_name: 基金全称，如 "安信企业价值优选混合型证券投资基金"。
 
     返回:
-        去除通用后缀后的关键词，如 "安信企业价值优选"。
+        去除通用后缀、份额类别后缀、规范化括号后的关键词。
 
     异常:
         ValueError: 关键词为空（基金名称全由通用后缀组成）时抛出。
     """
 
-    keyword = fund_name
+    # 规范化：全角括号 → 半角，去空格
+    keyword = fund_name.replace("（", "(").replace("）", ")").replace(" ", "")
     for stop in _FUND_NAME_STOP_WORDS:
         keyword = keyword.replace(stop, "")
+    # 去除尾部份额类别后缀（单个大写字母 A/B/C/D/E）
+    keyword = re.sub(r"[A-E]$", "", keyword)
     keyword = keyword.strip()
     if not keyword:
         raise ValueError(f"基金名称无法提取关键词: {fund_name}")
@@ -358,15 +362,16 @@ def _matches_fund_name(filename: str, fund_name_keyword: str) -> bool:
         文件名包含关键词时返回 True。
     """
 
-    if fund_name_keyword in filename:
+    # 规范化文件名：全角括号 → 半角
+    normalized_filename = filename.replace("（", "(").replace("）", ")")
+
+    if fund_name_keyword in normalized_filename:
         return True
 
-    # 处理关键词被停用词分割的情况（如 "交易型开放式" 在中间）
-    # 将关键词拆分为单字符，检查文件名是否包含所有字符
-    # 阈值 >= 4 降低短关键词误匹配概率
+    # 处理关键词被停用词分割的情况
     parts = [p for p in fund_name_keyword if p.strip()]
     if len(parts) >= 4:
-        return all(part in filename for part in parts)
+        return all(part in normalized_filename for part in parts)
 
     return False
 

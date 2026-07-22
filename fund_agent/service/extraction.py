@@ -153,6 +153,7 @@ _SHARE_CLASS_SCOPES = (_SHARE_SCOPE_A, _SHARE_SCOPE_C)
 _HOLDINGS_TOP_N = 10
 _HOLDINGS_QUERY = "股票投资明细"
 _BOND_HOLDINGS_QUERY = "前五名债券投资明细"
+_QDII_HOLDINGS_QUERY = "所有权益投资明细"
 _HOLDINGS_TABLE_MAX_ROWS = 15
 
 
@@ -1142,31 +1143,52 @@ class FundReadingService:
             document_id=document_id,
             query=query,
         )
-        # equity query 失败或债券基金持仓为空时，尝试债券持仓查询
+        # equity query 失败时，按基金类型 fallback
         equity_failed = routed.agent_result.failure is not None
-        if (equity_failed or True) and fund_name:
+        fund_type = ""
+        if equity_failed and fund_name:
             fund_type, _ = infer_fund_type(fund_name)
-            if fund_type == "bond_fund" and equity_failed:
+            if fund_type == "bond_fund":
                 query = _BOND_HOLDINGS_QUERY
                 routed = self._run_with_query_candidates(
                     host=host,
                     document_id=document_id,
                     query=query,
                 )
+            elif fund_type in ("index_etf",) or (fund_type == "index_fund" and "QDII" in fund_name):
+                # QDII 基金（ETF 或普通指数基金）持仓节标题为"权益投资明细"
+                query = _QDII_HOLDINGS_QUERY
+                routed = self._run_with_query_candidates(
+                    host=host,
+                    document_id=document_id,
+                    query=query,
+                )
+            elif fund_type == "index_feeder":
+                # 联接基金自身无持仓表，直接跳过 query 重试，走继承路径
+                pass
+        # index_feeder 自身无持仓表，跳过 query 直接走继承路径
+        holdings: list[HoldingExtraction] = []
+        _extraction_error = False  # 跟踪未分类异常
         if routed.agent_result.failure is not None:
-            return AnnualHoldingsResult(
-                document_id=document_id,
-                year=report_year,
-                holdings=(),
-                failure=routed.agent_result.failure,
-            )
-        try:
-            holdings = _extract_holdings_from_agent_result(
-                document_id=document_id,
-                result=routed.agent_result,
-                tool_service=tool_service,
-            )
-            # equity 成功但持仓为空且为债券基金时，尝试债券持仓查询
+            if fund_type != "index_feeder":
+                return AnnualHoldingsResult(
+                    document_id=document_id,
+                    year=report_year,
+                    holdings=(),
+                    failure=routed.agent_result.failure,
+                )
+        else:
+            try:
+                holdings = list(_extract_holdings_from_agent_result(
+                    document_id=document_id,
+                    result=routed.agent_result,
+                    tool_service=tool_service,
+                ))
+            except DocumentToolError:
+                pass  # 已分类错误，继续 fallback
+            except Exception:
+                _extraction_error = True  # 未分类异常，记录标记
+            # equity 成功但持仓为空时，按基金类型二次 fallback
             if not holdings and fund_name:
                 fund_type, _ = infer_fund_type(fund_name)
                 if fund_type == "bond_fund":
@@ -1176,28 +1198,43 @@ class FundReadingService:
                         query=_BOND_HOLDINGS_QUERY,
                     )
                     if bond_routed.agent_result.failure is None:
-                        bond_holdings = _extract_holdings_from_agent_result(
+                        try:
+                            bond_holdings = _extract_holdings_from_agent_result(
+                                document_id=document_id,
+                                result=bond_routed.agent_result,
+                                tool_service=tool_service,
+                            )
+                            if bond_holdings:
+                                holdings = list(bond_holdings)
+                        except DocumentToolError:
+                            pass
+                elif fund_type in ("index_etf",) or (fund_type == "index_fund" and "QDII" in fund_name):
+                    # QDII 基金：Agent query 可能匹配到资产组合汇总表而非持仓明细表，
+                    # 先尝试 query fallback，再直接扫描 QDII 格式表格
+                    qdii_routed = self._run_with_query_candidates(
+                        host=host,
+                        document_id=document_id,
+                        query=_QDII_HOLDINGS_QUERY,
+                    )
+                    if qdii_routed.agent_result.failure is None:
+                        try:
+                            qdii_holdings = _extract_holdings_from_agent_result(
+                                document_id=document_id,
+                                result=qdii_routed.agent_result,
+                                tool_service=tool_service,
+                            )
+                            if qdii_holdings:
+                                holdings = list(qdii_holdings)
+                        except DocumentToolError:
+                            pass
+                    # query fallback 仍为空时，直接扫描 QDII 列名格式的表格
+                    if not holdings:
+                        direct = _extract_qdii_holdings_from_tables(
                             document_id=document_id,
-                            result=bond_routed.agent_result,
                             tool_service=tool_service,
                         )
-                        if bond_holdings:
-                            holdings = bond_holdings
-        except DocumentToolError as exc:
-            return AnnualHoldingsResult(
-                document_id=document_id,
-                year=report_year,
-                holdings=(),
-                failure=ToolFailure(code=exc.code, message=exc.message),
-            )
-        except Exception:
-            return AnnualHoldingsResult(
-                document_id=document_id,
-                year=report_year,
-                holdings=(),
-                failure=ToolFailure(code=FailureCode.UNAVAILABLE, message="持仓字段抽取暂不可用"),
-            )
-
+                        if direct:
+                            holdings = list(direct)
         table_citation = None
         for citation in routed.agent_result.citations:
             if citation.locator.locator_kind is LocatorKind.TABLE:
@@ -1208,7 +1245,7 @@ class FundReadingService:
         holding_source = ""
         if not holdings and fund_name and repository is not None:
             fund_type, _ = infer_fund_type(fund_name)
-            if fund_type == "index_fund":
+            if fund_type in ("index_fund", "index_feeder"):
                 etf_info = _extract_target_etf_code(document_id, store)
                 if etf_info is not None:
                     etf_code, etf_name = etf_info
@@ -1225,10 +1262,14 @@ class FundReadingService:
                             if not etf_name:
                                 etf_name = str(report.get("fund_name", ""))
                             break
-                        elif not etf_code and etf_name and etf_name in str(report.get("fund_name", "")):
-                            etf_doc_id = str(report["document_id"])
-                            etf_code = str(report.get("fund_code", ""))
-                            break
+                        elif not etf_code and etf_name:
+                            # 名称匹配：规范化 "交易型开放式指数证券投资基金" ↔ "ETF"
+                            repo_name = str(report.get("fund_name", ""))
+                            if _fund_name_matches(etf_name, repo_name):
+                                etf_doc_id = str(report["document_id"])
+                                etf_code = str(report.get("fund_code", ""))
+                                etf_name = repo_name  # 使用仓库中的真实名称
+                                break
                     if etf_doc_id is not None:
                         try:
                             etf_store = repository.load_store(etf_doc_id)
@@ -1254,6 +1295,18 @@ class FundReadingService:
                                 message="目标 ETF 年报未导入，无法获取持仓数据",
                             ),
                         )
+
+        # 所有 fallback 路径走完后，若持仓为空且有未分类异常，返回 UNAVAILABLE
+        if not holdings and _extraction_error:
+            return AnnualHoldingsResult(
+                document_id=document_id,
+                year=report_year,
+                holdings=(),
+                failure=ToolFailure(
+                    code=FailureCode.UNAVAILABLE,
+                    message="持仓抽取过程中发生未分类异常",
+                ),
+            )
 
         return AnnualHoldingsResult(
             document_id=document_id,
@@ -1400,8 +1453,10 @@ class FundReadingService:
                         result=industry_routed.agent_result,
                         tool_service=tool_service,
                     )
-                except (DocumentToolError, Exception):
+                except DocumentToolError:
                     pass
+                except Exception:
+                    pass  # 资产配置非关键路径，继续
 
         table_citation = None
         for citation in routed.agent_result.citations:
@@ -1522,8 +1577,10 @@ class FundReadingService:
                 for fee in extracted_fees:
                     if not any(f.fee_name == fee.fee_name for f in fees):
                         fees.append(fee)
-            except (DocumentToolError, Exception):
+            except DocumentToolError:
                 continue
+            except Exception:
+                continue  # 费率抽取非关键路径，跳过该 spec
 
         if not fees:
             return AnnualFeeResult(
@@ -4358,6 +4415,31 @@ def _catalog_document_ids(catalog_path: Path) -> tuple[str, ...]:
 _HOLDINGS_COLUMN_NAMES = ("序号", "股票代码", "股票名称", "数量", "公允价值", "占基金资产净值比例")
 
 
+def _fund_name_matches(extracted_name: str, repo_name: str) -> bool:
+    """规范化匹配基金名称，处理 "交易型开放式指数" ↔ "ETF" 等等价表述。
+
+    参数:
+        extracted_name: 从报告中提取的基金名称。
+        repo_name: 仓库中的基金名称。
+
+    返回:
+        匹配成功返回 True。
+    """
+    if extracted_name in repo_name:
+        return True
+    # 规范化：将长形式替换为短形式后比较
+    normalized_extracted = extracted_name.replace("交易型开放式指数证券投资基金", "ETF").replace("交易型开放式指数", "ETF")
+    normalized_repo = repo_name.replace("交易型开放式指数证券投资基金", "ETF").replace("交易型开放式指数", "ETF")
+    if normalized_extracted in normalized_repo:
+        return True
+    # 反向：将短形式替换为长形式后比较
+    if "ETF" in extracted_name:
+        expanded = extracted_name.replace("ETF", "交易型开放式指数")
+        if expanded in repo_name:
+            return True
+    return False
+
+
 def _extract_target_etf_code(document_id: str, store: DoclingDocumentStore) -> tuple[str, str] | None:
     """从年报提取目标 ETF 代码和名称。
 
@@ -4369,7 +4451,7 @@ def _extract_target_etf_code(document_id: str, store: DoclingDocumentStore) -> t
     """
     sections = store.list_sections()
     target_refs: list[str] = []
-    keywords = ("投资目标", "投资范围", "基金基本情况", "基金简介")
+    keywords = ("投资目标", "投资范围", "基金基本情况", "基金简介", "目标基金")
     for section in sections:
         title = section.title or ""
         if any(kw in title for kw in keywords):
@@ -4382,6 +4464,17 @@ def _extract_target_etf_code(document_id: str, store: DoclingDocumentStore) -> t
             combined += sec.text + "\n"
         except DocumentToolError:
             pass
+        # 读取 section 内表格内容（基金简介等信息常在表格中）
+        for t_meta in store.list_tables():
+            if t_meta.section_ref != ref or not t_meta.table_ref:
+                continue
+            try:
+                tbl = store.read_table(t_meta.table_ref, max_rows=20)
+                if hasattr(tbl, "rows"):
+                    for row in tbl.rows:
+                        combined += " ".join(str(c).strip() for c in row) + "\n"
+            except (DocumentToolError, Exception):
+                pass
 
     if not combined:
         return None
@@ -4407,10 +4500,120 @@ def _extract_target_etf_code(document_id: str, store: DoclingDocumentStore) -> t
         if code == own_code:
             continue
         nearby = combined[max(0, cm.start() - 40):cm.end() + 40]
+        # 跳过"下属分级基金/交易代码"上下文中的代码（C类份额代码）
+        context_wide = combined[max(0, cm.start() - 80):cm.end() + 80]
+        if "分级" in context_wide or "交易代码" in context_wide:
+            continue
         if "ETF" in nearby:
             return code, ""
 
+    # Pattern 4: 从表格中提取目标 ETF 信息
+    # 联接基金年报的基础信息表格（如"基金简介"章节）含目标 ETF 名称和代码，
+    # 先按"基金主代码"精确匹配代码，再按名称模式匹配
+    all_tables = store.list_tables()
+    target_section_refs = set()
+    for section in sections:
+        title = section.title or ""
+        if any(kw in title for kw in ("目标基金", "基金简介", "基金基本情况")):
+            target_section_refs.add(section.section_ref)
+
+    # 收集目标 section 下所有表格
+    target_tables_text = ""
+    for table_meta in all_tables:
+        if table_meta.section_ref not in target_section_refs or not table_meta.table_ref:
+            continue
+        try:
+            table = store.read_table(table_meta.table_ref, max_rows=20)
+        except (DocumentToolError, Exception):
+            continue
+        if not hasattr(table, "rows") or not table.rows:
+            continue
+        for row in table.rows:
+            row_text = " ".join(str(c).strip() for c in row)
+            # 精确匹配"基金主代码"行中的6位代码
+            if "基金主代码" in row_text:
+                code_match = re.search(r'(\d{6})', row_text)
+                if code_match and code_match.group(1) != own_code:
+                    return code_match.group(1), ""
+            target_tables_text += " ".join(
+                str(c).strip().replace(" ", "") for c in row
+            ) + " "
+
+    if target_tables_text:
+        # Pattern 4a: 匹配 "xxx交易型开放式指数" 前缀
+        m4 = re.search(r'([一-龥A-Za-z0-9]+交易型开放式指数)', target_tables_text)
+        if m4:
+            etf_name = m4.group(1).replace("联接基金", "")
+            return "", etf_name
+        # Pattern 4b: ETF 短名称
+        m5 = re.search(r'([一-龥]+ETF)', target_tables_text)
+        if m5:
+            return "", m5.group(1)
+
     return None
+
+_QDII_COLUMN_KEYWORDS = ("证券代码", "公司名称")
+
+
+def _extract_qdii_holdings_from_tables(
+    *,
+    document_id: str,
+    tool_service: FundDocumentToolService,
+) -> tuple[HoldingExtraction, ...] | None:
+    """直接扫描文档表格，查找 QDII 格式持仓表并抽取数据。
+
+    当 Agent citation 未能正确引用 QDII 持仓表时的兜底方案。
+
+    参数:
+        document_id: 文档 ID。
+        tool_service: 文档工具服务。
+
+    返回:
+        持仓列表；未找到 QDII 表时返回 None。
+    """
+    tables = tool_service.list_tables(document_id)
+    for table_meta in tables:
+        if not table_meta.table_ref:
+            continue
+        # 快速检查表头是否含 QDII 特征列名
+        header_table = tool_service.read_table(document_id, table_meta.table_ref, max_rows=1)
+        if isinstance(header_table, ToolFailure) or not header_table.rows:
+            continue
+        header_text = "".join(cell.strip().replace(" ", "") for cell in header_table.rows[0])
+        if not all(kw in header_text for kw in _QDII_COLUMN_KEYWORDS):
+            continue
+        # 命中 QDII 表，读取全部数据行
+        full_table = tool_service.read_table(document_id, table_meta.table_ref, max_rows=_HOLDINGS_TABLE_MAX_ROWS)
+        if isinstance(full_table, ToolFailure) or not full_table.rows:
+            continue
+        column_indexes = _holdings_column_indexes(full_table.rows)
+        if column_indexes is None:
+            continue
+        holdings: list[HoldingExtraction] = []
+        _extraction_error = False  # 跟踪未分类异常
+        for row in full_table.rows[1:]:  # 跳过 header
+            if len(row) <= max(column_indexes.values()):
+                continue
+            stock_code = row[column_indexes["stock_code"]].strip()
+            stock_name = row[column_indexes["stock_name"]].strip()
+            quantity = row[column_indexes.get("quantity", 0)].strip() if "quantity" in column_indexes else ""
+            fair_value = row[column_indexes.get("fair_value", 0)].strip() if "fair_value" in column_indexes else ""
+            percentage = row[column_indexes["percentage"]].strip()
+            if not stock_code and not stock_name:
+                continue
+            holdings.append(HoldingExtraction(
+                rank=len(holdings) + 1,
+                stock_code=stock_code,
+                stock_name=stock_name,
+                quantity=quantity,
+                fair_value=fair_value,
+                percentage=percentage,
+            ))
+        if holdings:
+            return tuple(holdings[:_HOLDINGS_TOP_N])
+    return None
+
+
 def _extract_holdings_from_agent_result(
     *,
     document_id: str,
@@ -4638,9 +4841,12 @@ def _holdings_column_indexes(rows: tuple[tuple[str, ...], ...]) -> dict[str, int
     mapping: dict[str, int] = {}
     for idx, cell in enumerate(header):
         cell_clean = cell.strip().replace(" ", "")
-        if "股票代码" in cell_clean:
+        if "股票代码" in cell_clean or "证券代码" in cell_clean:
             mapping["stock_code"] = idx
         elif "股票名称" in cell_clean:
+            mapping["stock_name"] = idx
+        elif "公司名称" in cell_clean and "stock_name" not in mapping:
+            # QDII 持仓表列名：公司名称（中文）/ 公司名称（英文）
             mapping["stock_name"] = idx
         elif "数量" in cell_clean:
             mapping["quantity"] = idx
@@ -4649,7 +4855,10 @@ def _holdings_column_indexes(rows: tuple[tuple[str, ...], ...]) -> dict[str, int
         elif "占基金资产净值比例" in cell_clean or "占比" in cell_clean:
             mapping["percentage"] = idx
 
-    required = ("stock_code", "stock_name", "percentage")
+    # 注意：不将 stock_name 映射到 stock_code，避免语义错误。
+    # QDII 表若无"证券代码"列，stock_code 留空由上层处理。
+
+    required = ("stock_name", "percentage")
     if all(k in mapping for k in required):
         return mapping
     return None
@@ -4888,6 +5097,8 @@ def _extract_fee_rates_from_agent_result(
 
 STRESS_THRESHOLDS: dict[str, tuple[float, float, float]] = {
     "index_fund": (-0.30, -0.50, -0.70),
+    "index_etf": (-0.30, -0.50, -0.70),
+    "index_feeder": (-0.30, -0.50, -0.70),
     "bond_fund": (-0.05, -0.10, -0.20),
     "active_fund": (-0.25, -0.45, -0.65),
 }
@@ -4900,9 +5111,19 @@ def infer_fund_type(fund_name: str) -> tuple[str, bool]:
         fund_name: 基金名称。
 
     返回:
-        (fund_type, inferred) — fund_type 为 index_fund/bond_fund/active_fund，
+        (fund_type, inferred) — fund_type 为 index_etf/index_feeder/index_fund/bond_fund/active_fund，
         inferred 为 True 表示由关键词匹配推断。
     """
+    if "ETF联接" in fund_name or "ETF联接" in fund_name.replace(" ", ""):
+        return "index_feeder", True
+    if "ETF" in fund_name:
+        return "index_etf", True
+    if "联接" in fund_name:
+        return "index_feeder", True
+    # "交易型开放式" 是 ETF 的法定名称特征，必须在 "指数" 之前检查
+    # 例：华泰柏瑞中证红利低波动交易型开放式指数证券投资基金
+    if "交易型开放式" in fund_name:
+        return "index_etf", True
     if "指数" in fund_name:
         return "index_fund", True
     if "债券" in fund_name or "债" in fund_name:

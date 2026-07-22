@@ -525,7 +525,7 @@ def generate_data_table(
         # 压力测试
         if stress_test:
             lines.extend(["", "## 压力测试"])
-            fund_type_labels = {"index_fund": "指数基金", "bond_fund": "债券基金", "active_fund": "主动基金"}
+            fund_type_labels = {"index_fund": "指数基金", "index_etf": "ETF", "index_feeder": "联接基金", "bond_fund": "债券基金", "active_fund": "主动基金"}
             lines.append(f"- 基金类型: {fund_type_labels.get(stress_test.fund_type, stress_test.fund_type)}")
             lines.append(f"- 类型判定: {'关键词推断' if stress_test.fund_type_inferred else '显式指定'}")
             if stress_test.current_scale_billion is not None:
