@@ -516,6 +516,36 @@ def generate_data_table(
             if fund_manager and not fund_manager.tenure_start:
                 stage = "转型期"
                 stage_reason = "基金经理信息缺失，可能涉及变更"
+        # 资产配置结构转型检测（权益→基金大幅切换 → 转型期，优先级高于建仓期）
+        alloc_years = sorted(allocation.keys())
+        if len(alloc_years) >= 2 and stage != "转型期":
+            earliest_year = alloc_years[0]
+            latest_year = alloc_years[-1]
+
+            def _sum_alloc(items: tuple[AssetAllocationItem, ...], keyword: str) -> float:
+                total = 0.0
+                for item in items:
+                    if keyword in item.category:
+                        try:
+                            total += float(item.amount.replace(",", ""))
+                        except (ValueError, AttributeError):
+                            pass
+                return total
+
+            earliest_equity = _sum_alloc(allocation[earliest_year], "权益") + _sum_alloc(allocation[earliest_year], "股票")
+            latest_equity = _sum_alloc(allocation[latest_year], "权益") + _sum_alloc(allocation[latest_year], "股票")
+            earliest_fund = _sum_alloc(allocation[earliest_year], "基金")
+            latest_fund = _sum_alloc(allocation[latest_year], "基金")
+
+            if earliest_equity > 0 and latest_equity < earliest_equity * 0.2:
+                if earliest_fund < 10000 and latest_fund > earliest_fund * 10:
+                    stage = "转型期"
+                    stage_reason = (
+                        f"资产配置结构转型：权益投资从{earliest_year}年{earliest_equity:,.0f}降至"
+                        f"{latest_year}年{latest_equity:,.0f}（降幅>80%），"
+                        f"基金投资从{earliest_fund:,.0f}增至{latest_fund:,.0f}（>10倍）"
+                    )
+
         # 建仓期检测
         if fund_manager and fund_manager.tenure_start:
             try:
@@ -541,6 +571,20 @@ def generate_data_table(
         lines.append("")
         lines.append("阶段优先级：转型期 > 建仓期 > 膨胀期 > 萎缩期 > 稳定期")
         lines.append("时间窗口：同比（当前年 vs 上一年）")
+
+        # 信号评分注入（在阶段判定之后、关键变化指标之前）
+        if signal_judgment is not None:
+            lines.extend(["", "## 综合信号评分"])
+            lines.append(f"- 综合信号：{signal_judgment.signal}")
+            lines.append(f"- 标准化评分：{signal_judgment.normalized_score:.0f}/100")
+            lines.append(f"- 数据完整度：{signal_judgment.data_completeness:.0%}（{int(signal_judgment.data_completeness * len(signal_judgment.indicators))}/{len(signal_judgment.indicators)}）")
+            if signal_judgment.warnings:
+                for w in signal_judgment.warnings:
+                    lines.append(f"- :warning: {w}")
+            lines.extend(["", "| 指标 | 得分 | 满分 | 详情 |",
+                          "|------|------|------|------|"])
+            for ind in signal_judgment.indicators:
+                lines.append(f"| {ind.name} | {ind.score} | {ind.max_score} | {ind.detail} |")
 
         # 预计算关键变化指标（避免 LLM 派生计算触发 hallucination）
         lines.extend(["", "## 关键变化指标（预计算）"])
