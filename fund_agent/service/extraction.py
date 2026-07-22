@@ -3305,6 +3305,7 @@ class FundReadingService:
         返回:
             Markdown 文件路径。
         """
+        work_dir = Path(work_dir) if not isinstance(work_dir, Path) else work_dir
 
         output_dir = work_dir / "reports"
         output_dir.mkdir(parents=True, exist_ok=True)
