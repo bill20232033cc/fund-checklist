@@ -1707,3 +1707,226 @@ Phase 3.5/3.6 声称的 "6/6 达标" 基于降级路径掩盖了持仓抽取层�
 **阻塞条件**：修复持仓抽取 Bug 1-3 + 补充端到端自动化测试 + 重新验证后，Phase 5 Gate 方可解除。
 
 详见 `.checkpoint-2026-07-22-prephase5-audit.md`。
+
+---
+
+## Phase 5 Gate 重新审计（2026-07-22 晚间）
+
+> **结论：Phase 5 Gate 已解除。**
+
+持仓抽取 Bug 1-4 全部修复（提交 `9a2d0ef` + 本轮修复）：
+
+| Bug | 根因 | 修复 |
+|-----|------|------|
+| Bug 1 | `infer_fund_type` 不识别 ETF/联接 | 新增 `index_etf`/`index_feeder` 类型 |
+| Bug 2 | 联接基金继承条件过窄 | `index_fund` → `(index_fund, index_feeder)` |
+| Bug 3 | QDII 持仓查询词不匹配 | `_QDII_HOLDINGS_QUERY` + 直扫兜底 |
+| Bug 4 | QDII 列名不匹配 | `_holdings_column_indexes` 适配证券代码/公司名称 |
+
+**端到端验证**：
+- 159632（QDII ETF）：8 条持仓 ✅
+- 040046（联接基金）：8 条持仓（继承自 159632）✅
+- 001564（主动权益）：10 条持仓 ✅（原有）
+- 023072（债券基金）：8 条持仓 ✅（原有）
+
+**测试**：250 passed（extraction 131 + agent 14 + document_tools 40 + cli 65）
+
+**DS Review**：NEEDS_FIX → 修复 2 项（fund_type 初始化 + except Exception 安全网）→ 145 passed
+
+---
+
+## Phase 6：模板框架适配 + 基金类型感知
+
+> 启动时间：2026-07-22
+> 前置条件：Phase 5 Gate 已解除 ✅
+> 设计来源：`docs/fund-analysis-template-draft.md`（preferred_lens 已设计未接入）、dayu-agent 三层模板架构
+
+### 目标
+
+将 `fund-analysis-template-draft.md` 中已设计的 `preferred_lens`（7 类基金条件渲染）接入 generate 流程，使报告内容根据基金类型自动适配；同时修复数据抽取层的已知缺陷。
+
+### 非目标
+
+- 不引入 LLM 自主工具调用（Phase 5 范围）
+- 不新增 `ask`/`interactive`/`streaming` 入口
+- 不改变 ChapterContract 结构（Phase 3.6 已完成）
+
+### Slice 列表
+
+| Slice | 内容 | 类型 | 依赖 |
+|-------|------|------|------|
+| **6A** | 净值增长率列匹配修复 | Bug fix | 无 |
+| **6B** | 基金经理/规模数据接入报告 | 数据接入 | 无 |
+| **6C** | `preferred_lens` 接入 generate 流程 | 模板适配 | 6A |
+| **6D** | 评分框架 fund_type 感知 | 评分调整 | 6C |
+| **6E** | 端到端验证 + DS Review | 验收 | 6A-6D |
+
+---
+
+### Slice 6A：净值增长率列匹配修复
+
+**问题**：2024/2025 年报的业绩表列头被 PDF 提取截断（"份额净值增长"缺"率"），导致 `_performance_column_indexes` 匹配失败。
+
+**核实结果**：
+- 2023 年报：列头完整（"份额净值增长率①"），匹配成功
+- 2024/2025 年报：列头截断（"份额净值增长"），关键词 "份额净值增长率" 不匹配
+- 数据实际存在于 table-0011 的 col[1] 和 col[3]
+
+**修复方案**：在 `_ANNUAL_PERFORMANCE_EXTRACTION_SPECS` 和 `_PERFORMANCE_RETURN_EXTRACTION_SPECS` 中增加 fallback 关键词：
+- `column_keywords=("份额净值增长率", "份额净值增长")` — 先精确匹配，失败后用截断形式
+- `column_keywords=("业绩比较基准收益率", "业绩比较基准收益")` — 同理
+
+**allowed write set**：
+- `fund_agent/service/extraction.py`（`_PERFORMANCE_RETURN_EXTRACTION_SPECS` + `_ANNUAL_PERFORMANCE_EXTRACTION_SPECS`）
+- `tests/fund/service/test_extraction.py`
+
+**验证命令**：
+```bash
+uv run pytest tests/fund/service/test_extraction.py -q -k "performance"
+```
+
+**stop conditions**：
+- 2023 年报现有匹配回退
+- 其他基金类型业绩抽取回归
+
+---
+
+### Slice 6B：基金经理/规模数据接入报告
+
+**现状**：`_extract_fund_manager`（L2307）和 `_extract_scale_info`（L2444）已实现，但 `generate` 命令未调用，报告中基金经理和规模信息为空。
+
+**修复方案**：
+1. 在 `generate` 流程中调用 `_extract_fund_manager` 和 `_extract_scale_info`
+2. 将结果注入 Ch1（基本信息）和 Ch5（规模与变动）
+3. 基金经理信息：姓名 + 任职日期
+4. 规模信息：期末净资产 / 份额
+
+**allowed write set**：
+- `fund_agent/service/extraction.py`（generate 流程）
+- `fund_agent/service/chapter_generator.py`（Ch1/Ch5 数据注入）
+- `tests/fund/service/test_chapter_generator.py`
+
+**验证命令**：
+```bash
+uv run pytest tests/fund/service/ -q -k "manager or scale or chapter"
+```
+
+**stop conditions**：
+- 基金经理信息抽取引入 hallucination
+- 规模数据与年报不符
+
+---
+
+### Slice 6C：`preferred_lens` 接入 generate 流程
+
+**现状**：`fund-analysis-template-draft.md` 已设计 `preferred_lens`（7 类基金：default/index_fund/active_fund/bond_fund/enhanced_index/qdii_fund/fof_fund），每类有 `statements`（优先回答什么）和 `facets_any`（子类）。但 generate 命令是硬编码的，不读取 preferred_lens。
+
+**设计方案**（学 dayu-agent 三层模板）：
+
+1. **infer 阶段**：`infer_fund_type`（已实现）确定基金类型
+2. **模板选择阶段**：根据 fund_type 从模板中提取对应的 `preferred_lens` 条目
+3. **渲染阶段**：将 `preferred_lens.statements` 注入 LLM prompt，作为"优先回答什么"的指引
+4. **降级处理**：数据缺失时使用 `when_evidence_missing` 声明，而非整个章节失败
+
+**具体实现**：
+1. 解析 `fund-analysis-template-draft.md` 中的 `preferred_lens` JSON
+2. 在 `PromptComposer` 中新增 `preferred_lens` 字段
+3. LLM prompt 模板增加 `{{ preferred_lens_statements }}` 占位符
+4. `generate` 流程根据 `infer_fund_type` 结果选择对应的 lens
+
+**allowed write set**：
+- `fund_agent/service/extraction.py`（模板解析）
+- `fund_agent/service/chapter_generator.py`（prompt 注入）
+- `fund_agent/service/template_loader.py`（preferred_lens 解析，如存在）
+- `tests/fund/service/test_preferred_lens.py`
+
+**验证命令**：
+```bash
+uv run pytest tests/fund/service/ -q -k "preferred_lens or template"
+# 端到端
+uv run fund-checklist generate --fund-code 159632 --fund-name "华安纳斯达克100ETF（QDII）" --year 2025 --work-dir .fund_checklist_e2e_159632
+```
+
+**stop conditions**：
+- preferred_lens 注入破坏现有 Ch1-6 输出
+- LLM prompt 超出 token 限制
+
+---
+
+### Slice 6D：评分框架 fund_type 感知
+
+**问题**：当前 Ch7 评分对所有基金类型使用相同权重（超额收益 25 分、经理变更 20 分等）。被动 ETF 没有超额收益和经理变更，导致评分偏低（41/100），非基金本身差。
+
+**设计方案**：
+
+| 指标 | 主动基金 | 被动 ETF/指数 | 债券基金 | 联接基金 |
+|------|---------|-------------|---------|---------|
+| 超额收益趋势 | 25 | 0（跳过）→ 跟踪误差 25 | 10 | 继承目标 ETF |
+| 费率水平 | 25 | 30（被动基金核心） | 25 | 25 |
+| 风格漂移 | 25 | 10（被动基金无漂移） | 20 | 10 |
+| 规模风险 | 25 | 25 | 25 | 25 |
+| 经理变更 | 20 | 0（跳过）→ 跟踪方法稳定性 20 | 20 | 0 |
+| 持仓集中度 | 15 | 15 | 15 | 15 |
+
+**实现**：
+1. 在 `signal_scoring.py` 中新增 `ScoringWeights` 按 fund_type 配置
+2. `infer_fund_type` 结果传入评分函数
+3. 跳过的指标不参与归一化（总分仍为 100）
+4. 联接基金评分 = 目标 ETF 评分（继承）
+
+**allowed write set**：
+- `fund_agent/service/signal_scoring.py`
+- `fund_agent/service/chapter_generator.py`（Ch7 注入）
+- `tests/fund/service/test_signal_scoring.py`
+
+**验证命令**：
+```bash
+uv run pytest tests/fund/service/ -q -k "signal_scoring or scoring"
+```
+
+**stop conditions**：
+- 现有主动基金评分回退
+- 总分不为 100
+
+---
+
+### Slice 6E：端到端验证 + DS Review
+
+**验证范围**：4 类基金 × 全部 Slice
+
+| 基金 | 类型 | 验证点 |
+|------|------|--------|
+| 159632 | QDII ETF | 净值增长率抽取、preferred_lens=qdii_fund、评分权重调整 |
+| 040046 | 联接基金 | 继承路径、评分=目标 ETF |
+| 001564 | 主动权益 | 基金经理/规模接入、preferred_lens=active_fund |
+| 023072 | 债券基金 | preferred_lens=bond_fund、评分权重调整 |
+
+**验证命令**：
+```bash
+# 全量测试
+uv run pytest tests/ -q
+
+# 四基金 generate
+for code in 159632 040046 001564 023072; do
+  uv run fund-checklist generate --fund-code $code --fund-name "test" --year 2025 --work-dir .fund_checklist_e2e_$code
+done
+
+# 审计
+for code in 159632 040046 001564 023072; do
+  uv run fund-checklist audit --fund-code $code --year 2025 --work-dir .fund_checklist_e2e_$code
+done
+```
+
+**DS Review**：全部 Slice 完成后提交完整 diff。
+
+---
+
+### Phase 6 总体验收标准
+
+1. 159632 净值增长率抽取成功（2022-2025 全部）
+2. 四类基金报告中基金经理/规模信息非空
+3. preferred_lens 根据 fund_type 自动选择并注入 prompt
+4. 被动 ETF 评分 ≥60（当前 41，调整后应显著提升）
+5. 现有主动基金评分不回退
+6. 全量测试通过（250+ passed）
+7. DS Review ACCEPTED
