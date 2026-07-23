@@ -215,3 +215,10 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - 所有工具输出必须可溯源到年报 locator。
 - 所有外部来源、PDF、Docling、parser 失败必须 fail-closed 或显式分类。
 - 输出下一步时必须给出最小可执行验证问题或命令。
+
+## 多 Agent 协作铁律
+
+1. **代码实现默认派给 DS（tmux agents:0.1），Controller 做 review**
+2. **发送指令给 DS 必须带 Enter（tmux send-keys 最后有 Enter）**
+3. **发送新任务前必须 `/clear` 清理 DS 上下文（等 2 秒确认）**
+4. **不要让用户提醒以上三条**
