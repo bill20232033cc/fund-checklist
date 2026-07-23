@@ -2336,6 +2336,20 @@ class FundReadingService:
         citations = {a.year: a.citation for a in result.series.annual_allocations}
         return allocation, citations
 
+    @staticmethod
+    def _is_numeric_text(text: str) -> bool:
+        """P0-2: 检测文本是否为纯数值（如合计行的金额"2,408,575.95"）。"""
+        cleaned = text.strip().replace(",", "").replace("，", "")
+        if not cleaned:
+            return False
+        if re.match(r"^-?[\d.]+$", cleaned):
+            try:
+                float(cleaned)
+                return True
+            except ValueError:
+                pass
+        return False
+
     def _extract_fund_manager(
         self,
         fund_code: str,
@@ -2405,13 +2419,18 @@ class FundReadingService:
                     if hasattr(t, "section_ref") and t.section_ref == hit.section_ref:
                         table = tool_service.read_table(doc_id, t.table_ref, max_rows=5)
                         if hasattr(table, "rows") and len(table.rows) >= 3:
-                            data_row = table.rows[2] if len(table.rows) > 2 else table.rows[1]
-                            if len(data_row) >= 5:
-                                name = str(data_row[0]).strip()
-                                tenure_start = str(data_row[2]).strip()
-                                years_of_service = str(data_row[4]).strip()
-                                matched = True
-                                break
+                            # P0-2: 遍历数据行，跳过合计行（姓名列为纯数值）
+                            for row_idx in range(2, len(table.rows)):
+                                data_row = table.rows[row_idx]
+                                if len(data_row) >= 5:
+                                    candidate_name = str(data_row[0]).strip()
+                                    if self._is_numeric_text(candidate_name):
+                                        continue
+                                    name = candidate_name
+                                    tenure_start = str(data_row[2]).strip()
+                                    years_of_service = str(data_row[4]).strip()
+                                    matched = True
+                                    break
                 # fallback: 按列头关键词匹配（姓名 + 从业年限）
                 # 注：表头可能跨两行（Row0: 姓名/职务/期限/证券从业年限, Row1: 任职日期/离任日期）
                 if not matched:
@@ -2426,13 +2445,18 @@ class FundReadingService:
                             if "姓名" in header_normalized and "从业" in header_normalized:
                                 full_table = tool_service.read_table(doc_id, t.table_ref, max_rows=5)
                                 if hasattr(full_table, "rows") and len(full_table.rows) >= 3:
-                                    data_row = full_table.rows[2]
-                                    if len(data_row) >= 5:
-                                        name = str(data_row[0]).strip()
-                                        tenure_start = str(data_row[2]).strip()
-                                        years_of_service = str(data_row[4]).strip()
-                                        matched = True
-                                        break
+                                    # P0-2: 遍历数据行，跳过合计行（姓名列为纯数值）
+                                    for row_idx in range(2, len(full_table.rows)):
+                                        data_row = full_table.rows[row_idx]
+                                        if len(data_row) >= 5:
+                                            candidate_name = str(data_row[0]).strip()
+                                            if self._is_numeric_text(candidate_name):
+                                                continue
+                                            name = candidate_name
+                                            tenure_start = str(data_row[2]).strip()
+                                            years_of_service = str(data_row[4]).strip()
+                                            matched = True
+                                            break
                 break
 
         # 搜索投资策略

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from fund_agent.fund.document_tools.models import Citation
 from .models import (
@@ -46,9 +49,14 @@ def _safe_float_pct(value: str | None) -> float:
     # 去除百分号
     value = value.rstrip('%')
     try:
-        return float(value)
+        result = float(value)
     except (ValueError, TypeError):
         return 0.0
+    # P0-1: 非百分比字段可能被误解析为极大值；债券杠杆基金合法百分比可超100，>500 视为异常
+    if result > 500:
+        logger.warning("_safe_float_pct: value >500%% clamped to 0 (raw=%r, parsed=%.2f)", value, result)
+        return 0.0
+    return result
 
 
 LLM_CHAPTER_SYSTEM_PROMPT = (
