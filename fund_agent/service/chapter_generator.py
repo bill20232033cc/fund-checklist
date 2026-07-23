@@ -29,6 +29,28 @@ from fund_agent.service.prompt_composer import PromptComposer as _PromptComposer
 _PROMPTS_DIR = _Path(__file__).parent / "prompts"
 _PROMPT_COMPOSER = _PromptComposer(template_dir=_PROMPTS_DIR)
 
+def _safe_float_pct(value: str | None) -> float:
+    """安全转换持仓百分比为float：过滤中文、全角符号、千分位逗号。"""
+    if not value:
+        return 0.0
+    value = value.strip()
+    if not value or value in ("-", "—"):
+        return 0.0
+    # 包含中文字符则跳过（如表头文字"数量（份）"）
+    if re.search(r'[一-鿿㐀-䶿]', value):
+        return 0.0
+    # 全角减号 → 普通减号
+    value = value.replace('－', '-')
+    # 去除千分位逗号
+    value = value.replace(',', '')
+    # 去除百分号
+    value = value.rstrip('%')
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return 0.0
+
+
 LLM_CHAPTER_SYSTEM_PROMPT = (
     "你是一位专业的基金分析师。请基于提供的数据表格，撰写定性分析评论。\n\n"
     "【输出格式 - 必须严格遵守】\n"
@@ -407,10 +429,7 @@ def generate_data_table(
             top1_pct = 0.0
             top1_name = ""
             for h in year_holdings:
-                try:
-                    pct = float(h.percentage) if h.percentage and h.percentage.strip() not in ("-", "—") else 0.0
-                except (ValueError, TypeError):
-                    pct = 0.0
+                pct = _safe_float_pct(h.percentage)
                 top10_sum += pct
                 if h.rank and h.rank <= 5:
                     top5_sum += pct
@@ -642,7 +661,7 @@ def generate_data_table(
         lines = ["## 风险相关数据"]
         # 持仓集中度
         for year in sorted(holdings.keys()):
-            top5_pct = sum(float(h.percentage.rstrip("%") or "0") if h.percentage and h.percentage.strip() not in ("-", "—") else 0.0 for h in holdings[year][:5])
+            top5_pct = sum(_safe_float_pct(h.percentage) for h in holdings[year][:5])
             lines.append(f"\n{year}年前五大持仓集中度: {top5_pct:.2f}%")
         # 业绩波动
         lines.extend(["", "## 业绩波动"])
