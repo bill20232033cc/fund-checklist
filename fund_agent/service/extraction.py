@@ -3352,6 +3352,7 @@ class FundReadingService:
                 ["pandoc", md_path, "-o", pdf_path, "--pdf-engine=xelatex"],
                 check=True,
                 capture_output=True,
+                timeout=1800,
             )
             return pdf_path, None
         except FileNotFoundError:
@@ -5193,6 +5194,19 @@ def _is_industry_allocation_table(rows: tuple[tuple[str, ...], ...]) -> bool:
     return "行业类别" in header_text and "公允价值" in header_text
 
 
+def _is_numeric_amount(value: str) -> bool:
+    """检查字符串是否为有效数字金额（排除表头文字、全角减号等非数字内容）。"""
+    if not value:
+        return False
+    # 全角减号单独出现（无后续数字）
+    if value in ("－", "−", "—", "-", "–"):
+        return False
+    # 包含中文字符的表头文字（如"数量（份）"）
+    if any("一" <= c <= "鿿" for c in value):
+        return False
+    return True
+
+
 def _parse_asset_allocation_table(rows: tuple[tuple[str, ...], ...]) -> list[AssetAllocationItem]:
     """解析资产配置表。"""
 
@@ -5224,6 +5238,9 @@ def _parse_asset_allocation_table(rows: tuple[tuple[str, ...], ...]) -> list[Ass
         category = str(row[category_idx]).strip()
         amount = str(row[amount_idx]).strip()
         if not category or not amount:
+            continue
+        # 过滤表头文字和全角减号等非数字内容
+        if not _is_numeric_amount(amount):
             continue
         net_pct = str(row[net_pct_idx]).strip() if net_pct_idx is not None and len(row) > net_pct_idx else ""
         total_pct = str(row[total_pct_idx]).strip() if total_pct_idx is not None and len(row) > total_pct_idx else ""

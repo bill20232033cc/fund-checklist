@@ -527,7 +527,8 @@ def generate_data_table(
                 for item in items:
                     if keyword in item.category:
                         try:
-                            total += float(item.amount.replace(",", ""))
+                            amt = item.amount.replace(",", "").replace("－", "-").replace("−", "-")
+                            total += float(amt)
                         except (ValueError, AttributeError):
                             pass
                 return total
