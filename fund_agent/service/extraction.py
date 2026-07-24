@@ -2582,8 +2582,9 @@ class FundReadingService:
                                 elif cls == "C":
                                     col_map["C"] = idx
 
-                        # 期末行：匹配"期末基金份额总额"及其变体（如"报告期末基金份额总额"）
-                        if row_0_norm.endswith("期末基金份额总额"):
+                        # 期末行：匹配"期末基金份额总额"及其变体（如"报告期末基金份额总额"），
+                        # 以及分级基金行（如"下属分级基金的份额总额"）
+                        if row_0_norm.endswith("期末基金份额总额") or row_0_norm.endswith("级基金的份额总额"):
                             end_row = row
 
                     # header-first 兜底：部分基金表格第一列为空，但列头直接是份额类别名
@@ -4608,17 +4609,23 @@ def _annual_performance_table_refs(
     ) if refs else False
 
     if not _any_complete:
-        # fallback: 扫描其他 section 的表格（Docling 分裂跨 section 场景）
-        # 不扫描 source_section_refs 内的表，避免消费同 section 内未 cite 的表
+        # fallback: 扫描全部表格（Docling 分裂跨 section 场景）
         all_tables = tool_service.list_tables(document_id)
         for t_meta in all_tables:
             if t_meta.table_ref in refs:
                 continue
-            if hasattr(t_meta, "section_ref") and t_meta.section_ref in source_section_refs:
-                continue
             table = tool_service.read_table(document_id, t_meta.table_ref, max_rows=_PERFORMANCE_TABLE_MAX_ROWS)
             if isinstance(table, ToolFailure):
                 continue
+            # source_section_refs 内的表：仅在无 header 且有"过去一年"行时纳入（续表场景）
+            if hasattr(t_meta, "section_ref") and t_meta.section_ref in source_section_refs:
+                if _performance_column_indexes(table.rows, specs) is not None:
+                    continue  # 有独立 header 但未被 cite 的表，仍跳过
+                if _performance_past_year_row(table.rows) is None:
+                    continue  # 无 header 也无过去一年数据的无关表，跳过
+                refs.append(table.table_ref)
+                continue
+            # 其他 section 的表：原有逻辑
             if _performance_column_indexes(table.rows, specs) is None:
                 continue
             refs.append(table.table_ref)
@@ -4657,8 +4664,14 @@ def _header_matches_performance_spec(cell: str, spec: _PerformanceReturnExtracti
     """判断表头单元格是否唯一对应 10D 目标字段。"""
 
     normalized = _normalize_disclosure_text(cell)
-    return all(keyword in normalized for keyword in spec.column_keywords) and not any(
-        keyword in normalized for keyword in spec.excluded_keywords
+    # 归一化 dash：部分年报表头使用全角 U+FF0D（﹣），与 keyword 中的 ASCII U+002D（-）不匹配
+    normalized = normalized.replace("－", "-")
+    return all(
+        keyword.replace("－", "-") in normalized
+        for keyword in spec.column_keywords
+    ) and not any(
+        keyword.replace("－", "-") in normalized
+        for keyword in spec.excluded_keywords
     )
 
 
@@ -4831,7 +4844,7 @@ def _extract_scale_from_text(text: str) -> dict[str, str]:
 
     # 总份额（无类别前缀时兜底）
     if "total_shares_a" not in result and "total_shares_c" not in result:
-        m = re.search(r"[^。]*?基金份额总额\s*([\d,]+(?:\.[\d,]+)?)\s*份", text)
+        m = re.search(r"[^。]*?基金份额总额[：:\s]*([\d,]+(?:\.[\d,]+)?)\s*份", text)
         if m:
             result["total_shares_a"] = m.group(1)
 

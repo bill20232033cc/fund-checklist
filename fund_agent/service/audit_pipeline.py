@@ -1811,6 +1811,7 @@ class ReportGenerationCoordinator:
         scale_info: Any = None,
         evidence: Any = None,
         signal_judgment: Any = None,
+        fund_type: str = "",
     ) -> tuple[dict[int, str], list[str]]:
         """生成报告。
 
@@ -1832,7 +1833,8 @@ class ReportGenerationCoordinator:
 
         # 0. 预生成所有章节数据表，收集全局允许数字集合（支持跨章节引用）
         from fund_agent.service.chapter_generator import generate_data_table
-        from fund_agent.service.extraction import _compute_ch6_stress_test
+        from fund_agent.service.extraction import _compute_ch6_stress_test, infer_fund_type
+        fund_type, _ = infer_fund_type(fund_name) if fund_name else ("", False)
         global_numbers: set[str] = set()
         for cid in range(1, 8):
             st = _compute_ch6_stress_test(performance, report_year, scale_info, fund_name) if cid == 6 else None
@@ -1841,6 +1843,7 @@ class ReportGenerationCoordinator:
                 performance, holdings, allocation, fees,
                 fund_manager, scale_info, evidence,
                 stress_test=st, signal_judgment=signal_judgment,
+                fund_type=fund_type,
             )
             global_numbers.update(re.findall(r'\d+\.?\d*', dt.replace(',', '')))
 
@@ -1860,6 +1863,7 @@ class ReportGenerationCoordinator:
                 evidence=evidence,
                 signal_judgment=signal_judgment,
                 global_allowed_numbers=global_numbers,
+                fund_type=fund_type,
             )
             if content:
                 chapter_contents[chapter_id] = content
@@ -1940,6 +1944,7 @@ class ReportGenerationCoordinator:
         chapter_summaries: dict[int, str] | None = None,
         signal_judgment: Any = None,
         global_allowed_numbers: set[str] | None = None,
+        fund_type: str = "",
     ) -> str | None:
         """生成并审计单个章节。
 
@@ -1964,6 +1969,7 @@ class ReportGenerationCoordinator:
                 chapter_summaries=chapter_summaries,
                 signal_judgment=signal_judgment,
                 global_allowed_numbers=global_allowed_numbers,
+                fund_type=fund_type,
             )
         except Exception:
             state = ChapterProcessState(chapter_id=chapter_id)
@@ -1989,6 +1995,7 @@ class ReportGenerationCoordinator:
         use_chapter_summaries: bool = False,
         chapter_summaries: dict[int, str] | None = None,
         signal_judgment: Any = None,
+        fund_type: str = "",
     ) -> str | None:
         """内部实现，由 _generate_and_audit_chapter 包装异常处理。"""
 
@@ -2002,7 +2009,8 @@ class ReportGenerationCoordinator:
 
         # 生成数据表格
         from fund_agent.service.chapter_generator import generate_data_table
-        from fund_agent.service.extraction import _compute_ch6_stress_test
+        from fund_agent.service.extraction import _compute_ch6_stress_test, infer_fund_type
+        fund_type, _ = infer_fund_type(fund_name) if fund_name else ("", False)
         stress_test = _compute_ch6_stress_test(performance, report_year, scale_info, fund_name) if chapter_id == 6 else None
         data_table = generate_data_table(
             chapter_id, fund_code, fund_name, report_year,
@@ -2010,6 +2018,7 @@ class ReportGenerationCoordinator:
             fund_manager, scale_info, evidence,
             stress_test=stress_test,
             signal_judgment=signal_judgment,
+            fund_type=fund_type,
         )
 
         # 生成章节内容（LLM 或模板）

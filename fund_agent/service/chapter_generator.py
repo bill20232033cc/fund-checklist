@@ -574,8 +574,8 @@ def generate_data_table(
                         f"基金投资从{earliest_fund:,.0f}增至{latest_fund:,.0f}（>10倍）"
                     )
 
-        # 建仓期检测
-        if fund_manager and fund_manager.tenure_start:
+        # 建仓期检测（被动基金跳过：仓位由指数规则决定，不依赖经理建仓）
+        if not is_passive and fund_manager and fund_manager.tenure_start:
             try:
                 import re as _re
                 year_match = _re.search(r'(\d{4})', fund_manager.tenure_start)
