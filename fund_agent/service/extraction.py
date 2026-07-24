@@ -398,8 +398,8 @@ _FEE_RATE_EXTRACTION_SPECS = (
         title="基金管理费",
         share_class_scope=_SHARE_SCOPE_ALL,
         pattern=re.compile(
-            r"(?P<raw>[^。\n]*本基金的管理费按前一日基金资产净值的"
-            r"(?P<rate>\d+\.\d{2}%)的年\s*费\s*率计提)"
+            r"(?P<raw>[^。\n]*?(?:本基金|基金管理人)[^。\n]*?(?:管理费|管理人报酬)[^。\n]*?"
+            r"(?P<rate>\d+\.\d{2}%)[^。\n]*)"
         ),
     ),
     _FeeRateExtractionSpec(
@@ -407,8 +407,8 @@ _FEE_RATE_EXTRACTION_SPECS = (
         title="基金托管费",
         share_class_scope=_SHARE_SCOPE_ALL,
         pattern=re.compile(
-            r"(?P<raw>[^。\n]*本基金的托管费按前一日基金资产净值的"
-            r"(?P<rate>\d+\.\d{2}%)的年\s*费\s*率计提)"
+            r"(?P<raw>[^。\n]*?(?:本基金|基金托管人)[^。\n]*?托管费[^。\n]*?"
+            r"(?P<rate>\d+\.\d{2}%)[^。\n]*)"
         ),
     ),
     _FeeRateExtractionSpec(
@@ -1554,7 +1554,7 @@ class FundReadingService:
 
         fees: list[FeeRateItem] = []
         section_citation: Citation | None = None
-        fee_queries = ("基金管理费", "基金托管费", "销售服务费")
+        fee_queries = ("基金管理费", "基金托管费", "销售服务费", "管理人报酬")
 
         for query in fee_queries:
             routed = self._run_with_query_candidates(
@@ -1790,7 +1790,7 @@ class FundReadingService:
     def _audit_fee_rates(self, host: MinimalHost, document_id: str, year: int) -> DisclosureAuditItem:
         """审计费率披露。"""
 
-        fee_queries = ("基金管理费", "基金托管费", "销售服务费")
+        fee_queries = ("基金管理费", "基金托管费", "销售服务费", "管理人报酬")
         found_fees: list[str] = []
         chapter_found = False
 
@@ -1800,7 +1800,7 @@ class FundReadingService:
                 chapter_found = True
                 has_section = any(c.locator.locator_kind is LocatorKind.SECTION for c in routed.agent_result.citations)
                 if has_section:
-                    if query == "基金管理费":
+                    if query in ("基金管理费", "管理人报酬"):
                         found_fees.append("management_fee")
                     elif query == "基金托管费":
                         found_fees.append("custodian_fee")
@@ -2506,16 +2506,9 @@ class FundReadingService:
     ) -> tuple[ScaleInfo | None, Citation | None]:
         """从年报提取规模信息及 citation（从最新年份开始尝试，回退到更早年份）。
 
-        从份额变动表提取份额数，从"主要财务指标"文本提取单位净值，
-        两者相乘估算 AUM。
-
-        参数:
-            fund_code: 基金代码。
-            annual_docs: 年报文档列表。
-            work_dir: 工作目录。
-
-        返回:
-            (ScaleInfo, Citation)；未找到时返回 (None, None)。
+        采用 header-first 列映射：先定位表头行构建 class→col_index，
+        再找期末行按列索引读取份额，NAV 用同样类名匹配策略，
+        AUM = 份额_A × NAV_A + 份额_C × NAV_C。
         """
 
         if not annual_docs:
@@ -2523,6 +2516,10 @@ class FundReadingService:
 
         repository = _repository(Path(work_dir))
         sorted_docs = sorted(annual_docs, key=lambda d: d.year, reverse=True)
+
+        _class_a_re = re.compile(r"[）)\s]A$|[）)\s]A类$|联接\s*A$")
+        _class_c_re = re.compile(r"[）)\s]C$|[）)\s]C类$|联接\s*C$")
+        _class_exclude_kw = ("NAV", "AUM", "标准差")
 
         for doc in sorted_docs:
             try:
@@ -2538,7 +2535,7 @@ class FundReadingService:
             individual_investor_ratio = ""
             scale_citation = None
 
-            # 搜索份额变动表（§10），包含持有人结构数据
+            # 搜索份额变动表（§10）
             search_results = tool_service.search_document(doc_id, "开放式基金份额变动")
             for hit in search_results:
                 if isinstance(hit, ToolFailure) or not hit.section_ref:
@@ -2560,24 +2557,69 @@ class FundReadingService:
                 for t in tables:
                     if not (hasattr(t, "section_ref") and t.section_ref == hit.section_ref):
                         continue
-                    table = tool_service.read_table(doc_id, t.table_ref, max_rows=15)
+                    table = tool_service.read_table(doc_id, t.table_ref, max_rows=20)
                     if not hasattr(table, "rows"):
                         continue
+
+                    # header-first: 找包含"项目"的 header row，构建 {class_label: col_index}
+                    col_map: dict[str, int] = {}
+                    end_row: tuple[str, ...] | None = None
+
                     for row in table.rows:
-                        if len(row) < 7:
+                        if not row:
                             continue
-                        row_str = " ".join(str(cell) for cell in row)
-                        if "混合A" in row_str or "A类" in row_str:
-                            total_shares_a = str(row[3]).strip()
-                        elif "混合C" in row_str or "C类" in row_str:
-                            total_shares_c = str(row[3]).strip()
-                        elif "合计" in row_str:
-                            individual_investor_ratio = str(row[4]).strip() if len(row) > 4 else ""
+                        row_0_norm = _normalize_disclosure_text(row[0])
+
+                        # header row
+                        if not col_map and "项目" in row_0_norm:
+                            for idx, cell in enumerate(row):
+                                if idx == 0:
+                                    continue
+                                cell_norm = _normalize_disclosure_text(cell)
+                                if any(kw in cell_norm for kw in _class_exclude_kw):
+                                    continue
+                                if _class_a_re.search(cell):
+                                    col_map["A"] = idx
+                                elif _class_c_re.search(cell):
+                                    col_map["C"] = idx
+
+                        # 期末行：第一列含"期末基金份额总额"（允许空格）
+                        if "期末基金份额总额" in row_0_norm:
+                            end_row = row
+
+                    # header-first 兜底：部分基金表格第一列为空，但列头直接是份额类别名
+                    if not col_map and end_row and table.rows:
+                        row0 = table.rows[0]
+                        for idx, cell in enumerate(row0):
+                            if idx == 0:
+                                continue
+                            cell_norm = _normalize_disclosure_text(cell)
+                            if any(kw in cell_norm for kw in _class_exclude_kw):
+                                continue
+                            if _class_a_re.search(cell):
+                                col_map["A"] = idx
+                            elif _class_c_re.search(cell):
+                                col_map["C"] = idx
+
+                    # 从期末行按列索引读取份额
+                    if col_map and end_row:
+                        if "A" in col_map and col_map["A"] < len(end_row):
+                            total_shares_a = str(end_row[col_map["A"]]).strip()
+                        if "C" in col_map and col_map["C"] < len(end_row):
+                            total_shares_c = str(end_row[col_map["C"]]).strip()
+
+                    # 持有人结构：合计行
+                    for row in table.rows:
+                        if not row:
+                            continue
+                        row_0_norm = _normalize_disclosure_text(row[0])
+                        if "合计" in row_0_norm and len(row) > 4:
+                            individual_investor_ratio = str(row[4]).strip()
 
             if not (total_shares_a or total_shares_c):
                 continue
 
-            # 从"主要财务指标"文本提取单位净值，估算 AUM
+            # NAV 提取：用同样类名匹配策略
             estimated_aum = ""
             nav_results = tool_service.search_document(doc_id, "基金份额净值")
             for hit in nav_results:
@@ -2587,18 +2629,23 @@ class FundReadingService:
                 if not hasattr(section, "text"):
                     continue
                 text = section.text
-                nav_pattern = re.compile(r"(?:混合[AC]|A类|C类).*?基金份额净值\s*(?:为)?\s*([\d.]+)\s*元")
-                nav_matches = nav_pattern.findall(text)
-                shares_list = [total_shares_a, total_shares_c]
+
+                # 类名匹配提取 NAV
+                nav_a = _extract_nav_for_class(text, "A")
+                nav_c = _extract_nav_for_class(text, "C")
+
                 total_aum = 0.0
-                for i, nav_str in enumerate(nav_matches[:2]):
+                if nav_a is not None and total_shares_a:
                     try:
-                        nav = float(nav_str)
-                        shares_str = shares_list[i] if i < len(shares_list) and shares_list[i] else "0"
-                        shares = float(shares_str.replace(",", ""))
-                        total_aum += nav * shares
+                        total_aum += nav_a * float(total_shares_a.replace(",", ""))
                     except (ValueError, IndexError):
-                        continue
+                        pass
+                if nav_c is not None and total_shares_c:
+                    try:
+                        total_aum += nav_c * float(total_shares_c.replace(",", ""))
+                    except (ValueError, IndexError):
+                        pass
+
                 if total_aum > 0:
                     if total_aum >= 1e8:
                         estimated_aum = f"{total_aum / 1e8:.2f}亿元"
@@ -3978,7 +4025,13 @@ def _extract_fee_rate_fields(result: AgentRunResult) -> tuple[FeeRateExtraction,
         citation = citations.get(spec.title)
         if segment is None or citation is None:
             raise DocumentToolError(FailureCode.NOT_FOUND, "fee_rates 候选章节不完整")
-        matches = tuple(spec.pattern.finditer(segment))
+        # 排除费率变更历史句（由 X% 调整/调低/变更为 Y%）
+        _raw_matches = tuple(spec.pattern.finditer(segment))
+        _change_re = re.compile(r'由\s*\d+\.\d{2}%\s*(?:调整|调低|调降|调升|变更|修改)')
+        matches = tuple(m for m in _raw_matches if not _change_re.search(m.group("raw")))
+        # 报告期内费率变更：新旧费率格式相同、均含日期（自...至.../自...起），当前费率总是最后出现
+        if len(matches) > 1 and any(re.search(r'自\s*\d{4}', m.group("raw")) for m in matches):
+            matches = (matches[-1],)
         if len(matches) != 1:
             raise DocumentToolError(FailureCode.NOT_FOUND, "fee_rates 字段无法唯一抽取")
         match = matches[0]
@@ -4162,14 +4215,19 @@ def _extract_annual_performance_fields(
     if not header_tables:
         raise DocumentToolError(FailureCode.NOT_FOUND, "annual performance 目标列缺失")
 
-    share_scopes = _annual_performance_table_share_scopes(
-        header_tables,
-        section_text_by_ref=section_text_by_ref,
-        requested_share_class=requested_share_class,
-    )
+    try:
+        share_scopes = _annual_performance_table_share_scopes(
+            header_tables,
+            section_text_by_ref=section_text_by_ref,
+            requested_share_class=requested_share_class,
+        )
+    except DocumentToolError:
+        # Docling 分裂跨 section 场景：share scope 无法确定时，默认所有表为 A
+        share_scopes = {t.table_ref: _SHARE_SCOPE_A for t in header_tables}
+
     requested_scope = _normalize_share_class_scope(requested_share_class) if requested_share_class else None
     if requested_share_class and requested_scope is None:
-        raise DocumentToolError(FailureCode.NOT_FOUND, "annual performance 份额类别无法唯一识别")
+        raise DocumentToolError(FailureCode.NOT_FOUND, "performance_returns 份额类别无法唯一识别")
 
     fields: list[AnnualPerformanceExtraction] = []
     for table in header_tables:
@@ -4481,17 +4539,48 @@ def _annual_performance_table_refs(
     cited_table_refs = strict_table_refs if strict_table_refs else all_table_citation_refs
     if not cited_table_refs:
         raise DocumentToolError(FailureCode.NOT_FOUND, "annual performance table citation 缺失")
-    refs: list[str] = []
-    for table_ref in cited_table_refs:
+
+    def _read_candidate_table(table_ref: str) -> TableContent | None:
         table = tool_service.read_table(document_id, table_ref, max_rows=_PERFORMANCE_TABLE_MAX_ROWS)
         if isinstance(table, ToolFailure):
-            raise DocumentToolError(table.code, table.message)
-        # 回退模式下跳过 section 校验，仅校验列签名
+            return None
         if strict_table_refs and table.section_ref not in source_section_refs:
-            continue
+            return None
         if _performance_column_indexes(table.rows, specs) is None:
+            return None
+        return table
+
+    # 第一遍：收集所有列签名匹配的 cited table（含 Docling 分裂的不完整表）
+    refs: list[str] = []
+    for table_ref in cited_table_refs:
+        table = _read_candidate_table(table_ref)
+        if table is None:
             continue
         refs.append(table.table_ref)
+
+    # 检查已收集的表中是否有含"过去一年"行的完整表；
+    # Docling 分裂场景：agent 可能只 cite 了不完整的前半段，后半段未被 cite。
+    # 此时需要 fallback 扫描 section 内全部表格来补全。
+    _any_complete = any(
+        (_t := _read_candidate_table(r)) is not None and _performance_past_year_row(_t.rows) is not None
+        for r in refs
+    ) if refs else False
+
+    if not _any_complete:
+        # fallback: 扫描其他 section 的表格（Docling 分裂跨 section 场景）
+        # 不扫描 source_section_refs 内的表，避免消费同 section 内未 cite 的表
+        all_tables = tool_service.list_tables(document_id)
+        for t_meta in all_tables:
+            if t_meta.table_ref in refs:
+                continue
+            if hasattr(t_meta, "section_ref") and t_meta.section_ref in source_section_refs:
+                continue
+            table = tool_service.read_table(document_id, t_meta.table_ref, max_rows=_PERFORMANCE_TABLE_MAX_ROWS)
+            if isinstance(table, ToolFailure):
+                continue
+            if _performance_column_indexes(table.rows, specs) is None:
+                continue
+            refs.append(table.table_ref)
 
     refs_tuple = tuple(dict.fromkeys(refs))
     if not refs_tuple:
@@ -4566,10 +4655,20 @@ def _performance_table_share_scopes(
     for section_ref, section_tables in tables_by_section.items():
         labels = _share_class_labels_from_text(section_text_by_ref.get(section_ref, ""))
         if len(labels) != len(section_tables):
+            if not labels and len(section_tables) == 1:
+                # section 文本无 A/C 标签且只有 1 个表，默认为 A
+                # 场景：Docling 分裂跨 section，完整表所在 section 无份额类别标识
+                scopes[section_tables[0].table_ref] = _SHARE_SCOPE_A
+                continue
             raise DocumentToolError(FailureCode.NOT_FOUND, "performance_returns 份额类别无法唯一识别")
         for table, label in zip(section_tables, labels, strict=True):
             scopes[table.table_ref] = label
     return scopes
+
+
+_SHARE_CLASS_SCOPE_RE = re.compile(
+    r"[一-龥）\)]([AC])(?:类)?(?:基金份额)?$|([AC])类"
+)
 
 
 def _share_class_labels_from_text(text: str) -> tuple[str, ...]:
@@ -4580,11 +4679,10 @@ def _share_class_labels_from_text(text: str) -> tuple[str, ...]:
         normalized = _normalize_disclosure_text(line)
         if not normalized:
             continue
-        found: str | None = None
-        for scope in _SHARE_CLASS_SCOPES:
-            if f"{scope}类" in normalized or normalized.endswith(f"混合{scope}"):
-                found = scope
-                break
+        m = _SHARE_CLASS_SCOPE_RE.search(normalized)
+        if not m:
+            continue
+        found = m.group(1) or m.group(2)
         if found and found not in labels:
             labels.append(found)
     return tuple(labels)
@@ -4626,6 +4724,23 @@ def _normalize_disclosure_text(text: str) -> str:
     """去除披露文本中的排版空白，用于受控匹配。"""
 
     return re.sub(r"\s+", "", text)
+
+
+def _extract_nav_for_class(text: str, share_class: str) -> float | None:
+    """类名匹配提取单位净值：在文本中查找 share_class 关联的基金份额净值数值。"""
+
+    escaped = re.escape(share_class)
+    nav_re = re.compile(
+        r"(?:联接\s*" + escaped + r"|" + escaped + r"\s*类)"
+        r".*?基金份额净值\s*(?:为)?\s*([\d.]+)\s*元"
+    )
+    m = nav_re.search(text)
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except ValueError:
+        return None
 
 
 def _compact_raw_text(raw_text: str) -> str:
@@ -5326,24 +5441,24 @@ def _extract_fee_rates_from_agent_result(
     fees: list[FeeRateItem] = []
     answer = result.answer
     fee_patterns = [
-        (r"基金管理费[^\d]*?(\d+\.?\d*%)", "基金管理费"),
-        (r"基金托管费[^\d]*?(\d+\.?\d*%)", "基金托管费"),
-        (r"销售服务费[^\d]*?A类[^\d]*?不收取", "销售服务费A类"),
-        (r"销售服务费[^\d]*?A类[^\d]*?(\d+\.?\d*%)", "销售服务费A类"),
-        (r"C类[^\d]*?销售服务费[^\d]*?(\d+\.?\d*%)", "销售服务费C类"),
-        (r"销售服务费[^\d]*?C类[^\d]*?(\d+\.?\d*%)", "销售服务费C类"),
+        (r"基金管理费.*(\d+\.\d+%)", "基金管理费"),
+        (r"基金托管费.*(\d+\.\d+%)", "基金托管费"),
+        (r"销售服务费.*?A类.*?不收取", "销售服务费A类"),
+        (r"销售服务费.*?A类.*?(\d+\.\d+%)", "销售服务费A类"),
+        (r"C类.*?销售服务费.*?(\d+\.\d+%)", "销售服务费C类"),
+        (r"销售服务费.*?C类.*?(\d+\.\d+%)", "销售服务费C类"),
     ]
 
     for pattern, name in fee_patterns:
-        match = re.search(pattern, answer)
+        match = re.search(pattern, answer, re.DOTALL)
         if match:
             rate = match.group(1) if match.lastindex else "不收取"
             if not any(f.fee_name == name for f in fees):
                 fees.append(FeeRateItem(fee_name=name, rate=rate))
 
     if not fees:
-        management_match = re.search(r"管理费[^\d]*?(\d+\.?\d*%)", answer)
-        custodian_match = re.search(r"托管费[^\d]*?(\d+\.?\d*%)", answer)
+        management_match = re.search(r"(?:管理费|管理人报酬).*(\d+\.\d+%)", answer, re.DOTALL)
+        custodian_match = re.search(r"托管费.*(\d+\.\d+%)", answer, re.DOTALL)
 
         if management_match:
             fees.append(FeeRateItem(fee_name="基金管理费", rate=management_match.group(1)))
@@ -5353,7 +5468,7 @@ def _extract_fee_rates_from_agent_result(
         if "不收取" in answer and "销售服务费" in answer:
             fees.append(FeeRateItem(fee_name="销售服务费A类", rate="不收取"))
 
-        sales_c_match = re.search(r"C[^\d]*?(\d+\.?\d*%)[^\d]*?销售服务费", answer)
+        sales_c_match = re.search(r"C.*?(\d+\.\d+%).*?销售服务费", answer, re.DOTALL)
         if sales_c_match:
             fees.append(FeeRateItem(fee_name="销售服务费C类", rate=sales_c_match.group(1)))
 
