@@ -1625,11 +1625,12 @@ Slice 10L git diff --check: passed
 
 ---
 
-## Phase 5：LLM 自主工具调用 + 单次问答
+## Phase 5：LLM 自主工具调用 + 单次问答 + 流式输出
 
-> 裁决时间：2026-07-22
+> 裁决时间：2026-07-24（计划更新）
 > 前置条件：Phase 3.5 ✅（2026-07-19 关闭）、Phase 3.6 ✅（2026-07-21 关闭）
-> 设计来源：docs/agent-evolution-design.md §1
+> 设计来源：docs/agent-evolution-design.md §1 + .sisyphus/plans/phase5-implementation.md
+> 计划文件：`.sisyphus/plans/phase5-implementation.md`
 
 ### Phase 5 裁决 Gate
 
@@ -1644,53 +1645,104 @@ Slice 10L git diff --check: passed
 - 将 `LlmToolLoopRunner` 从测试层 fake/injected contract 升级为 production 可用路径
 - 新增 `ask` 子命令，与现有 `read` 并存
 - `ask` 走 LLM 自主工具调用路径，`read` 保持确定性路径不变
+- **流式输出前置**（原计划 Phase 7，已裁决并入 Phase 5）：StreamEvent 模型 + DeepSeek stream=True + CLI 流式默认
+- 复用 Service 层 profile routing 提供 grounded context
 - 不新建 Agent 类，复用 `LlmToolLoopRunner`
 - LLM 工具允许列表：6 个 reading tools 开放，2 个 extraction tools 不开放
+- 不引入 Mimo（用户已裁决后置）
 
 ### Allowed Write Set
 
-| 文件 | 变更类型 |
-|------|---------|
-| `fund_agent/agent/llm_tool_loop.py` | production readiness 补齐 |
-| `fund_agent/agent/__init__.py` | 导出更新 |
-| `fund_agent/service/extraction.py` | 新增 `ask_question` use case |
-| `fund_agent/host/minimal_host.py` | 适配 LLM agent 模式 |
-| `fund_agent/cli/main.py` | 新增 `ask` 子命令 |
-| `tests/fund/agent/test_llm_tool_loop.py` | 补充 production 场景测试 |
-| `tests/fund/cli/test_cli.py` | `ask` 子命令端到端测试 |
-| `docs/implementation-control.md` | 本文件 |
+| 文件 | 变更类型 | 所属 Slice |
+|------|---------|-----------|
+| `fund_agent/agent/stream_events.py` | **新增** — StreamEvent 数据模型（8 种事件类型） | 19A |
+| `fund_agent/agent/llm_tool_loop.py` | production readiness 补齐（重试/截断/幻觉检测/tool schema） | 19A |
+| `fund_agent/agent/deepseek_llm.py` | `stream=True` + SSE 解析 | 19A, 19B |
+| `fund_agent/agent/__init__.py` | 导出更新 | 19A |
+| `fund_agent/host/minimal_host.py` | `run_agent_stream()` 方法 | 19C |
+| `tests/fund/host/test_host_stream.py` | **新增** — Host stream 测试 | 19C |
+| `fund_agent/service/extraction.py` | `ask_question`（含 profile routing） | 19D |
+| `fund_agent/service/models.py` | AskQuestionRequest/AskQuestionResult DTO | 19D |
+| `fund_agent/cli/main.py` | `ask` 子命令（流式默认） | 19E |
+| `tests/fund/agent/test_stream_events.py` | StreamEvent 单元测试 | 19A |
+| `tests/fund/agent/test_llm_production_readiness.py` | production readiness 测试 | 19A |
+| `tests/fund/agent/test_llm_tool_loop.py` | 补充 production 场景测试 | 19A |
+| `tests/fund/agent/test_real_llm_adapter.py` | DeepSeek stream 测试 | 19B |
+| `tests/fund/service/test_ask_question.py` | ask_question 测试 | 19D |
+| `tests/fund/cli/test_cli.py` | `ask` 子命令端到端测试 | 19E, 19F |
+| `docs/implementation-control.md` | 本文件 | — |
 
 ### Stop Conditions
 
 - LLM 路径 citation/evidence 四层校验回退到 fallback → 停止
 - `ask` 破坏 `read` 子命令现有行为 → 停止
 - 真实 LLM smoke 失败且根因在 provider 侧 → 停止等待 provider 修复
+- Streaming 8 种事件类型有不可达类型 → 停止排查
 
 ### Verification Commands
 
 ```bash
-# 最小验证
+# 19A: StreamEvent + production readiness
+uv run pytest tests/fund/agent/test_stream_events.py tests/fund/agent/test_llm_production_readiness.py tests/fund/agent/test_llm_tool_loop.py -v --tb=short
+
+# 19B: DeepSeek stream
+uv run pytest tests/fund/agent/test_real_llm_adapter.py tests/fund/agent/test_llm_tool_loop.py -v --tb=short
+
+# 19C: Host stream
+uv run pytest tests/fund/host/ tests/fund/agent/test_minimal_tool_loop.py -v --tb=short
+
+# 19D: Service ask_question
+uv run pytest tests/fund/service/test_ask_question.py tests/fund/service/test_extraction.py -v --tb=short
+
+# 19E: CLI ask
+uv run pytest tests/fund/cli/test_cli.py -v --tb=short
+
+# 19F: 端到端（需真实 LLM，opt-in）
+FUND_CHECKLIST_RUN_LIVE_DEEPSEEK=1 uv run python -m fund_agent.cli.main ask "基金经理是谁？" --document-id <id>
+
+# 最小验证（每次提交前）
 uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.py tests/fund/cli/test_cli.py
 
-# LLM tool loop 测试
-uv run pytest tests/fund/agent/test_llm_tool_loop.py -v
-
 # 全量回归
-uv run pytest tests/ -q
-
-# 真实 LLM smoke（opt-in）
-FUND_CHECKLIST_RUN_LIVE_DEEPSEEK=1 DEEPSEEK_API_KEY=... uv run pytest tests/fund/agent/test_deepseek_live_smoke.py -v
+uv run pytest tests/fund/document_tools tests/fund/agent tests/fund/service tests/fund/cli tests/fund/host -v --tb=short
 ```
 
-### Candidate Slices
+### Execution Order
+
+```
+19A: StreamEvent + production readiness
+  ↓
+19B: DeepSeekLlmClient stream=True
+  ↓
+19C: MinimalHost.run_agent_stream()
+  ↓
+19D: Service ask_question + profile routing
+  ↓
+19E: CLI ask 子命令 + 流式输出
+  ↓
+19F: 端到端 smoke + read 回归
+```
 
 | Slice | 内容 | 状态 |
 |-------|------|------|
-| **Phase5-A** | `LlmToolLoopRunner` production readiness 评估 | 待启动 |
-| **Phase5-B** | Service 层 `ask_question` use case | 依赖 Phase5-A |
-| **Phase5-C** | CLI `ask` 子命令 | 依赖 Phase5-B |
-| **Phase5-D** | Host 适配 LLM agent 模式 | 依赖 Phase5-B |
-| **Phase5-E** | 真实 LLM 端到端 smoke | 依赖 Phase5-C + Phase5-D |
+| **19A** | StreamEvent 数据模型 + production readiness（重试/截断/幻觉检测/tool schema 一致） | 待启动 |
+| **19B** | DeepSeekLlmClient `stream=True` + SSE 解析 | 依赖 19A |
+| **19C** | MinimalHost `run_agent_stream()` 方法 | 依赖 19A, 19B |
+| **19D** | Service 层 `ask_question`（含 profile routing） | 依赖 19A |
+| **19E** | CLI `ask` 子命令（流式默认，`--no-stream` 回退同步） | 依赖 19C, 19D |
+| **19F** | 端到端 smoke（3 条 query）+ read 回归快照 + 全量回归 | 依赖 19E |
+
+### Final Checklist
+
+- [ ] 6 个工具 schema 一致
+- [ ] `next_step()` 有 3 次重试
+- [ ] evidence_text 截断至 4096 字符
+- [ ] 投资建议关键词拦截生效
+- [ ] Streaming 8 种事件类型全部可达
+- [ ] `ask` 默认流式输出，`--no-stream` 回退同步
+- [ ] profile routing 在 ask 路径生效
+- [ ] `read` CLI 行为不变（快照对比通过）
+- [ ] 全量回归通过
 
 ---
 
@@ -1740,6 +1792,37 @@ Phase 3.5/3.6 声称的 "6/6 达标" 基于降级路径掩盖了持仓抽取层�
 **测试**：250 passed（extraction 131 + agent 14 + document_tools 40 + cli 65）
 
 **DS Review**：NEEDS_FIX → 修复 2 项（fund_type 初始化 + except Exception 安全网）→ 145 passed
+
+---
+
+### Slice 17N（retroactive）：EID 年报下载器
+
+> 裁决时间：2026-07-25（补录，代码已存在）
+> 代码路径：`fund_agent/fund/document_tools/eid_downloader.py`（343 行）
+> CLI 入口：`fund-checklist download --fund-code <code> --year <year>`
+
+**定位**：单只基金单年度 PDF 下载，从巨潮资讯网（cninfo.com.cn）抓取基金年报 PDF 并校验 Content-Type / 文件头完整性。
+
+**边界**：
+- 只做 discovery + PDF 下载，不写 workspace、不调用 Docling、不生成 document_id
+- 下载前先检查磁盘缓存（同名 PDF 已存在且 size > 0 时跳过，除非 `--force`）
+- 下载后校验 Content-Type（必须为 `application/pdf`）和 PDF 文件头（`%PDF`）
+- 失败分类：网络/HTTP 错误归为 `unavailable`，Content-Type/文件头不符归为 `integrity_error`
+
+**allowed write set**：
+- `fund_agent/fund/document_tools/eid_downloader.py`
+- `fund_agent/cli/main.py`（`download` 子命令注册 + `_run_download_command`）
+- `scripts/setup_e2e_data.py`（E2E 数据准备脚本，调用 downloader）
+
+**非目标**：
+- 不实现多 provider matrix
+- 不实现 batch download / queue
+- 不自动触发 Docling 转换或 catalog 注册
+
+**stop conditions**：
+- 下载内容非 PDF（Content-Type 或文件头校验失败）→ `integrity_error`
+- HTTP 4xx/5xx → `unavailable`
+- 年度/代码无匹配结果 → `not_found`
 
 ---
 

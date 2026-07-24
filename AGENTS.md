@@ -43,10 +43,12 @@ PDF
 
 当前已知能力差距（来自 dayu-agent 对标研究，2026-07-11），以下能力当前不存在，Agent 不得假装具备：
 - **多轮对话**：无 interactive mode，无会话记忆
-- **LLM 自主工具调用**：Agent loop 仍为确定性序列，非 LLM-driven
-- **Streaming**：无流式输出
 - **上下文治理**：无 budget/truncation/compaction
 - **联网搜索**：无法获取实时市场数据
+
+Phase 5 已裁决（2026-07-24）并正在实施的能力：
+- **LLM 自主工具调用**：`ask` 子命令走 LLM 自主决策工具调用路径（Slice 19A-19F）
+- **Streaming**：StreamEvent 模型 + DeepSeek stream=True + CLI 流式输出（Slice 19A-19C, 19E）
 
 LLM provider 已支持 DeepSeek 与 Mimo（OpenAI-compatible adapter）；暂不需要接入 Gemini/OpenAI/Anthropic 等其他 provider。
 
@@ -65,7 +67,7 @@ LLM provider 已支持 DeepSeek 与 Mimo（OpenAI-compatible adapter）；暂不
 - 真实 LLM 接入必须位于已实现的 fake/injected LLM tool-loop contract 之后；不得让 LLM provider、prompt 或 adapter 直接读取 raw PDF、raw Docling JSON、本地路径、cache path、repository/private loader、`local_import_id` 或 secret。
 - 当前 LLM provider 支持 DeepSeek 与 Mimo（OpenAI-compatible adapter）；暂不需要接入 Gemini/OpenAI/Anthropic 等其他 provider。
 - live provider smoke 必须显式 opt-in；默认 pytest 不得联网、不得读取真实 API key、不得记录 raw provider response 或新增 artifact。
-- 新增 LLM 驱动的 CLI 用户入口（如 `fund-checklist ask`、streaming、interactive mode）必须另开裁决。
+- 新增 LLM 驱动的 CLI 用户入口必须另开裁决。`ask` 子命令已裁决通过（Phase 5，2026-07-24），streaming 已并入 Phase 5。`interactive` 模式尚未裁决。
 
 ## 身份与失败分类
 
@@ -104,7 +106,7 @@ MVP 阅读工具层已于 Slice 4 验收通过并 close。项目现已进入 **�
 - 披露完整性审计 (12B/12C)
 - CLI 9 个子命令：`read` / `multi-year` / `import` / `holdings` / `allocation` / `fees` / `audit` / `deep-audit` / `generate`
 
-**Phase 3.5/3.6 已关闭（2026-07-21）**：报告质量稳定化 + 审计管道数据适配全部完成。三基金（512890/006597/012346）Ch1-6 审计得分全部 ≥75，端到端验证通过。**Phase 5 Gate 已解除**（持仓抽取 23/23 全部通过）。Phase 5 可启动。详见 `docs/implementation-control.md` Phase 5 Gate 审计结果和 `docs/agent-evolution-design.md` §1。
+**Phase 3.5/3.6 已关闭（2026-07-21）**：报告质量稳定化 + 审计管道数据适配全部完成。三基金（512890/006597/012346）Ch1-6 审计得分全部 ≥75，端到端验证通过。**Phase 5 Gate 已解除**（持仓抽取 23/23 全部通过）。**Phase 5 已裁决并进入实施阶段（2026-07-24）**，Slice 19A-19F，详见 `docs/implementation-control.md` Phase 5 节和 `.sisyphus/plans/phase5-implementation.md`。
 
 详细 phase 与裁决记录见 `docs/implementation-control.md`。
 
@@ -181,6 +183,11 @@ implement -> tests -> diff review
 - 最小验证命令固定为：
 ```bash
 uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.py tests/fund/cli/test_cli.py
+```
+- Phase 5 新增验证命令（Slice 19A-19F 实施期间）：
+```bash
+# StreamEvent + production readiness
+uv run pytest tests/fund/agent/test_stream_events.py tests/fund/agent/test_llm_production_readiness.py tests/fund/agent/test_llm_tool_loop.py -v --tb=short
 ```
 
 ## 代码与文档同步

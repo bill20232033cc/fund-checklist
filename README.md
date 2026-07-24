@@ -36,7 +36,7 @@ PDF
 - 确定性信号评分（6 指标）。
 - 8 章分析报告生成。
 - 三层审计管道（程序 + LLM + 复核，4 类 22 项）。
-- CLI 9 个子命令（read / multi-year / import / holdings / allocation / fees / audit / deep-audit / generate）。
+- CLI 10 个子命令（read / multi-year / import / holdings / allocation / fees / audit / deep-audit / generate / download）。
 
 安装命令：
 
@@ -86,7 +86,7 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 非目标：
 
 - 不实现 UI。
-- 不实现 downloader 或 batch queue。
+- 不实现 batch queue。
 - 不做投资判断。
 - 不声明 release ready。
 

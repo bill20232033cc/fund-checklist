@@ -58,7 +58,7 @@ PDF
 ### 0.4 事实与推断边界
 
 - 事实：dayu 已经有可参考的 source / blob / processed repository、processor registry、tool service、CN/HK PDF + Docling pipeline。
-- 事实：本仓库已实现 DoclingDocumentStore section/table/search 能力、FundDocumentToolService、persistent repository、LLM adapter、信号评分和报告生成；尚未实现 downloader、多 provider matrix 和仓储协议拆分。
+- 事实：本仓库已实现 DoclingDocumentStore section/table/search 能力、FundDocumentToolService、persistent repository、LLM adapter、信号评分和报告生成；已实现 EID downloader（`fund_agent/fund/document_tools/eid_downloader.py`），通过 CLI `download` 子命令提供单只基金单年度 PDF 下载；尚未实现多 provider matrix 和仓储协议拆分。
 - 推断：本仓库最短可行路径应先建立本地年报阅读工具的受控边界和最小端到端 slice，再逐步吸收 dayu 的仓储/处理器/Host 形态。
 - 不得推断：本仓库可以直接复制 dayu runtime、可以复用 dayu 的全部 Host / Engine、或者当前样本 PDF 已经具备可生产读取能力。
 
@@ -1398,10 +1398,37 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - **Slice 18B**：换手率追踪（年报 §8 换手率 → 多年度趋势）。低优先级。
 - **Slice 18C**：份额变动 + 盈利投资者占比（年报 §10 + 2026 新规字段）。低优先级。
 
+### Phase 5：LLM 自主工具调用 + 流式输出
+
+> 裁决时间：2026-07-24 | 计划文件：`.sisyphus/plans/phase5-implementation.md`
+> 流式输出已从原 Phase 7 前置并入 Phase 5。
+
+- **Slice 19A**：StreamEvent 数据模型 + LlmToolLoopRunner production readiness（重试/截断/幻觉检测/tool schema 一致）。待启动。
+- **Slice 19B**：DeepSeekLlmClient `stream=True` + SSE 解析。依赖 19A。
+- **Slice 19C**：MinimalHost `run_agent_stream()` 方法。依赖 19A, 19B。
+- **Slice 19D**：Service 层 `ask_question`（含 profile routing）。依赖 19A。
+- **Slice 19E**：CLI `ask` 子命令（流式默认）。依赖 19C, 19D。
+- **Slice 19F**：端到端 smoke + read 回归快照 + 全量回归。依赖 19E。
+
+新增文件：`fund_agent/agent/stream_events.py`、`tests/fund/agent/test_stream_events.py`、`tests/fund/agent/test_llm_production_readiness.py`、`tests/fund/service/test_ask_question.py`
+
+### Phase 6：模板框架适配 + 基金类型感知
+
+> 启动时间：2026-07-22 | 详见 `docs/implementation-control.md` Phase 6 节
+
+- **Slice 6A**：净值增长率列匹配修复。✅ 已完成。
+- **Slice 6B**：基金经理/规模数据接入报告。✅ 已完成。
+- **Slice 6C**：`preferred_lens` 接入 generate 流程。✅ 已完成。
+- **Slice 6D**：评分框架 fund_type 感知（主动 6 指标 135→100 / 被动 3 指标 100 分制 / 债券 5 指标）。✅ 已完成。
+- **Slice 6E**：端到端验证 + DS Review。✅ 已完成。
+
 ### 技术债
 
 - **P1-3**：提取 compute_signal_judgment / compute_risk_checklist 共享评分 helper。
-- **extraction.py 二次拆分**：当前 4634 行，提取 signal_scoring.py / risk_assessment.py。
+- **extraction.py 二次拆分**：当前 5727 行。signal_scoring.py（439 行）已完成一次拆分；残留 7 个评分/风险函数（约 450 行）待迁移。
+  - 排期：Phase 5（19A-19F）完成后执行，不在 Phase 5 之前做（理由：Phase 5 只新增 ask_question 方法，不改现有代码；并行做会产生 merge 冲突）。
+  - 执行顺序：(1) 移 infer_fund_type + _next_tier_up/down + _compute_threshold_events 到 signal_scoring.py（消除循环依赖）(2) 移 compute_signal_judgment + 3 个 _compute_*_signal 到 signal_scoring.py (3) 新建 risk_assessment.py，移 STRESS_THRESHOLDS + compute_risk_checklist + compute_stress_test + _compute_ch6_stress_test (4) 更新 5 个文件的 import（extraction.py、audit_pipeline.py、__init__.py、chapter_generator.py、3 个测试文件）
+  - 预期收益：extraction.py 减少约 450 行（5727→5280），评分逻辑完全独立可测试。
 **Slice 16C**：Ch0 升级/降级阈值事件 + 一句话产品定义。从 Ch7 信号反推 Ch0 封面。✅ 已完成。含 tier-delta 阈值事件算法 + 确定性产品定义。
 **Slice 17A**：报告 Markdown 持久化 + metadata sidecar。文件名 `{fund_code}-{year}-analysis.meta.json`，与 .md 同目录。字段：fund_code、fund_name、report_year、generation_time（ISO 8601）、audit_score（无审计 null）、signal、normalized_score。_export_markdown 增加 signal_judgment 参数。
 **Slice 17A**：报告 Markdown 持久化 + metadata sidecar。文件名 `{fund_code}-{year}-analysis.meta.json`，与 .md 同目录。字段：fund_code、fund_name、report_year、generation_time（ISO 8601）、audit_score（无审计 null）、signal、normalized_score。_export_markdown 增加 signal_judgment 参数。✅ 已完成。
@@ -1410,7 +1437,8 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 ### 外部候选研究参考（非执行真源）
 
 - `docs/dayu-agent-comparison-report.md`、`docs/agent-evolution-design.md` 与 `docs/dayu-agent-codiwiki-and-development-stage-analysis-20260614.md` 仅作为候选研究输入材料，不作为设计真源或已批准 roadmap。
-- 若后续需要推进其中任何用户侧新能力（如 `ask`、`interactive`、`streaming`、联网搜索、会话持久化），必须回到本文件与 `docs/implementation-control.md` 单独裁决。
+- Phase 5（`ask` + streaming）已从候选状态裁决为正式实施计划，详见 implementation-control.md Phase 5 节。
+- 若后续需要推进 `interactive`、联网搜索、会话持久化等能力，必须回到本文件与 `docs/implementation-control.md` 单独裁决。
 
 - **Slice 17N** ✅：Ch5/Ch6 报告质量提升（模板优化 + 数字引用规范 + must_answer 补齐）。
 

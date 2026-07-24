@@ -22,6 +22,7 @@ class HostRunEventType(str, Enum):
     AGGREGATE = "aggregate"
     COMPLETED = "completed"
     FAILED = "failed"
+    ERROR = "error"
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,7 @@ class HostRunResult:
     tool_trace_summary: dict[str, int]
     timeout: float | None = None
     timed_out: bool = False
+    failure_reason: str | None = None
 
     @property
     def answer(self) -> str:
@@ -148,16 +150,17 @@ class MinimalHost:
 
         agent_result: AgentRunResult | None = None
         timed_out = False
+        agent_error: str | None = None
 
         def _run_agent() -> None:
-            nonlocal agent_result
+            nonlocal agent_result, agent_error
             try:
                 agent_result = self._agent.run(
                     document_id=document_id,
                     query=query,
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                agent_error = f"{type(exc).__name__}: {exc}"
 
         thread = threading.Thread(target=_run_agent, daemon=True)
         thread.start()
@@ -187,10 +190,16 @@ class MinimalHost:
         end_time = time.monotonic()
 
         if agent_result is None:
-            events.append(HostRunEvent(
-                event_type=HostRunEventType.FAILED,
-                timestamp=end_time,
-            ))
+            if agent_error:
+                events.append(HostRunEvent(
+                    event_type=HostRunEventType.ERROR,
+                    timestamp=end_time,
+                ))
+            else:
+                events.append(HostRunEvent(
+                    event_type=HostRunEventType.FAILED,
+                    timestamp=end_time,
+                ))
             return HostRunResult(
                 agent_result=AgentRunResult(
                     answer="",
@@ -203,6 +212,7 @@ class MinimalHost:
                 tool_trace_summary={"total": 0, "success": 0, "failure": 0},
                 timeout=self._timeout,
                 timed_out=False,
+                failure_reason=agent_error,
             )
 
         for entry in agent_result.tool_trace:

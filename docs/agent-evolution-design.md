@@ -1,10 +1,10 @@
 # fund-checklist Agent 能力演进方案
 
-> 设计时间：2026-07-15
-> 文档定位：候选研究输入材料，不是已承诺 roadmap
+> 设计时间：2026-07-15 | 最后更新：2026-07-24
+> 文档定位：候选研究输入材料 + 已裁决能力记录
 > 设计目标：基于 dayu-agent 能力模式，为 fund-checklist 提供渐进式 Agent 能力候选方向
-> 关联文档：docs/design.md（设计真源）、docs/implementation-control.md（执行面板）
-> 使用边界：本文件不是已裁决 roadmap；任何 `ask`、`interactive`、`streaming`、联网搜索或会话持久化能力，必须先进入 `docs/implementation-control.md` 单独裁决，并遵守 `AGENTS.md` 对 `dayu` 引用和新增 CLI 入口的硬约束
+> 关联文档：docs/design.md（设计真源）、docs/implementation-control.md（执行面板）、.sisyphus/plans/phase5-implementation.md（Phase 5 正式计划）
+> 使用边界：Phase 5（`ask` + streaming）已裁决并进入实施；`interactive`、上下文治理、联网搜索、会话持久化仍为候选，必须先进入 `docs/implementation-control.md` 单独裁决
 
 ---
 
@@ -41,20 +41,26 @@
 
 ### 0.4 Phase 5 裁决 gate（阻塞项）
 
-> 以下裁决 gate 必须全部通过，Phase 5 实施才能启动：
+> ~~以下裁决 gate 必须全部通过，Phase 5 实施才能启动：~~
+>
+> **2026-07-24 更新：Phase 5 全部 Gate 已通过，已进入实施阶段。**
 
-1. **`ask` 子命令裁决**：`AGENTS.md` §68 要求新增 LLM 驱动 CLI 入口必须另开裁决。
-   裁决标准：(a) LLM provider 稳定性足以支撑用户交互；(b) `LlmToolLoopRunner` 的 evidence/citation 校验在真实 LLM 路径无回退；(c) `ask` 不破坏 `read` 子命令的用户心智模型。
-2. **Phase 5 整体裁决**：在 `implementation-control.md` 中记录 Phase 5 的 scope、allowed write set、verification commands、stop conditions。
+1. ~~**`ask` 子命令裁决**~~ → ✅ 已裁决通过（2026-07-22）
+2. ~~**Phase 5 整体裁决**~~ → ✅ 已写入 `implementation-control.md`（2026-07-22），2026-07-24 更新为 19A-19F 计划
 
 
-## 1. Phase 5：LLM 自主工具调用 + 单次问答
+## 1. Phase 5：LLM 自主工具调用 + 单次问答 + 流式输出
+
+> **状态：已裁决（2026-07-24），正式计划见 `.sisyphus/plans/phase5-implementation.md`**
+> 流式输出已从原 Phase 7 前置并入 Phase 5（裁决理由：ask 命令响应延迟 >10s 时流式输出减少感知等待）。
 
 ### 1.1 目标
 
-候选目标：**当且仅当 `ask` 子命令裁决（§0.4 Gate 1）+ Phase 5 整体裁决（§0.4 Gate 2）均通过后**，再将当前 `LlmToolLoopRunner` 从内部 contract 升级为用户可访问的问答入口，实现 LLM 自主决策工具调用。当前文档不代表已批准实施。
+**已裁决**：将当前 `LlmToolLoopRunner` 从内部 contract 升级为用户可访问的问答入口，实现 LLM 自主决策工具调用 + 流式输出。
 
-### 1.2 设计候选（非已生效裁决）
+### 1.2 设计详情（已裁决）
+
+> 正式计划编号：19A-19F，详见 `.sisyphus/plans/phase5-implementation.md`
 
 #### 1.2.1 新增 CLI 入口
 
@@ -132,15 +138,16 @@ class FundReadingService:
 
 ### 1.3 实施路径
 
-> Slice 编号为临时标识（`[Phase5-X]` 格式），正式编号待 Phase 5 进入 `implementation-control.md` 裁决时确定。编号不暗示与 Phase 4 Slice 18/19 的先后关系。
+> ~~Slice 编号为临时标识（`[Phase5-X]` 格式）~~ → 正式编号已确定为 19A-19F，详见 `.sisyphus/plans/phase5-implementation.md`。
 
-| Slice | 内容 | 依赖 |
-|-------|------|------|
-| **[Phase5-A]** | `LlmToolLoopRunner` production readiness 评估 | 8B (DeepSeek adapter) |
-| **[Phase5-B]** | Service 层 `ask_question` use case | [Phase5-A] |
-| **[Phase5-C]** | CLI `ask` 子命令 | [Phase5-B] |
-| **[Phase5-D]** | Host 适配 LLM agent 模式 | [Phase5-B] |
-| **[Phase5-E]** | 真实 LLM 端到端 smoke | [Phase5-C] + [Phase5-D] |
+| Slice | 内容 | 依赖 | 状态 |
+|-------|------|------|------|
+| **19A** | StreamEvent 数据模型 + LlmToolLoopRunner production readiness | — | 待启动 |
+| **19B** | DeepSeekLlmClient `stream=True` + SSE 解析 | 19A | 待启动 |
+| **19C** | MinimalHost `run_agent_stream()` | 19A, 19B | 待启动 |
+| **19D** | Service 层 `ask_question`（含 profile routing） | 19A | 待启动 |
+| **19E** | CLI `ask` 子命令（流式默认） | 19C, 19D | 待启动 |
+| **19F** | 端到端 smoke + read 回归 + 全量回归 | 19E | 待启动 |
 
 ### 1.4 验收标准
 
@@ -162,11 +169,13 @@ fund-checklist ask "前十大持仓是什么？" --document-id <id> --enable-too
 
 ---
 
-## 2. Phase 6：多轮对话 + 会话记忆
+## 2. Phase 7：多轮对话 + 会话记忆（原 Phase 6，重编号）
+
+> **2026-07-24 更新**：因 `implementation-control.md` 的 Phase 6（模板框架适配）已占用编号，本节重编号为 Phase 7。
 
 ### 2.1 目标
 
-候选目标：若 Phase 5 裁决通过，再考虑实现 `fund-checklist interactive` 多轮对话模式，支持会话恢复和上下文记忆。当前文档不代表已批准实施。
+候选目标：若 Phase 5 实施完成，再考虑实现 `fund-checklist interactive` 多轮对话模式，支持会话恢复和上下文记忆。当前文档不代表已批准实施。
 
 ### 2.2 设计候选（非已生效裁决）
 
@@ -284,11 +293,14 @@ fund-checklist interactive --label my-session
 
 ---
 
-## 3. Phase 7：流式输出 + 上下文治理
+## 3. Phase 8：上下文治理（流式已并入 Phase 5）
+
+> **2026-07-24 更新**：流式输出（§3.2.1 StreamEvent 模型、§3.2.2 DeepSeek stream、§3.2.3 CLI 流式输出）已裁决并入 Phase 5（Slice 19A-19E）。
+> 本节剩余内容为上下文预算治理，重编号为 Phase 8。
 
 ### 3.1 目标
 
-候选目标：若多轮对话路径成立，再考虑实现 SSE 流式输出和上下文预算治理。当前文档不代表已批准实施。
+候选目标：在 Phase 5（ask + streaming）和 Phase 7（多轮对话）基础上，实现上下文预算治理，支持长对话不超限。当前文档不代表已批准实施。
 
 ### 3.2 设计候选（非已生效裁决）
 
@@ -440,7 +452,7 @@ fund-checklist interactive --document-id <id>
 
 ---
 
-## 4. Phase 8：联网搜索 + 实时数据（可选）
+## 4. Phase 9：联网搜索 + 实时数据（可选，原 Phase 8，重编号）
 
 ### 4.1 目标
 
@@ -664,13 +676,15 @@ fund_agent/
 ### 7.1 候选探索顺序（仅示意）
 
 ```
-Phase 5 (LLM 自主工具调用)
+Phase 5 (LLM 自主工具调用 + 流式输出) — ✅ 已裁决，实施中
   ↓
-Phase 6 (多轮对话 + 会话记忆)
+Phase 6 (模板框架适配 + 基金类型感知) — ✅ 已完成（implementation-control.md）
   ↓
-Phase 7 (流式输出 + 上下文治理)
+Phase 7 (多轮对话 + 会话记忆) — 🔵 候选
   ↓
-Phase 8 (联网搜索，可选)
+Phase 8 (上下文治理) — 🔵 候选
+  ↓
+Phase 9 (联网搜索，可选) — 🔵 候选
 ```
 
 ### 7.2 候选最小版本（仅示意，未纳入正式排期）
@@ -695,11 +709,12 @@ Phase 8 (联网搜索，可选)
 
 本文件用于对照观察 fund-checklist 从"确定性分析助手"向"可交互投资分析 Agent"的候选演进方向，不代表已批准实施：
 
-| Phase | 候选能力 | 观察到的差异 |
-|-------|----------|----------------|
-| **Phase 5** | LLM 自主工具调用 | 用户可自由提问，不再受限于固定查询 |
-| **Phase 6** | 多轮对话 + 会话记忆 | 支持追问、上下文保持，提升交互体验 |
-| **Phase 7** | 流式输出 + 上下文治理 | 实时反馈、长对话支持，接近生产级体验 |
-| **Phase 8** | 联网搜索 | 获取实时数据，扩展分析维度 |
+| Phase | 能力 | 状态 |
+|-------|------|------|
+| **Phase 5** | LLM 自主工具调用 + 流式输出 | ✅ 已裁决，实施中（19A-19F） |
+| **Phase 6** | 模板框架适配 + 基金类型感知 | ✅ 已完成（implementation-control.md） |
+| **Phase 7** | 多轮对话 + 会话记忆 | 🔵 候选，未裁决 |
+| **Phase 8** | 上下文治理 | 🔵 候选，未裁决 |
+| **Phase 9** | 联网搜索 | 🔵 候选，未裁决（可选） |
 
 如果后续进入正式裁决，可按“不破坏现有架构、按候选方向逐步验证”的方式推进；但各方向是否、何时推进，不以本文件为准。
