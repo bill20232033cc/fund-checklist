@@ -788,11 +788,60 @@ def _has_header_row(rows: tuple[tuple[str, ...], ...]) -> bool:
     return short_cells >= max(len(first_row) * 0.6, 3)
 
 
+def _data_rows(rows: tuple[tuple[str, ...], ...]) -> tuple[tuple[str, ...], ...]:
+    """返回数据行（跳过表头行）。"""
+
+    if not rows:
+        return rows
+    if _has_header_row(rows):
+        return rows[1:]
+    return rows
+
+
+def _column_type_signature(rows: tuple[tuple[str, ...], ...]) -> tuple[str, ...]:
+    """返回每列的数据类型签名，用于比较两个表格的列格式是否一致。
+
+    每列归类为 'numeric'（多数单元格可解析为数字）、'text' 或 'empty'。
+    """
+
+    if not rows:
+        return ()
+    num_cols = len(rows[0])
+    sig: list[str] = []
+    for col_idx in range(num_cols):
+        numeric = 0
+        text = 0
+        empty = 0
+        for row in rows:
+            cell = row[col_idx].strip() if col_idx < len(row) else ""
+            if not cell:
+                empty += 1
+                continue
+            cleaned = cell.replace(",", "").replace("%", "").replace("￥", "").replace("$", "").strip()
+            try:
+                float(cleaned)
+                numeric += 1
+            except ValueError:
+                text += 1
+        total = numeric + text + empty
+        if empty > total * 0.5:
+            sig.append("empty")
+        elif numeric >= text:
+            sig.append("numeric")
+        else:
+            sig.append("text")
+    return tuple(sig)
+
+
 def _is_continuation_of(current: _ParsedTable, previous: _ParsedTable) -> bool:
-    """判断 current 是否为 previous 的跨页续表（无表头，页码更大，列数兼容）。"""
+    """判断 current 是否为 previous 的跨页续表。"""
 
     if _has_header_row(current.rows):
         return False
+    # 同 section 检查：跨 section 的连续表格不应合并
+    if current.section_ref and previous.section_ref:
+        if current.section_ref != previous.section_ref:
+            return False
     cur_page = current.locator.page_no
     prev_page = previous.locator.page_no
     if cur_page is not None and prev_page is not None and cur_page <= prev_page:
@@ -801,6 +850,11 @@ def _is_continuation_of(current: _ParsedTable, previous: _ParsedTable) -> bool:
     prev_cols = len(previous.rows[0]) if previous.rows else 0
     if cur_cols > prev_cols + 1 or cur_cols < prev_cols - 1:
         return False
+    # 列格式一致性检查：前表数据行与当前表的列类型签名应一致
+    prev_data = _data_rows(previous.rows)
+    if prev_data and current.rows:
+        if _column_type_signature(prev_data) != _column_type_signature(current.rows):
+            return False
     return True
 
 

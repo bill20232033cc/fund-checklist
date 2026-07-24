@@ -261,3 +261,156 @@ def test_store_search_does_not_scan_unbounded_table_rows(tmp_path) -> None:
     results = store.search("越界行专属词")
 
     assert results == ()
+
+
+# ── _is_continuation_of / _column_type_signature 单元测试 ──────────────────
+
+
+def _make_table(
+    rows: tuple[tuple[str, ...], ...],
+    *,
+    page_no: int = 1,
+    section_ref: str = "section-0000",
+    table_ref: str = "table-0000",
+    source_index: int = 0,
+) -> object:
+    """构造 _ParsedTable 用于单元测试。"""
+    from fund_agent.fund.document_tools.docling_store import _ParsedTable
+    from fund_agent.fund.document_tools.constants import LocatorKind
+
+    return _ParsedTable(
+        table_ref=table_ref,
+        caption=None,
+        section_ref=section_ref,
+        rows=rows,
+        locator=type(
+            "Locator",
+            (),
+            {
+                "document_id": "test-doc",
+                "locator_kind": LocatorKind.TABLE,
+                "section_ref": section_ref,
+                "table_ref": table_ref,
+                "page_no": page_no,
+                "page_range": None,
+                "internal_ref": None,
+                "internal_ref_available": False,
+                "bbox": None,
+            },
+        )(),
+        source_index=source_index,
+    )
+
+
+def test_continuation_rejects_different_sections() -> None:
+    """跨 section 的连续表格不得合并。"""
+    from fund_agent.fund.document_tools.docling_store import _is_continuation_of
+
+    prev = _make_table(
+        (("序号", "债券代码", "债券名称", "数量", "公允价值", "占比"),),
+        page_no=1,
+        section_ref="section-0001",
+    )
+    cur = _make_table(
+        (("4", "019709", "21国债09", "100,000", "10,050,000.00", "5.23%"),),
+        page_no=2,
+        section_ref="section-0002",
+    )
+    assert _is_continuation_of(cur, prev) is False
+
+
+def test_continuation_rejects_different_column_signatures() -> None:
+    """列类型签名不同的表格不得合并。"""
+    from fund_agent.fund.document_tools.docling_store import _is_continuation_of
+
+    prev = _make_table(
+        (
+            ("序号", "债券代码", "债券名称"),
+            ("1", "019709", "21国债09"),
+            ("2", "019710", "21国债10"),
+        ),
+        page_no=1,
+    )
+    cur = _make_table(
+        (
+            ("重要说明", "详见附表"),
+            ("风险提示", "投资有风险"),
+        ),
+        page_no=2,
+    )
+    assert _is_continuation_of(cur, prev) is False
+
+
+def test_continuation_allows_same_section_and_signature() -> None:
+    """同 section 且列签名一致的续表应正常合并。"""
+    from fund_agent.fund.document_tools.docling_store import _is_continuation_of
+
+    prev = _make_table(
+        (
+            ("序号", "债券代码", "债券名称"),
+            ("1", "019709", "21国债09"),
+            ("2", "019710", "21国债10"),
+        ),
+        page_no=1,
+    )
+    cur = _make_table(
+        (
+            ("3", "019711", "21国债11"),
+            ("4", "019712", "21国债12"),
+        ),
+        page_no=2,
+    )
+    assert _is_continuation_of(cur, prev) is True
+
+
+def test_continuation_rejects_cur_with_header() -> None:
+    """current 有表头时不得作为续表合并。"""
+    from fund_agent.fund.document_tools.docling_store import _is_continuation_of
+
+    prev = _make_table(
+        (
+            ("序号", "债券代码", "债券名称"),
+            ("1", "019709", "21国债09"),
+        ),
+        page_no=1,
+    )
+    cur = _make_table(
+        (("序号", "证券代码", "证券名称"),),
+        page_no=2,
+    )
+    assert _is_continuation_of(cur, prev) is False
+
+
+def test_column_type_signature_classifies_cells() -> None:
+    """_column_type_signature 正确归类 numeric / text / empty 列。"""
+    from fund_agent.fund.document_tools.docling_store import _column_type_signature
+
+    rows: tuple[tuple[str, ...], ...] = (
+        ("1", "茅台", "1,000.50", ""),
+        ("2", "五粮液", "500.00", ""),
+        ("3", "泸州老窖", "200.00", ""),
+    )
+    assert _column_type_signature(rows) == ("numeric", "text", "numeric", "empty")
+
+
+def test_data_rows_skips_header() -> None:
+    """_data_rows 跳过表头行，保留数据行。"""
+    from fund_agent.fund.document_tools.docling_store import _data_rows
+
+    rows: tuple[tuple[str, ...], ...] = (
+        ("序号", "名称", "金额"),
+        ("1", "项目A", "100"),
+        ("2", "项目B", "200"),
+    )
+    assert _data_rows(rows) == (("1", "项目A", "100"), ("2", "项目B", "200"))
+
+
+def test_data_rows_all_data_when_no_header() -> None:
+    """无表头时 _data_rows 返回全部行。"""
+    from fund_agent.fund.document_tools.docling_store import _data_rows
+
+    rows: tuple[tuple[str, ...], ...] = (
+        ("1", "数据A"),
+        ("2", "数据B"),
+    )
+    assert _data_rows(rows) == rows
