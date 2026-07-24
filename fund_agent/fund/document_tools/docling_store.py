@@ -442,16 +442,28 @@ def _parse_tables(
             section_ref=section_ref,
             table_ref=table_ref,
         )
-        parsed.append(
-            _ParsedTable(
-                table_ref=table_ref,
-                caption=_table_caption(item, ref_text),
-                section_ref=section_ref,
-                rows=rows,
-                locator=locator,
-                source_index=index,
-            )
+        current = _ParsedTable(
+            table_ref=table_ref,
+            caption=_table_caption(item, ref_text),
+            section_ref=section_ref,
+            rows=rows,
+            locator=locator,
+            source_index=index,
         )
+        if parsed and _is_continuation_of(current, parsed[-1]):
+            prev = parsed[-1]
+            merged_rows = prev.rows + current.rows
+            merged_locator = _merge_locator(prev.locator, current.locator)
+            parsed[-1] = _ParsedTable(
+                table_ref=prev.table_ref,
+                caption=prev.caption,
+                section_ref=prev.section_ref,
+                rows=merged_rows,
+                locator=merged_locator,
+                source_index=prev.source_index,
+            )
+        else:
+            parsed.append(current)
     return tuple(parsed)
 
 
@@ -735,6 +747,87 @@ def _section_ref_for_page(sections: tuple[_ParsedSection, ...], page_no: int | N
         if section_page is not None and section_page <= page_no:
             best = section
     return best.section_ref if best else (sections[0].section_ref if sections else None)
+
+
+_HEADER_KEYWORDS = frozenset({"序号", "代码", "名称", "金额", "比例", "项目", "日期", "数量", "备注"})
+
+
+def _first_cell_is_integer(row: tuple[str, ...]) -> bool:
+    """检查首列是否为整数（序号的典型特征，表示数据行而非表头）。"""
+
+    if not row:
+        return False
+    try:
+        int(row[0].strip().replace(",", ""))
+        return True
+    except (ValueError, IndexError):
+        return False
+
+
+def _row_has_header_keywords(row: tuple[str, ...]) -> bool:
+    """检查行中是否包含常见中文表头关键词。"""
+
+    for cell in row:
+        for kw in _HEADER_KEYWORDS:
+            if kw in cell:
+                return True
+    return False
+
+
+def _has_header_row(rows: tuple[tuple[str, ...], ...]) -> bool:
+    """判断表格第一行是否为表头。"""
+
+    if not rows:
+        return False
+    first_row = rows[0]
+    if _first_cell_is_integer(first_row):
+        return False
+    if _row_has_header_keywords(first_row):
+        return True
+    short_cells = sum(1 for cell in first_row if len(cell.strip()) <= 12)
+    return short_cells >= max(len(first_row) * 0.6, 3)
+
+
+def _is_continuation_of(current: _ParsedTable, previous: _ParsedTable) -> bool:
+    """判断 current 是否为 previous 的跨页续表（无表头，页码更大，列数兼容）。"""
+
+    if _has_header_row(current.rows):
+        return False
+    cur_page = current.locator.page_no
+    prev_page = previous.locator.page_no
+    if cur_page is not None and prev_page is not None and cur_page <= prev_page:
+        return False
+    cur_cols = len(current.rows[0]) if current.rows else 0
+    prev_cols = len(previous.rows[0]) if previous.rows else 0
+    if cur_cols > prev_cols + 1 or cur_cols < prev_cols - 1:
+        return False
+    return True
+
+
+def _merge_locator(base: Locator, continuation: Locator) -> Locator:
+    """合并跨页续表后的 locator，扩展 page_range。"""
+
+    pages: list[int] = []
+    if base.page_no is not None:
+        pages.append(base.page_no)
+    if continuation.page_no is not None:
+        pages.append(continuation.page_no)
+    if base.page_range:
+        pages.extend(base.page_range)
+    if continuation.page_range:
+        pages.extend(continuation.page_range)
+    page_range = (min(pages), max(pages)) if pages else base.page_range
+    return Locator(
+        document_id=base.document_id,
+        locator_kind=base.locator_kind,
+        section_ref=base.section_ref,
+        table_ref=base.table_ref,
+        page_no=base.page_no,
+        page_range=page_range,
+        internal_ref=base.internal_ref,
+        internal_ref_available=base.internal_ref_available,
+        bbox=base.bbox,
+    )
 
 
 def _bounded(text: str, max_chars: int) -> tuple[str, bool]:
