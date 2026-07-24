@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from fund_agent.agent import AgentRunResult
+from fund_agent.agent import AgentRunResult, ToolTraceEntry
 from fund_agent.fund.document_tools.constants import (
     FailureCode,
     ReportType,
@@ -1105,3 +1105,39 @@ class StressTestResult:
     benchmark_return_rate: float | None
     excess_return: float | None
     stress_level: str | None
+
+
+@dataclass(frozen=True)
+class AskQuestionRequest:
+    """LLM 问答请求。
+
+    参数:
+        document_id: 必选，public reading tools 使用的文档身份。
+        question: 必选，用户自然语言问题。
+        session_id: 可选会话 ID；Phase 5 接受但忽略，预留 Phase 6。
+        work_dir: 可选受控工作目录，默认 .fund_checklist。
+    """
+
+    document_id: str
+    question: str
+    session_id: str | None = None
+    work_dir: Path = Path(".fund_checklist")
+
+
+@dataclass(frozen=True)
+class AskQuestionResult:
+    """LLM 问答结果。
+
+    参数:
+        answer: 最终回答文本。
+        citations: 支撑回答的 citation 元组。
+        tool_trace: LLM 工具调用轨迹。
+        routing_trace: profile routing 尝试记录。
+        failure: 稳定失败分类；成功时为 None。
+    """
+
+    answer: str
+    citations: tuple[Citation, ...]
+    tool_trace: tuple[ToolTraceEntry, ...]
+    routing_trace: tuple[QueryRouteAttempt, ...]
+    failure: ToolFailure | None = None

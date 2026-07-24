@@ -19,9 +19,11 @@ from fund_agent.fund.document_tools.persistent_repository import (
     FilesystemReportRepository,
 )
 from fund_agent.agent.deepseek_llm import DeepSeekLlmClient
+from fund_agent.agent.stream_events import StreamEventType
 from fund_agent.service import (
     AggregateMultiYearAnnualPerformanceRequest,
     AnnualReportDocument,
+    AskQuestionRequest,
     DeepAuditRequest,
     DisclosureAuditRequest,
     ExtractAllocationRequest,
@@ -78,7 +80,10 @@ def run_cli(
     """
 
     parser = build_parser()
-    args = parser.parse_args(argv)
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        return exc.code if isinstance(exc.code, int) else UNEXPECTED_FAILURE_EXIT_CODE
     try:
         if args.command == "read":
             return _run_read_command(args, stdout=stdout, stderr=stderr)
@@ -100,6 +105,8 @@ def run_cli(
             return _run_deep_audit_command(args, stdout=stdout, stderr=stderr)
         if args.command == "generate":
             return _run_generate_command(args, stdout=stdout, stderr=stderr)
+        if args.command == "ask":
+            return _run_ask_command(args, stdout=stdout, stderr=stderr)
     except DocumentToolError as exc:
         _write_classified_failure(ToolFailure(code=exc.code, message=exc.message), stderr)
         return CLASSIFIED_FAILURE_EXIT_CODE
@@ -187,6 +194,13 @@ def build_parser() -> argparse.ArgumentParser:
     generate_parser.add_argument("--format", dest="output_format", default="json", choices=["json", "markdown", "pdf"])
     generate_parser.add_argument("--llm", action="store_true", default=False, help="使用 LLM 生成分析文本（需要 DEEPSEEK_API_KEY）")
     generate_parser.add_argument("--work-dir", default=Path(DEFAULT_WORK_DIR), type=Path)
+
+    ask_parser = subparsers.add_parser("ask")
+    ask_parser.add_argument("question", help="用户问题")
+    ask_parser.add_argument("--document-id", required=True, help="已导入年报的 document_id")
+    ask_parser.add_argument("--work-dir", default=Path(DEFAULT_WORK_DIR), type=Path)
+    ask_parser.add_argument("--no-stream", action="store_true", default=False, help="禁用流式输出，等待完成后输出 JSON")
+    ask_parser.add_argument("--enable-tool-trace", action="store_true", default=False, help="流式模式下同步输出 tool call/result")
     return parser
 
 
@@ -257,6 +271,106 @@ def _run_read_command(args: argparse.Namespace, *, stdout: TextIO, stderr: TextI
         return CLASSIFIED_FAILURE_EXIT_CODE
 
     _write_success_output(agent_result, stdout)
+    return SUCCESS_EXIT_CODE
+
+
+def _run_ask_command(args: argparse.Namespace, *, stdout: TextIO, stderr: TextIO) -> int:
+    """执行 LLM 问答，默认流式输出，--no-stream 回退 JSON。
+
+    参数:
+        args: argparse 解析出的 ask 参数。
+        stdout: 成功输出流。
+        stderr: 失败输出流。
+
+    返回:
+        成功返回 0；Agent 返回 ToolFailure 时返回 2。
+    """
+
+    service = FundReadingService()
+
+    if args.no_stream:
+        result = service.ask_question(
+            AskQuestionRequest(
+                document_id=args.document_id,
+                question=args.question,
+                work_dir=Path(args.work_dir),
+            ),
+        )
+        if result.failure is not None:
+            _write_classified_failure(result.failure, stderr)
+            return CLASSIFIED_FAILURE_EXIT_CODE
+
+        output = {
+            "answer": result.answer,
+            "citations": [
+                {
+                    "document_id": c.document_id,
+                    "fund_code": c.fund_code,
+                    "fund_name": c.fund_name,
+                    "year": c.year,
+                    "report_type": c.report_type,
+                }
+                for c in result.citations
+            ],
+            "routing_trace": [
+                {
+                    "query": r.query,
+                    "profile_name": r.profile_name,
+                    "result_kind": r.result_kind,
+                    "failure_code": r.failure_code.value if r.failure_code else None,
+                }
+                for r in result.routing_trace
+            ],
+        }
+        print(json.dumps(output, ensure_ascii=False, indent=2), file=stdout)
+        return SUCCESS_EXIT_CODE
+
+    # 流式输出模式
+    show_tool_trace = getattr(args, "enable_tool_trace", False)
+    failure_ref = [None]  # mutable container for callback
+
+    def on_stream_event(event: object) -> None:
+        from fund_agent.agent.stream_events import StreamEvent, StreamEventType as SE
+
+        if not isinstance(event, StreamEvent):
+            return
+        if event.type == StreamEventType.CONTENT_DELTA and isinstance(event.payload, str):
+            stdout.write(event.payload)
+            stdout.flush()
+        elif event.type == StreamEventType.TOOL_EVENT and show_tool_trace:
+            phase = event.payload.get("phase", "") if isinstance(event.payload, dict) else ""
+            tool_name = event.payload.get("tool_name", "") if isinstance(event.payload, dict) else ""
+            if phase == "call":
+                stdout.write(f"\n[TOOL] calling {tool_name}...\n")
+            elif phase == "result":
+                citations = event.payload.get("citation_count", 0) if isinstance(event.payload, dict) else 0
+                evidence_len = event.payload.get("evidence_length", 0) if isinstance(event.payload, dict) else 0
+                stdout.write(f"[TOOL] {tool_name} done ({citations} citations, {evidence_len} chars)\n")
+            stdout.flush()
+        elif event.type == StreamEventType.ERROR:
+            msg = event.payload.get("message", "") if isinstance(event.payload, dict) else str(event.payload)
+            failure_ref[0] = msg
+        elif event.type == StreamEventType.DONE:
+            stdout.write("\n")
+            stdout.flush()
+
+    result = service.ask_question(
+        AskQuestionRequest(
+            document_id=args.document_id,
+            question=args.question,
+            work_dir=Path(args.work_dir),
+        ),
+        on_event=on_stream_event,
+    )
+
+    if result.failure is not None:
+        if failure_ref[0] is None:
+            _write_classified_failure(result.failure, stderr)
+        else:
+            print(f"\nfailure_code={result.failure.code.value}", file=stderr)
+            print(f"message={result.failure.message}", file=stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
     return SUCCESS_EXIT_CODE
 
 

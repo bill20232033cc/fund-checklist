@@ -2181,6 +2181,152 @@ def test_generate_json_output_includes_warnings(monkeypatch, tmp_path: Path) -> 
 
 
 
+# ── ask 子命令测试 ──────────────────────────────────────────────────
+
+
+def test_ask_parser_help_contains_required_args() -> None:
+    """ask --help 必须显示 --document-id、--no-stream、--enable-tool-trace。"""
+
+    parser = build_parser()
+    # 从 subparsers 中获取 ask 子命令的 help
+    ask_help = parser._subparsers._group_actions[0].choices["ask"].format_help()
+
+    assert "--document-id" in ask_help
+    assert "--no-stream" in ask_help
+    assert "--enable-tool-trace" in ask_help
+
+
+def test_ask_missing_document_id_exits_with_error() -> None:
+    """缺 --document-id 时 argparse 报错并退出。"""
+
+    exit_code, stdout, stderr = _run(["ask", "基金经理是谁？"])
+    # argparse 对缺必须参数调用 sys.exit(2)，run_cli 捕获后透传退出码
+    assert exit_code == 2
+
+
+def test_ask_no_stream_outputs_json_on_success(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """--no-stream 模式成功时输出 JSON，含 answer 和 routing_trace。"""
+
+    from fund_agent.service.models import AskQuestionResult, QueryRouteAttempt
+
+    fake_result = AskQuestionResult(
+        answer="基金经理张明负责本基金投资管理。",
+        citations=(),
+        tool_trace=(),
+        routing_trace=(
+            QueryRouteAttempt(
+                query="基金经理是谁？",
+                profile_name=None,
+                result_kind="success",
+                failure_code=None,
+            ),
+        ),
+        failure=None,
+    )
+
+    def _fake_ask_question(self, request, *, on_event=None):
+        return fake_result
+
+    monkeypatch.setattr(
+        service_module.FundReadingService, "ask_question", _fake_ask_question
+    )
+
+    exit_code, stdout, stderr = _run([
+        "ask",
+        "基金经理是谁？",
+        "--document-id",
+        "test-doc-id",
+        "--no-stream",
+        "--work-dir",
+        str(tmp_path),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE
+    assert "基金经理张明" in stdout
+    assert "routing_trace" in stdout
+    assert stderr == ""
+
+
+def test_ask_no_stream_failure_outputs_error(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """--no-stream 模式失败时输出 failure，退出码 2。"""
+
+    from fund_agent.service.models import AskQuestionResult
+
+    fake_result = AskQuestionResult(
+        answer="",
+        citations=(),
+        tool_trace=(),
+        routing_trace=(),
+        failure=ToolFailure(code=FailureCode.NOT_FOUND, message="文档不存在"),
+    )
+
+    def _fake_ask_question(self, request, *, on_event=None):
+        return fake_result
+
+    monkeypatch.setattr(
+        service_module.FundReadingService, "ask_question", _fake_ask_question
+    )
+
+    exit_code, stdout, stderr = _run([
+        "ask",
+        "基金经理是谁？",
+        "--document-id",
+        "test-doc-id",
+        "--no-stream",
+        "--work-dir",
+        str(tmp_path),
+    ])
+
+    assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
+    assert "failure_code=not_found" in stderr
+    assert stdout == ""
+
+
+def test_ask_streaming_mode_passes_on_event_callback(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """默认流式模式向 ask_question 传递 on_event callback。"""
+
+    received_events: list = []
+
+    def _fake_ask_question(self, request, *, on_event=None):
+        from fund_agent.agent.stream_events import StreamEvent, StreamEventType
+        # 模拟流式事件
+        if on_event:
+            on_event(StreamEvent(type=StreamEventType.CONTENT_DELTA, payload="测试"))
+            on_event(StreamEvent(type=StreamEventType.DONE, payload=None))
+        from fund_agent.service.models import AskQuestionResult, QueryRouteAttempt
+        return AskQuestionResult(
+            answer="测试",
+            citations=(),
+            tool_trace=(),
+            routing_trace=(
+                QueryRouteAttempt(query="x", profile_name=None, result_kind="success"),
+            ),
+            failure=None,
+        )
+
+    monkeypatch.setattr(
+        service_module.FundReadingService, "ask_question", _fake_ask_question
+    )
+
+    exit_code, stdout, stderr = _run([
+        "ask",
+        "测试问题",
+        "--document-id",
+        "test-doc-id",
+        "--work-dir",
+        str(tmp_path),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE
+    assert "测试" in stdout  # CONTENT_DELTA payload 被打印
+
+
 def test_generate_cli_real_pdf_smoke_writes_report_and_audit(monkeypatch, tmp_path: Path) -> None:
     """17C 真实 PDF generate smoke：import -> generate -> 落盘 report/sidecar/audit。"""
 

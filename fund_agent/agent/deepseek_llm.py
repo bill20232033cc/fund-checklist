@@ -7,12 +7,13 @@ import os
 import socket
 import urllib.error
 import urllib.request
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.parse import urlsplit, urlunsplit
 
 from fund_agent.agent.llm_tool_loop import FinalAnswer, LlmClientFailure, ToolCall, ToolResult
+from fund_agent.agent.stream_events import StreamEvent, StreamEventType
 from fund_agent.fund.document_tools.constants import FailureCode, LocatorKind, ToolName
 from fund_agent.fund.document_tools.models import Citation, Locator
 
@@ -20,7 +21,7 @@ DEEPSEEK_API_KEY_ENV = "DEEPSEEK_API_KEY"
 DEEPSEEK_BASE_URL_ENV = "DEEPSEEK_BASE_URL"
 DEEPSEEK_MODEL_ENV = "DEEPSEEK_MODEL"
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-DEFAULT_DEEPSEEK_MODEL = "deepseek-chat"
+DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-pro"
 DEFAULT_DEEPSEEK_TIMEOUT_SECONDS = 60
 _CHAT_COMPLETIONS_PATH = "/chat/completions"
 _JSON_CONTENT_TYPE = "application/json"
@@ -34,6 +35,17 @@ _SYSTEM_PROMPT = (
     "不得请求 repository/private loader、raw PDF、raw Docling JSON、本地路径、cache path、"
     "local_import_id、URL secret 或 parser private payload。"
 )
+
+
+@dataclass(frozen=True)
+class ExecutionOptions:
+    """DeepSeekLlmClient 执行选项。
+
+    参数:
+        stream: 是否使用 SSE 流式传输；默认 True。
+    """
+
+    stream: bool = True
 
 
 @dataclass(frozen=True)
@@ -83,6 +95,7 @@ class DeepSeekTransportUnavailable(Exception):
 
     参数:
         message: 安全错误信息；不得包含 API key、raw body、URL secret 或本地路径。
+        status_code: HTTP 状态码（如 401/403/429/5xx），用于区分是否可重试。
 
     返回:
         可被 adapter 映射为 unavailable 的异常。
@@ -90,6 +103,10 @@ class DeepSeekTransportUnavailable(Exception):
     异常:
         构造时不抛出业务异常。
     """
+
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class DeepSeekTransportProtocol(Protocol):
@@ -136,7 +153,28 @@ class UrlLibDeepSeekTransport:
             with urllib.request.urlopen(urllib_request, timeout=request.timeout_seconds) as response:
                 response_body = response.read().decode("utf-8", errors="replace")
                 return DeepSeekChatResponse(status_code=response.status, body=response_body)
-        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, socket.timeout) as exc:
+        except urllib.error.HTTPError as exc:
+            raise DeepSeekTransportUnavailable(_UNAVAILABLE_MESSAGE, status_code=exc.code) from exc
+        except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
+            raise DeepSeekTransportUnavailable(_UNAVAILABLE_MESSAGE) from exc
+
+    def send_stream(self, request: DeepSeekChatRequest) -> Iterator[str]:
+        """用 urllib 发送流式请求并逐行 yield SSE 数据。"""
+
+        body = json.dumps(request.payload, ensure_ascii=False).encode("utf-8")
+        urllib_request = urllib.request.Request(
+            request.url,
+            data=body,
+            headers=dict(request.headers),
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(urllib_request, timeout=request.timeout_seconds) as response:
+                for line in response:
+                    yield line.decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            raise DeepSeekTransportUnavailable(_UNAVAILABLE_MESSAGE, status_code=exc.code) from exc
+        except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
             raise DeepSeekTransportUnavailable(_UNAVAILABLE_MESSAGE) from exc
 
 
@@ -162,12 +200,14 @@ class DeepSeekLlmClient:
         transport: DeepSeekTransportProtocol | None = None,
         env: Mapping[str, str] | None = None,
         timeout_seconds: int = DEFAULT_DEEPSEEK_TIMEOUT_SECONDS,
+        options: ExecutionOptions | None = None,
     ) -> None:
-        """保存 transport、环境变量来源和超时设置。"""
+        """保存 transport、环境变量来源、超时设置和执行选项。"""
 
         self._transport = transport or UrlLibDeepSeekTransport()
         self._env = env
         self._timeout_seconds = timeout_seconds
+        self._options = options or ExecutionOptions()
 
     def next_step(
         self,
@@ -176,12 +216,21 @@ class DeepSeekLlmClient:
         query: str,
         tool_results: tuple[ToolResult, ...],
     ) -> ToolCall | FinalAnswer:
-        """调用 DeepSeek 并解析为受控 ToolCall 或 FinalAnswer。"""
+        """调用 DeepSeek 并解析为受控 ToolCall 或 FinalAnswer。
+
+        network error / 429 / timeout → 3 次指数退避重试（1s/2s/4s）。
+        auth error（401/403）→ 不重试，立即 fail。
+        stream 选项控制是否使用 SSE 传输；默认 True。
+        """
+
+        import time as _time
 
         env = self._env if self._env is not None else os.environ
         api_key = env.get(DEEPSEEK_API_KEY_ENV, "").strip()
         if not api_key:
             raise LlmClientFailure(FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE)
+
+        use_stream = self._options.stream and hasattr(self._transport, "send_stream")
 
         request = DeepSeekChatRequest(
             url=_chat_completions_url(env.get(DEEPSEEK_BASE_URL_ENV, DEFAULT_DEEPSEEK_BASE_URL)),
@@ -194,17 +243,108 @@ class DeepSeekLlmClient:
                 query=query,
                 tool_results=tool_results,
                 model=env.get(DEEPSEEK_MODEL_ENV, DEFAULT_DEEPSEEK_MODEL).strip() or DEFAULT_DEEPSEEK_MODEL,
+                stream=use_stream,
             ),
             timeout_seconds=self._timeout_seconds,
         )
-        try:
-            response = self._transport.send(request)
-        except DeepSeekTransportUnavailable as exc:
-            raise LlmClientFailure(FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE) from exc
 
-        if response.status_code < 200 or response.status_code >= 300:
-            raise LlmClientFailure(FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE)
-        return _parse_response(response.body)
+        max_retries = 3
+        last_exc: Exception | None = None
+        for attempt in range(max_retries):
+            try:
+                if use_stream:
+                    lines = list(self._transport.send_stream(request))
+                    body = json.dumps(_collect_sse_full_response(iter(lines)), ensure_ascii=False)
+                    return _parse_response(body)
+                response = self._transport.send(request)
+            except DeepSeekTransportUnavailable as exc:
+                if exc.status_code in (401, 403):
+                    raise LlmClientFailure(FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE) from exc
+                last_exc = exc
+                if attempt < max_retries - 1:
+                    _time.sleep(2**attempt)
+                continue
+
+            if response.status_code in (401, 403):
+                raise LlmClientFailure(FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE)
+            if 200 <= response.status_code < 300:
+                return _parse_response(response.body)
+            # 非 2xx → 重试
+            last_exc = LlmClientFailure(FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE)
+            if attempt < max_retries - 1:
+                _time.sleep(2**attempt)
+
+        if isinstance(last_exc, DeepSeekTransportUnavailable):
+            raise LlmClientFailure(FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE) from last_exc
+        if last_exc is not None:
+            raise last_exc
+        raise LlmClientFailure(FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE)
+
+    def next_step_stream(
+        self,
+        *,
+        document_id: str,
+        query: str,
+        tool_results: tuple[ToolResult, ...],
+    ) -> Iterator[StreamEvent]:
+        """流式调用 DeepSeek 并 yield StreamEvent。
+
+        SSE data 行解析为 CONTENT_DELTA / REASONING_DELTA / TOOL_EVENT，
+        finish_reason=stop → DONE，HTTP/network error → ERROR。
+        """
+
+        import time as _time
+
+        env = self._env if self._env is not None else os.environ
+        api_key = env.get(DEEPSEEK_API_KEY_ENV, "").strip()
+        if not api_key:
+            yield StreamEvent(
+                type=StreamEventType.ERROR,
+                payload={"code": FailureCode.UNAVAILABLE.value, "message": _UNAVAILABLE_MESSAGE},
+            )
+            return
+
+        request = DeepSeekChatRequest(
+            url=_chat_completions_url(env.get(DEEPSEEK_BASE_URL_ENV, DEFAULT_DEEPSEEK_BASE_URL)),
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": _JSON_CONTENT_TYPE,
+            },
+            payload=_request_payload(
+                document_id=document_id,
+                query=query,
+                tool_results=tool_results,
+                model=env.get(DEEPSEEK_MODEL_ENV, DEFAULT_DEEPSEEK_MODEL).strip() or DEFAULT_DEEPSEEK_MODEL,
+                stream=True,
+            ),
+            timeout_seconds=self._timeout_seconds,
+        )
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                for event in _parse_sse_stream(self._transport.send_stream(request)):
+                    yield event
+                return
+            except DeepSeekTransportUnavailable as exc:
+                if exc.status_code in (401, 403):
+                    yield StreamEvent(
+                        type=StreamEventType.ERROR,
+                        payload={"code": FailureCode.UNAVAILABLE.value, "message": _UNAVAILABLE_MESSAGE},
+                    )
+                    return
+                if attempt < max_retries - 1:
+                    _time.sleep(2**attempt)
+                continue
+            except Exception:
+                if attempt < max_retries - 1:
+                    _time.sleep(2**attempt)
+                continue
+
+        yield StreamEvent(
+            type=StreamEventType.ERROR,
+            payload={"code": FailureCode.UNAVAILABLE.value, "message": _UNAVAILABLE_MESSAGE},
+        )
 
     def generate_text(
         self,
@@ -286,6 +426,7 @@ def _request_payload(
     query: str,
     tool_results: tuple[ToolResult, ...],
     model: str,
+    stream: bool = False,
 ) -> dict[str, Any]:
     """构造不含 raw/private payload 的 OpenAI-compatible chat completions payload。"""
 
@@ -308,7 +449,7 @@ def _request_payload(
         "tools": _tool_schemas(),
         "tool_choice": "auto",
         "temperature": 0,
-        "stream": False,
+        "stream": stream,
     }
 
 
@@ -369,6 +510,16 @@ def _tool_schemas() -> list[dict[str, Any]]:
                 "max_chars": {"type": "integer"},
             },
             ("document_id", "locator"),
+        ),
+        _tool_schema(
+            ToolName.AGGREGATE_MULTI_YEAR_ANNUAL_PERFORMANCE,
+            {
+                "fund_code": {"type": "string"},
+                "requested_years": {"type": "array", "items": {"type": "integer"}},
+                "annual_report_documents": {"type": "array", "items": {"type": "string"}},
+                "share_class": {"type": "string"},
+            },
+            ("fund_code", "requested_years", "annual_report_documents"),
         ),
     ]
 
@@ -613,3 +764,184 @@ def _parse_text_content(body: str) -> str:
     if not isinstance(content, str) or not content.strip():
         raise LlmClientFailure(FailureCode.LLM_MALFORMED_RESPONSE, _MALFORMED_MESSAGE)
     return content
+
+
+@dataclass
+class _ToolCallAccumulator:
+    """SSE 流式工具调用增量累加器。"""
+
+    index: int
+    id: str = ""
+    type: str = "function"
+    function_name: str = ""
+    function_arguments: str = ""
+
+
+def _parse_sse_stream(lines: Iterator[str]) -> Iterator[StreamEvent]:
+    """解析 SSE data 行，产出 StreamEvent 流。
+
+    content delta → CONTENT_DELTA
+    reasoning_content delta → REASONING_DELTA
+    tool_calls delta → 累积完整后产出 TOOL_EVENT
+    finish_reason=stop → DONE
+    finish_reason=tool_calls → TOOL_EVENT + DONE
+    finish_reason=length → WARNING + DONE
+    """
+
+    seq = 0
+    accumulators: dict[int, _ToolCallAccumulator] = {}
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+        if not line.startswith("data:"):
+            continue
+
+        data = line[5:].strip()
+        if data == "[DONE]":
+            return
+
+        try:
+            chunk = json.loads(data)
+        except json.JSONDecodeError:
+            yield StreamEvent(
+                type=StreamEventType.ERROR,
+                payload={"message": "SSE chunk parse error"},
+                sequence=seq,
+            )
+            seq += 1
+            continue
+
+        choices = chunk.get("choices", [])
+        if not choices:
+            continue
+
+        choice = choices[0]
+        delta = choice.get("delta", {})
+        finish_reason = choice.get("finish_reason")
+
+        # Content delta
+        content = delta.get("content")
+        if content:
+            yield StreamEvent(
+                type=StreamEventType.CONTENT_DELTA,
+                payload=content,
+                sequence=seq,
+            )
+            seq += 1
+
+        # Reasoning delta (DeepSeek-specific)
+        reasoning = delta.get("reasoning_content")
+        if reasoning:
+            yield StreamEvent(
+                type=StreamEventType.REASONING_DELTA,
+                payload=reasoning,
+                sequence=seq,
+            )
+            seq += 1
+
+        # Tool call delta — accumulate
+        tool_calls = delta.get("tool_calls")
+        if tool_calls:
+            for tc in tool_calls:
+                idx = tc.get("index", 0)
+                if idx not in accumulators:
+                    accumulators[idx] = _ToolCallAccumulator(index=idx)
+                acc = accumulators[idx]
+                if "id" in tc:
+                    acc.id = tc["id"]
+                if "type" in tc:
+                    acc.type = tc["type"]
+                func = tc.get("function")
+                if func:
+                    if "name" in func:
+                        acc.function_name = func["name"]
+                    if "arguments" in func:
+                        acc.function_arguments += func["arguments"]
+
+        # Finish reason
+        if finish_reason:
+            if finish_reason == "stop":
+                yield StreamEvent(type=StreamEventType.DONE, payload=None, sequence=seq)
+                seq += 1
+            elif finish_reason == "tool_calls":
+                for acc in sorted(accumulators.values(), key=lambda a: a.index):
+                    yield StreamEvent(
+                        type=StreamEventType.TOOL_EVENT,
+                        payload={
+                            "phase": "call",
+                            "tool_name": acc.function_name,
+                            "arguments": acc.function_arguments,
+                            "call_id": acc.id,
+                        },
+                        sequence=seq,
+                    )
+                    seq += 1
+                yield StreamEvent(type=StreamEventType.DONE, payload=None, sequence=seq)
+                seq += 1
+            elif finish_reason == "length":
+                yield StreamEvent(
+                    type=StreamEventType.WARNING,
+                    payload={"message": "Response truncated due to length limit"},
+                    sequence=seq,
+                )
+                seq += 1
+                yield StreamEvent(type=StreamEventType.DONE, payload=None, sequence=seq)
+                seq += 1
+            # Other finish reasons (content_filter, etc.) → DONE
+            else:
+                yield StreamEvent(type=StreamEventType.DONE, payload=None, sequence=seq)
+                seq += 1
+
+
+def _collect_sse_full_response(lines: Iterator[str]) -> dict[str, Any]:
+    """将 SSE 流收集为完整的 OpenAI-compatible message dict，供 _parse_response 使用。"""
+
+    content_parts: list[str] = []
+    tool_calls: dict[int, dict[str, Any]] = {}
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data == "[DONE]":
+            break
+        try:
+            chunk = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+
+        choices = chunk.get("choices", [])
+        if not choices:
+            continue
+        delta = choices[0].get("delta", {})
+
+        content = delta.get("content")
+        if content:
+            content_parts.append(content)
+
+        tc_list = delta.get("tool_calls")
+        if tc_list:
+            for tc in tc_list:
+                idx = tc.get("index", 0)
+                if idx not in tool_calls:
+                    tool_calls[idx] = {
+                        "id": tc.get("id", ""),
+                        "type": tc.get("type", "function"),
+                        "function": {"name": "", "arguments": ""},
+                    }
+                if "id" in tc:
+                    tool_calls[idx]["id"] = tc["id"]
+                func = tc.get("function")
+                if func:
+                    if "name" in func:
+                        tool_calls[idx]["function"]["name"] = func["name"]
+                    if "arguments" in func:
+                        tool_calls[idx]["function"]["arguments"] += func["arguments"]
+
+    message: dict[str, Any] = {"role": "assistant", "content": "".join(content_parts) or None}
+    if tool_calls:
+        message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
+    return {"choices": [{"message": message}]}

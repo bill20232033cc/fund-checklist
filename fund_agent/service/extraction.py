@@ -11,7 +11,8 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fund_agent.agent import AgentRunResult, MinimalFundDocumentAgent
+from fund_agent.agent import AgentRunResult, MinimalFundDocumentAgent, LlmToolLoopRunner, DeepSeekLlmClient, FakeLlmClient
+from fund_agent.agent.stream_events import StreamEvent, StreamEventType
 from fund_agent.fund.document_tools.constants import (
     DOCLING_JSON_SUFFIX,
     FailureCode,
@@ -43,6 +44,8 @@ from .models import (
     AggregateMultiYearAnnualPerformanceRequest,
     AggregateMultiYearAnnualPerformanceResult,
     AnnualAllocationResult,
+    AskQuestionRequest,
+    AskQuestionResult,
     AnnualExcessReturnExtraction,
     AnnualFeeResult,
     AnnualHoldingsResult,
@@ -113,6 +116,7 @@ from .signal_scoring import (
 
 
 HostFactory = Callable[[FundDocumentToolService], MinimalHost]
+RunnerFactory = Callable[[FundDocumentToolService], LlmToolLoopRunner]
 
 PDF_BLOB_DIRNAME = "pdf_blobs"
 DOCLING_JSON_DIRNAME = "docling_json"
@@ -698,11 +702,13 @@ class FundReadingService:
         *,
         converter_factory: ConverterFactory | None = None,
         host_factory: HostFactory | None = None,
+        runner_factory: RunnerFactory | None = None,
     ) -> None:
         """初始化 Service 的可注入依赖。"""
 
         self._converter_factory = converter_factory or DoclingConverter
         self._host_factory = host_factory or _default_host_factory
+        self._runner_factory = runner_factory or _default_runner_factory
 
     def import_local_report(self, request: ImportLocalReportRequest) -> ImportLocalReportResult:
         """导入本地 PDF，必要时转换 Docling JSON，并登记 completed report。
@@ -752,6 +758,129 @@ class FundReadingService:
             document_id=document_id,
             agent_result=routed.agent_result,
             routing_trace=routed.routing_trace,
+        )
+
+    def ask_question(
+        self,
+        request: AskQuestionRequest,
+        *,
+        on_event: Callable[[StreamEvent], None] | None = None,
+    ) -> AskQuestionResult:
+        """LLM 自主工具调用问答，含 profile routing 提供受控上下文。
+
+        参数:
+            request: 问答请求，document_id 和 question 必填。
+            on_event: 可选流式事件回调，每个 StreamEvent 产出时调用。
+
+        返回:
+            AskQuestionResult，含 answer、citations、tool_trace 和 routing_trace。
+        """
+
+        from fund_agent.host import MinimalHost as MH
+
+        document_id = request.document_id
+        from fund_agent.fund.document_tools.persistent_repository import (
+            FilesystemReportRepository,
+            CATALOG_FILENAME as _CATALOG_FILENAME,
+        )
+        from fund_agent.fund.document_tools.errors import DocumentToolError
+
+        work_dir = request.work_dir
+        repo = FilesystemReportRepository(
+            catalog_path=work_dir / _CATALOG_FILENAME,
+            blob_root=work_dir / PDF_BLOB_DIRNAME,
+            docling_json_root=work_dir / DOCLING_JSON_DIRNAME,
+        )
+        try:
+            store = repo.load_store(document_id)
+        except DocumentToolError as exc:
+            return AskQuestionResult(
+                answer="",
+                citations=(),
+                tool_trace=(),
+                routing_trace=(),
+                failure=ToolFailure(code=exc.code, message=exc.message),
+            )
+        tool_service = FundDocumentToolService({document_id: store})
+
+        # Profile routing: 根据 question 关键词确定受控 profile
+        route_plan = _route_plan_for_query(request.question)
+
+        # 执行 candidate queries 收集 grounded context
+        context_parts: list[str] = []
+        routing_trace: list[QueryRouteAttempt] = []
+        det_host = MH(MinimalFundDocumentAgent(tool_service))
+        for candidate_query in route_plan.candidate_queries:
+            result = det_host.run(document_id=document_id, query=candidate_query)
+            is_success = result.failure is None
+            routing_trace.append(
+                QueryRouteAttempt(
+                    query=candidate_query,
+                    profile_name=route_plan.profile_name,
+                    result_kind=_ROUTE_RESULT_SUCCESS if is_success else _ROUTE_RESULT_FAILURE,
+                    failure_code=result.failure.code if result.failure else None,
+                )
+            )
+            if is_success and result.answer.strip():
+                context_parts.append(f'[查询{candidate_query}]\n{result.answer}')
+
+        # 构建增强 query：routing context + 原始问题
+        routing_context = "\n\n".join(context_parts)
+        if routing_context:
+            augmented_query = (
+                f"以下是已检索到的年报相关内容，仅供参考：\n\n{routing_context}\n\n"
+                f"用户问题：{request.question}\n\n"
+                f"请先调用 search_document 和 read_section 工具验证相关信息，"
+                f"然后基于工具返回的证据回答。每个事实必须引用来源。"
+            )
+        else:
+            augmented_query = request.question
+
+        # 创建 LLM runner 并通过 Host 运行
+        runner = self._runner_factory(tool_service)
+        llm_host = MH(runner)  # type: ignore[arg-type]
+
+        answer_parts: list[str] = []
+        citations_list: list[Citation] = []
+        failure: ToolFailure | None = None
+
+        for event in llm_host.run_agent_stream(document_id=document_id, query=augmented_query):
+            if on_event is not None:
+                on_event(event)
+            if event.type == StreamEventType.CONTENT_DELTA:
+                if isinstance(event.payload, str):
+                    answer_parts.append(event.payload)
+            elif event.type == StreamEventType.METADATA:
+                meta_citations = (event.payload or {}).get("citations", [])
+                for c in meta_citations:
+                    if isinstance(c, dict):
+                        try:
+                            citations_list.append(
+                                Citation(
+                                    document_id=str(c.get("document_id", "")),
+                                    fund_code=str(c.get("fund_code", "")),
+                                    fund_name=str(c.get("fund_name", "")),
+                                    year=int(c.get("year", 0)),
+                                    report_type=str(c.get("report_type", "")),
+                                    locator=None,  # type: ignore[arg-type]
+                                )
+                            )
+                        except (ValueError, TypeError):
+                            pass
+            elif event.type == StreamEventType.ERROR:
+                failure = ToolFailure(
+                    code=FailureCode(event.payload.get("code", FailureCode.UNAVAILABLE.value))
+                    if isinstance(event.payload, dict)
+                    else FailureCode.UNAVAILABLE,
+                    message=event.payload.get("message", "") if isinstance(event.payload, dict) else str(event.payload),
+                )
+
+        return AskQuestionResult(
+            answer="".join(answer_parts),
+            citations=tuple(citations_list),
+            tool_trace=(),  # tool_trace 从 runner 内部 trace 获取
+            routing_trace=tuple(routing_trace),
+            failure=failure,
         )
 
     def extract_fee_rates(self, request: ExtractFeeRatesRequest) -> ExtractFeeRatesResult:
@@ -3677,6 +3806,12 @@ def _default_host_factory(tool_service: FundDocumentToolService) -> MinimalHost:
     """按默认 deterministic Agent 装配最小 Host。"""
 
     return MinimalHost(MinimalFundDocumentAgent(tool_service))
+
+
+def _default_runner_factory(tool_service: FundDocumentToolService) -> LlmToolLoopRunner:
+    """按默认 DeepSeek LLM client 装配 LlmToolLoopRunner。"""
+
+    return LlmToolLoopRunner(tool_service=tool_service, llm_client=DeepSeekLlmClient())
 
 
 def _normalized_multi_year_requested_years(requested_years: tuple[int, ...] | list[int]) -> tuple[int, ...]:

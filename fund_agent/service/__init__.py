@@ -23,6 +23,8 @@ from fund_agent.service.models import (
     AggregateMultiYearAnnualPerformanceRequest,
     AggregateMultiYearAnnualPerformanceResult,
     AnnualAllocationResult,
+    AskQuestionRequest,
+    AskQuestionResult,
     AnnualExcessReturnExtraction,
     AnnualFeeResult,
     AnnualHoldingsResult,

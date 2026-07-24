@@ -6,7 +6,9 @@ from fund_agent.agent.deepseek_llm import (
     DeepSeekLlmClient,
     DeepSeekTransportProtocol,
     DeepSeekTransportUnavailable,
+    ExecutionOptions,
 )
+from fund_agent.agent.stream_events import StreamEvent, StreamEventType
 from fund_agent.agent.llm_tool_loop import (
     ALLOWED_LLM_TOOL_NAMES,
     FakeLlmClient,
@@ -27,12 +29,15 @@ __all__ = [
     "DeepSeekLlmClient",
     "DeepSeekTransportProtocol",
     "DeepSeekTransportUnavailable",
+    "ExecutionOptions",
     "FakeLlmClient",
     "FinalAnswer",
     "LlmClientFailure",
     "LlmClientProtocol",
     "LlmToolLoopRunner",
     "MinimalFundDocumentAgent",
+    "StreamEvent",
+    "StreamEventType",
     "ToolCall",
     "ToolResult",
     "ToolTraceEntry",

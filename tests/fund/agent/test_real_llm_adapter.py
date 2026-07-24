@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -15,7 +15,10 @@ from fund_agent.agent import (
     DeepSeekChatResponse,
     DeepSeekLlmClient,
     DeepSeekTransportUnavailable,
+    ExecutionOptions,
     LlmToolLoopRunner,
+    StreamEvent,
+    StreamEventType,
 )
 from fund_agent.fund.document_tools.constants import FailureCode, LocatorKind, ReportType, SourceKind, ToolName
 from fund_agent.fund.document_tools.docling_store import DoclingDocumentStore
@@ -32,6 +35,7 @@ class QueueTransport:
 
     参数:
         responses: 每次 send 要返回的 response 或抛出的 exception。
+        stream_lines: send_stream 要返回的 SSE 行列表；为空时自动从 responses 转换。
 
     返回:
         DeepSeekTransportProtocol-compatible fake transport。
@@ -40,10 +44,15 @@ class QueueTransport:
         队列耗尽时抛 AssertionError，表示测试脚本错误。
     """
 
-    def __init__(self, responses: Iterable[DeepSeekChatResponse | Exception]) -> None:
+    def __init__(
+        self,
+        responses: Iterable[DeepSeekChatResponse | Exception] | None = None,
+        stream_lines: Iterable[list[str]] | None = None,
+    ) -> None:
         """保存 response 队列并记录收到的 request。"""
 
-        self._responses = list(responses)
+        self._responses = list(responses) if responses is not None else []
+        self._stream_lines = list(stream_lines) if stream_lines is not None else []
         self.requests: list[DeepSeekChatRequest] = []
 
     def send(self, request: DeepSeekChatRequest) -> DeepSeekChatResponse:
@@ -56,6 +65,52 @@ class QueueTransport:
         if isinstance(response, Exception):
             raise response
         return response
+
+    def send_stream(self, request: DeepSeekChatRequest) -> "Iterator[str]":
+        """记录 request 后 yield SSE 行；优先使用 stream_lines，否则从 responses 自动转换。"""
+
+        self.requests.append(request)
+        if self._stream_lines:
+            yield from self._stream_lines.pop(0)
+            return
+        if not self._responses:
+            raise AssertionError("fake stream transport exhausted")
+        item = self._responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        yield from _response_to_sse_lines(item)
+
+
+def _response_to_sse_lines(response: DeepSeekChatResponse) -> Iterator[str]:
+    """把非流式 DeepSeekChatResponse 转为 fake SSE 行，供 send_stream 使用。"""
+
+    if response.status_code != 200:
+        raise DeepSeekTransportUnavailable("unavailable", status_code=response.status_code)
+    try:
+        body = json.loads(response.body)
+        message = body["choices"][0]["message"]
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+        # 不可解析的响应体 → 把 raw body 作为 content 透传，
+        # 让 _parse_response 产生 LLM_MALFORMED_RESPONSE
+        chunk = {"choices": [{"delta": {"content": response.body}, "index": 0, "finish_reason": "stop"}]}
+        yield f"data: {json.dumps(chunk)}\n"
+        yield "data: [DONE]\n"
+        return
+
+    if message.get("tool_calls"):
+        tc = message["tool_calls"][0]
+        tc_chunk = {
+            "choices": [{"delta": {"tool_calls": [tc]}, "index": 0, "finish_reason": "tool_calls"}],
+        }
+        yield f"data: {json.dumps(tc_chunk, ensure_ascii=False)}\n"
+    elif message.get("content"):
+        content = message["content"]
+        content_chunk = {
+            "choices": [{"delta": {"content": content}, "index": 0, "finish_reason": "stop"}],
+        }
+        yield f"data: {json.dumps(content_chunk, ensure_ascii=False)}\n"
+
+    yield "data: [DONE]\n"
 
 
 def _identity() -> ReportIdentity:
@@ -242,7 +297,11 @@ def test_deepseek_adapter_parses_tool_call_response_and_enters_8a_runner(tmp_pat
     transport = SearchReadFinalTransport([])
     runner = LlmToolLoopRunner(
         tool_service=_service(tmp_path),
-        llm_client=DeepSeekLlmClient(transport=transport, env=_env(DEEPSEEK_BASE_URL="https://api.deepseek.com/v1?secret=x")),
+        llm_client=DeepSeekLlmClient(
+            transport=transport,
+            env=_env(DEEPSEEK_BASE_URL="https://api.deepseek.com/v1?secret=x"),
+            options=ExecutionOptions(stream=False),
+        ),
     )
 
     result = runner.run(document_id=_DOCUMENT_ID, query="基金经理")
@@ -264,6 +323,7 @@ def test_deepseek_adapter_parses_tool_call_response_and_enters_8a_runner(tmp_pat
         "list_tables",
         "read_table",
         "get_excerpt",
+        "aggregate_multi_year_annual_performance",
     }
 
 
@@ -289,7 +349,11 @@ def test_deepseek_adapter_parses_final_answer_and_preserves_8a_enforcement(tmp_p
     transport = FinalAfterSearchTransport([])
     runner = LlmToolLoopRunner(
         tool_service=_service(tmp_path),
-        llm_client=DeepSeekLlmClient(transport=transport, env=_env(DEEPSEEK_MODEL="unit-test-model")),
+        llm_client=DeepSeekLlmClient(
+            transport=transport,
+            env=_env(DEEPSEEK_MODEL="unit-test-model"),
+            options=ExecutionOptions(stream=False),
+        ),
     )
 
     result = runner.run(document_id=_DOCUMENT_ID, query="基金经理")
@@ -470,3 +534,242 @@ def test_deepseek_default_tests_use_fake_transport_no_real_key_and_no_secret_lea
     assert ".docling.json" not in request_rendered
     assert "schema_name" not in request_rendered
     assert _identity().local_import_id not in request_rendered
+    # 默认 stream=True
+    assert transport.requests[0].payload["stream"] is True
+
+
+# ── SSE streaming tests ──────────────────────────────────────────────
+
+
+def _sse_content_chunked(text: str, chunk_size: int = 2) -> list[str]:
+    """模拟逐 token 的 SSE content delta 行。"""
+
+    lines: list[str] = []
+    for i in range(0, len(text), chunk_size):
+        chunk = {"choices": [{"delta": {"content": text[i : i + chunk_size]}, "index": 0}]}
+        lines.append(f"data: {json.dumps(chunk, ensure_ascii=False)}\n")
+    done_chunk = {"choices": [{"delta": {}, "index": 0, "finish_reason": "stop"}]}
+    lines.append(f"data: {json.dumps(done_chunk)}\n")
+    lines.append("data: [DONE]\n")
+    return lines
+
+
+def _sse_tool_call_stream_lines(tool_name: str, arguments: dict[str, Any]) -> list[str]:
+    """模拟流式 tool call 的 SSE 行（name → arguments → finish）。"""
+
+    args_json = json.dumps(arguments, ensure_ascii=False)
+    name_chunk = {
+        "choices": [
+            {
+                "delta": {
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": tool_name, "arguments": ""},
+                        }
+                    ]
+                },
+                "index": 0,
+            }
+        ]
+    }
+    args_chunk = {
+        "choices": [
+            {
+                "delta": {
+                    "tool_calls": [
+                        {"index": 0, "function": {"arguments": args_json}}
+                    ]
+                },
+                "index": 0,
+            }
+        ]
+    }
+    finish_chunk = {"choices": [{"delta": {}, "index": 0, "finish_reason": "tool_calls"}]}
+    return [
+        f"data: {json.dumps(name_chunk, ensure_ascii=False)}\n",
+        f"data: {json.dumps(args_chunk, ensure_ascii=False)}\n",
+        f"data: {json.dumps(finish_chunk)}\n",
+        "data: [DONE]\n",
+    ]
+
+
+def _sse_reasoning_lines(reasoning: str) -> list[str]:
+    """模拟 reasoning_content 的 SSE 行。"""
+
+    chunk = {
+        "choices": [
+            {"delta": {"reasoning_content": reasoning}, "index": 0}
+        ]
+    }
+    done_chunk = {"choices": [{"delta": {}, "index": 0, "finish_reason": "stop"}]}
+    return [
+        f"data: {json.dumps(chunk, ensure_ascii=False)}\n",
+        f"data: {json.dumps(done_chunk)}\n",
+        "data: [DONE]\n",
+    ]
+
+
+def _sse_error_lines(status_code: int) -> list[str]:
+    """模拟 SSE 传输错误的异常。"""
+
+    raise DeepSeekTransportUnavailable("unavailable", status_code=status_code)
+
+
+def test_next_step_stream_content_delta() -> None:
+    """stream=True 时 CONTENT_DELTA 事件逐 token 产出，并以 DONE 结束。"""
+
+    text = "基金经理张明负责本基金投资管理。"
+    sse_lines = _sse_content_chunked(text, chunk_size=3)
+    transport = QueueTransport(stream_lines=[sse_lines])
+    client = DeepSeekLlmClient(transport=transport, env=_env())
+
+    events = list(
+        client.next_step_stream(document_id=_DOCUMENT_ID, query="基金经理", tool_results=())
+    )
+
+    content_events = [e for e in events if e.type == StreamEventType.CONTENT_DELTA]
+    done_events = [e for e in events if e.type == StreamEventType.DONE]
+    error_events = [e for e in events if e.type == StreamEventType.ERROR]
+
+    assert len(content_events) >= 3  # chunked into at least 3 parts
+    assert "".join(e.payload for e in content_events) == text
+    assert len(done_events) == 1
+    assert done_events[0].payload is None
+    assert error_events == []
+
+
+def test_next_step_stream_tool_call() -> None:
+    """stream=True 时 tool call delta 转换为 TOOL_EVENT + DONE。"""
+
+    sse_lines = _sse_tool_call_stream_lines(
+        "search_document",
+        {"document_id": _DOCUMENT_ID, "query": "基金经理", "max_results": 1},
+    )
+    transport = QueueTransport(stream_lines=[sse_lines])
+    client = DeepSeekLlmClient(transport=transport, env=_env())
+
+    events = list(
+        client.next_step_stream(document_id=_DOCUMENT_ID, query="基金经理", tool_results=())
+    )
+
+    tool_events = [e for e in events if e.type == StreamEventType.TOOL_EVENT]
+    done_events = [e for e in events if e.type == StreamEventType.DONE]
+
+    assert len(tool_events) == 1
+    assert tool_events[0].payload["phase"] == "call"
+    assert tool_events[0].payload["tool_name"] == "search_document"
+    assert tool_events[0].payload["call_id"] == "call-1"
+    arguments = json.loads(tool_events[0].payload["arguments"])
+    assert arguments["document_id"] == _DOCUMENT_ID
+    assert arguments["query"] == "基金经理"
+    assert len(done_events) == 1
+
+
+def test_next_step_stream_reasoning_delta() -> None:
+    """stream=True 时 reasoning_content 转换为 REASONING_DELTA。"""
+
+    sse_lines = _sse_reasoning_lines("需要先搜索基金经理相关信息")
+    transport = QueueTransport(stream_lines=[sse_lines])
+    client = DeepSeekLlmClient(transport=transport, env=_env())
+
+    events = list(
+        client.next_step_stream(document_id=_DOCUMENT_ID, query="基金经理", tool_results=())
+    )
+
+    reasoning_events = [e for e in events if e.type == StreamEventType.REASONING_DELTA]
+    assert len(reasoning_events) == 1
+    assert reasoning_events[0].payload == "需要先搜索基金经理相关信息"
+    assert any(e.type == StreamEventType.DONE for e in events)
+
+
+def test_next_step_stream_transport_error() -> None:
+    """HTTP/network error 时产出 ERROR 事件，不产出 DONE。"""
+
+    transport = QueueTransport(
+        stream_lines=[[DeepSeekTransportUnavailable("network", status_code=503)]],  # type: ignore[list-item]
+    )
+    # QueueTransport.send_stream pops from stream_lines, gets the exception, raises it
+    client = DeepSeekLlmClient(transport=transport, env=_env())
+
+    events = list(
+        client.next_step_stream(document_id=_DOCUMENT_ID, query="基金经理", tool_results=())
+    )
+
+    error_events = [e for e in events if e.type == StreamEventType.ERROR]
+    done_events = [e for e in events if e.type == StreamEventType.DONE]
+    assert len(error_events) >= 1
+    assert done_events == []
+
+
+def test_next_step_stream_api_key_missing() -> None:
+    """API key 缺失时产出 ERROR 事件。"""
+
+    transport = QueueTransport()
+    client = DeepSeekLlmClient(transport=transport, env={})
+
+    events = list(
+        client.next_step_stream(document_id=_DOCUMENT_ID, query="基金经理", tool_results=())
+    )
+
+    error_events = [e for e in events if e.type == StreamEventType.ERROR]
+    assert len(error_events) == 1
+    assert error_events[0].payload["code"] == FailureCode.UNAVAILABLE.value
+
+
+def test_next_step_stream_auth_error_no_retry() -> None:
+    """401/403 不重试，立即产出 ERROR。"""
+
+    transport = QueueTransport(
+        stream_lines=[[DeepSeekTransportUnavailable("auth", status_code=401)]],  # type: ignore[list-item]
+    )
+    client = DeepSeekLlmClient(transport=transport, env=_env())
+
+    events = list(
+        client.next_step_stream(document_id=_DOCUMENT_ID, query="基金经理", tool_results=())
+    )
+
+    error_events = [e for e in events if e.type == StreamEventType.ERROR]
+    assert len(error_events) == 1
+
+
+def test_next_step_with_stream_true_default(tmp_path: Path) -> None:
+    """默认 stream=True 时 next_step() 内部收集 SSE 并返回 ToolCall/FinalAnswer。"""
+
+    sse_lines = _sse_tool_call_stream_lines(
+        "search_document",
+        {"document_id": _DOCUMENT_ID, "query": "基金经理", "max_results": 1},
+    )
+    transport = QueueTransport(stream_lines=[sse_lines])
+    runner = LlmToolLoopRunner(
+        tool_service=_service(tmp_path),
+        llm_client=DeepSeekLlmClient(transport=transport, env=_env()),
+    )
+
+    result = runner.run(document_id=_DOCUMENT_ID, query="基金经理")
+
+    assert result.tool_trace[0].tool_name == ToolName.SEARCH_DOCUMENT
+    assert transport.requests[0].payload["stream"] is True
+
+
+def test_next_step_with_stream_false_uses_non_streaming(tmp_path: Path) -> None:
+    """stream=False 时使用传统非流式路径。"""
+
+    transport = QueueTransport(
+        [_tool_call_response(ToolName.SEARCH_DOCUMENT.value, {"document_id": _DOCUMENT_ID, "query": "基金经理"})]
+    )
+    runner = LlmToolLoopRunner(
+        tool_service=_service(tmp_path),
+        llm_client=DeepSeekLlmClient(
+            transport=transport,
+            env=_env(),
+            options=ExecutionOptions(stream=False),
+        ),
+    )
+
+    result = runner.run(document_id=_DOCUMENT_ID, query="基金经理")
+
+    assert result.tool_trace[0].tool_name == ToolName.SEARCH_DOCUMENT
+    assert transport.requests[0].payload["stream"] is False

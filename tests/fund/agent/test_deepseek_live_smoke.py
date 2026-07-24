@@ -277,12 +277,16 @@ def test_live_smoke_allows_base_url_and_model_override() -> None:
 
 
 def test_live_smoke_retries_at_most_once_and_fails_closed() -> None:
-    """provider unavailable 时最多 retry 一次，最终仍 fail-closed。"""
+    """provider unavailable 时 next_step 内部重试 3 次后 fail-closed。"""
 
     transport = QueueTransport(
         [
             DeepSeekTransportUnavailable("network"),
             DeepSeekTransportUnavailable("rate limit"),
+            DeepSeekTransportUnavailable("timeout"),
+            DeepSeekTransportUnavailable("network"),
+            DeepSeekTransportUnavailable("rate limit"),
+            DeepSeekTransportUnavailable("timeout"),
         ]
     )
     result, attempts = _run_live_smoke(
@@ -292,8 +296,9 @@ def test_live_smoke_retries_at_most_once_and_fails_closed() -> None:
 
     assert isinstance(result.failure, ToolFailure)
     assert result.failure.code is FailureCode.UNAVAILABLE
-    assert attempts == _LIVE_MAX_RETRIES + 1
-    assert len(transport.requests) == _LIVE_MAX_RETRIES + 1
+    # next_step 内部 3 次重试 × smoke 层 2 次迭代
+    assert attempts == 2
+    assert len(transport.requests) == 6
 
 
 def test_live_smoke_malformed_provider_response_fails_without_retry() -> None:

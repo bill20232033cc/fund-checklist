@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from typing import Protocol, TypeAlias
 
@@ -23,6 +23,7 @@ from fund_agent.fund.document_tools.models import (
     TableSummary,
     ToolFailure,
 )
+from fund_agent.agent.stream_events import StreamEvent, StreamEventType
 from fund_agent.fund.document_tools.service import FundDocumentToolService
 
 ControlledToolOutput: TypeAlias = (
@@ -43,6 +44,9 @@ ALLOWED_LLM_TOOL_NAMES: frozenset[ToolName] = frozenset(
 )
 _MAX_LLM_STEPS = 8
 _MAX_TABLE_ROWS = 8
+_MAX_EVIDENCE_CHARS = 4096
+_EVIDENCE_HEAD_CHARS = 3072
+_EVIDENCE_TAIL_CHARS = 1024
 _TOOL_NOT_ALLOWED_MESSAGE = "LLM 工具调用不被允许"
 _TOOL_ARGUMENT_MESSAGE = "LLM 工具调用参数不完整"
 _NO_EVIDENCE_MESSAGE = "LLM 最终回答缺少受控工具证据"
@@ -50,6 +54,12 @@ _MISSING_CITATION_MESSAGE = "LLM 最终回答缺少受控 citation"
 _UNSUPPORTED_FACT_MESSAGE = "LLM 最终回答包含未由工具结果支持的关键事实"
 _STEP_LIMIT_MESSAGE = "LLM 工具调用超过限制"
 _UNAVAILABLE_MESSAGE = "LLM 工具循环暂不可用"
+_INVESTMENT_ADVICE_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "买入", "卖出", "建议加仓", "建议减仓", "推荐买入", "推荐卖出", "强烈建议",
+    }
+)
+_INVESTMENT_ADVICE_MESSAGE = "LLM 最终回答包含投资建议关键词"
 
 
 class LlmClientFailure(Exception):
@@ -286,6 +296,125 @@ class LlmToolLoopRunner:
 
         return _failed_result(tuple(trace), FailureCode.UNAVAILABLE, _STEP_LIMIT_MESSAGE)
 
+    def run_stream(self, *, document_id: str, query: str) -> Iterator[StreamEvent]:
+        """运行 LLM 工具调用循环并产出 StreamEvent 流。
+
+        tool call/result → TOOL_EVENT
+        final answer → CONTENT_DELTA + METADATA + DONE
+        失败 → ERROR
+        """
+
+        seq = 0
+
+        yield StreamEvent(
+            type=StreamEventType.METADATA,
+            payload={"document_id": document_id, "query": query},
+            sequence=seq,
+        )
+        seq += 1
+
+        trace: list[ToolTraceEntry] = []
+        tool_results: list[ToolResult] = []
+        for _ in range(self._max_steps):
+            try:
+                step = self._llm_client.next_step(
+                    document_id=document_id,
+                    query=query,
+                    tool_results=tuple(tool_results),
+                )
+            except LlmClientFailure as exc:
+                yield StreamEvent(
+                    type=StreamEventType.ERROR,
+                    payload={"code": exc.code.value, "message": exc.safe_message},
+                    sequence=seq,
+                )
+                return
+            except Exception:
+                yield StreamEvent(
+                    type=StreamEventType.ERROR,
+                    payload={"code": FailureCode.UNAVAILABLE.value, "message": _UNAVAILABLE_MESSAGE},
+                    sequence=seq,
+                )
+                return
+
+            if isinstance(step, FinalAnswer):
+                final = _final_result(step, tuple(tool_results), tuple(trace))
+                if final.failure is not None:
+                    yield StreamEvent(
+                        type=StreamEventType.ERROR,
+                        payload={"code": final.failure.code.value, "message": final.failure.message},
+                        sequence=seq,
+                    )
+                    return
+                yield StreamEvent(
+                    type=StreamEventType.CONTENT_DELTA,
+                    payload=final.answer,
+                    sequence=seq,
+                )
+                seq += 1
+                yield StreamEvent(
+                    type=StreamEventType.METADATA,
+                    payload={
+                        "citations": [
+                            {
+                                "document_id": c.document_id,
+                                "fund_code": c.fund_code,
+                                "fund_name": c.fund_name,
+                                "year": c.year,
+                                "report_type": c.report_type,
+                            }
+                            for c in final.citations
+                        ],
+                        "tool_trace_count": len(final.tool_trace),
+                    },
+                    sequence=seq,
+                )
+                seq += 1
+                yield StreamEvent(type=StreamEventType.DONE, payload=None, sequence=seq)
+                return
+
+            if isinstance(step, ToolCall):
+                yield StreamEvent(
+                    type=StreamEventType.TOOL_EVENT,
+                    payload={"phase": "call", "tool_name": str(step.tool_name)},
+                    sequence=seq,
+                )
+                seq += 1
+                tool_result = self._invoke_tool_call(step, expected_document_id=document_id, trace=trace)
+                if isinstance(tool_result, ToolFailure):
+                    yield StreamEvent(
+                        type=StreamEventType.ERROR,
+                        payload={"code": tool_result.code.value, "message": tool_result.message},
+                        sequence=seq,
+                    )
+                    return
+                tool_results.append(tool_result)
+                yield StreamEvent(
+                    type=StreamEventType.TOOL_EVENT,
+                    payload={
+                        "phase": "result",
+                        "tool_name": str(tool_result.tool_name),
+                        "citation_count": len(tool_result.citations),
+                        "evidence_length": len(tool_result.evidence_text),
+                    },
+                    sequence=seq,
+                )
+                seq += 1
+                continue
+
+            yield StreamEvent(
+                type=StreamEventType.ERROR,
+                payload={"code": FailureCode.UNAVAILABLE.value, "message": _UNAVAILABLE_MESSAGE},
+                sequence=seq,
+            )
+            return
+
+        yield StreamEvent(
+            type=StreamEventType.ERROR,
+            payload={"code": FailureCode.UNAVAILABLE.value, "message": _STEP_LIMIT_MESSAGE},
+            sequence=seq,
+        )
+
     def _invoke_tool_call(
         self,
         call: ToolCall,
@@ -384,6 +513,13 @@ def _final_result(
 ) -> AgentRunResult:
     """校验最终回答证据与 citation 后构造 AgentRunResult。"""
 
+    # 投资建议检测（fail-closed）
+    # "建议关注"、"需持续跟踪" 不触发
+    answer_text = final_answer.answer
+    for keyword in _INVESTMENT_ADVICE_KEYWORDS:
+        if keyword in answer_text:
+            return _failed_result(trace, FailureCode.UNAVAILABLE, _INVESTMENT_ADVICE_MESSAGE)
+
     evidence_texts = tuple(result.evidence_text for result in tool_results if result.evidence_text.strip())
     if not evidence_texts:
         return _failed_result(trace, FailureCode.UNAVAILABLE, _NO_EVIDENCE_MESSAGE)
@@ -421,53 +557,73 @@ def _final_result(
 
 
 def _tool_result_from_output(tool_name: ToolName, result: ControlledToolOutput) -> ToolResult:
-    """从 public tool result 中提取 citations 和 evidence_text。"""
+    """从 public tool result 中提取 citations 和 evidence_text（截断至 4096 字符）。"""
 
     from fund_agent.service.extraction import AggregateMultiYearAnnualPerformanceResult
 
+    tool_result: ToolResult
     if isinstance(result, AggregateMultiYearAnnualPerformanceResult):
-        return ToolResult(
+        tool_result = ToolResult(
             tool_name=tool_name,
             result=result,
             citations=_aggregate_citations(result),
             evidence_text=_aggregate_evidence_text(result),
         )
-    if isinstance(result, tuple):
+    elif isinstance(result, tuple):
         if result and isinstance(result[0], SearchResult):
             search_results = tuple(item for item in result if isinstance(item, SearchResult))
-            return ToolResult(
+            tool_result = ToolResult(
                 tool_name=tool_name,
                 result=search_results,
                 citations=tuple(item.citation for item in search_results),
                 evidence_text="\n".join(item.excerpt for item in search_results),
             )
-        table_summaries = tuple(item for item in result if isinstance(item, TableSummary))
-        return ToolResult(
-            tool_name=tool_name,
-            result=table_summaries,
-            citations=(),
-            evidence_text="\n".join(item.caption or "" for item in table_summaries),
-        )
-    if isinstance(result, SectionContent):
-        return ToolResult(
+        else:
+            table_summaries = tuple(item for item in result if isinstance(item, TableSummary))
+            tool_result = ToolResult(
+                tool_name=tool_name,
+                result=table_summaries,
+                citations=(),
+                evidence_text="\n".join(item.caption or "" for item in table_summaries),
+            )
+    elif isinstance(result, SectionContent):
+        tool_result = ToolResult(
             tool_name=tool_name,
             result=result,
             citations=(result.citation,),
             evidence_text=f"{result.title}\n{result.text}",
         )
-    if isinstance(result, TableContent):
-        return ToolResult(
+    elif isinstance(result, TableContent):
+        tool_result = ToolResult(
             tool_name=tool_name,
             result=result,
             citations=(result.citation,),
             evidence_text=_table_evidence_text(result),
         )
+    else:
+        tool_result = ToolResult(
+            tool_name=tool_name,
+            result=result,
+            citations=(result.citation,),
+            evidence_text=result.text,
+        )
+
     return ToolResult(
-        tool_name=tool_name,
-        result=result,
-        citations=(result.citation,),
-        evidence_text=result.text,
+        tool_name=tool_result.tool_name,
+        result=tool_result.result,
+        citations=tool_result.citations,
+        evidence_text=_truncate_evidence(tool_result.evidence_text),
     )
+
+
+def _truncate_evidence(text: str) -> str:
+    """截断 evidence_text 至 4096 字符，保留开头 3072 + 结尾 1024。"""
+    if len(text) <= _MAX_EVIDENCE_CHARS:
+        return text
+    head = text[:_EVIDENCE_HEAD_CHARS]
+    tail = text[-_EVIDENCE_TAIL_CHARS:]
+    skipped = len(text) - _EVIDENCE_HEAD_CHARS - _EVIDENCE_TAIL_CHARS
+    return f"{head}\n[...已截断 {skipped} 字符...]\n{tail}"
 
 
 def _table_evidence_text(table: TableContent) -> str:

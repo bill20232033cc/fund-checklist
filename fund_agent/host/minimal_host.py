@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import queue
 import threading
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import Enum
 
+from fund_agent.agent.stream_events import StreamEvent, StreamEventType
 from fund_agent.agent.tool_loop import AgentRunResult, MinimalFundDocumentAgent
 
 
@@ -245,6 +248,76 @@ class MinimalHost:
             timeout=self._timeout,
             timed_out=False,
         )
+
+    def run_agent_stream(
+        self, *, document_id: str, query: str
+    ) -> Iterator[StreamEvent]:
+        """运行 Agent 流式循环并转发 StreamEvent，支持 timeout。
+
+        内部通过后台线程调用 agent.run_stream()，
+        主线程从队列拉取事件，超时时产出 ERROR 并终止。
+        """
+
+        run_stream = getattr(self._agent, "run_stream", None)
+        if run_stream is None:
+            yield StreamEvent(
+                type=StreamEventType.ERROR,
+                payload={"code": "unavailable", "message": "Agent does not support streaming"},
+            )
+            return
+
+        event_queue: queue.Queue[StreamEvent | None] = queue.Queue()
+        agent_error: str | None = None
+
+        def _run() -> None:
+            nonlocal agent_error
+            try:
+                for event in run_stream(document_id=document_id, query=query):
+                    event_queue.put(event)
+            except Exception as exc:
+                agent_error = f"{type(exc).__name__}: {exc}"
+            finally:
+                event_queue.put(None)  # sentinel
+
+        start_time = time.monotonic()
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
+
+        seq = 0
+        yield StreamEvent(
+            type=StreamEventType.METADATA,
+            payload={"host_started_at": start_time, "document_id": document_id, "query": query},
+            sequence=seq,
+        )
+        seq += 1
+
+        deadline = start_time + self._timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                yield StreamEvent(
+                    type=StreamEventType.ERROR,
+                    payload={"code": "unavailable", "message": "Host run timed out"},
+                    sequence=seq,
+                )
+                return
+
+            try:
+                event = event_queue.get(timeout=min(remaining, 1.0))
+            except queue.Empty:
+                continue
+
+            if event is None:
+                break
+
+            yield event
+
+        if agent_error:
+            yield StreamEvent(
+                type=StreamEventType.ERROR,
+                payload={"code": "unavailable", "message": agent_error},
+                sequence=seq,
+            )
 
 
 _TOOL_NAME_MAP: dict[str, HostRunEventType] = {
