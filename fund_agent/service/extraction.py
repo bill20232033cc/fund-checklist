@@ -2424,7 +2424,7 @@ class FundReadingService:
                                 data_row = table.rows[row_idx]
                                 if len(data_row) >= 5:
                                     candidate_name = str(data_row[0]).strip()
-                                    if self._is_numeric_text(candidate_name):
+                                    if not candidate_name or self._is_numeric_text(candidate_name):
                                         continue
                                     name = candidate_name
                                     tenure_start = str(data_row[2]).strip()
@@ -2450,14 +2450,41 @@ class FundReadingService:
                                         data_row = full_table.rows[row_idx]
                                         if len(data_row) >= 5:
                                             candidate_name = str(data_row[0]).strip()
-                                            if self._is_numeric_text(candidate_name):
+                                            if not candidate_name or self._is_numeric_text(candidate_name):
                                                 continue
                                             name = candidate_name
                                             tenure_start = str(data_row[2]).strip()
                                             years_of_service = str(data_row[4]).strip()
                                             matched = True
                                             break
-                break
+                                # 相邻表检测：Docling 可能将跨页表格拆分为表头表+数据表
+                                # 当前表 header 匹配但无有效数据行时，检查相邻表
+                                if not matched:
+                                    try:
+                                        t_idx = tables.index(t)
+                                    except ValueError:
+                                        t_idx = -1
+                                    for offset in (1, 2):
+                                        next_idx = t_idx + offset
+                                        if t_idx >= 0 and next_idx < len(tables):
+                                            next_t = tables[next_idx]
+                                            next_table = tool_service.read_table(
+                                                doc_id, next_t.table_ref, max_rows=5
+                                            )
+                                            if hasattr(next_table, "rows"):
+                                                for row in next_table.rows:
+                                                    if len(row) >= 5:
+                                                        candidate_name = str(row[0]).strip()
+                                                        if candidate_name and not self._is_numeric_text(candidate_name):
+                                                            name = candidate_name
+                                                            tenure_start = str(row[2]).strip() if len(row) > 2 else ""
+                                                            years_of_service = str(row[4]).strip() if len(row) > 4 else ""
+                                                            matched = True
+                                                            break
+                                        if matched:
+                                            break
+                if matched:
+                    break
 
         # 搜索投资策略
         investment_strategy = ""
