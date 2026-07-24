@@ -21,7 +21,7 @@ DEEPSEEK_API_KEY_ENV = "DEEPSEEK_API_KEY"
 DEEPSEEK_BASE_URL_ENV = "DEEPSEEK_BASE_URL"
 DEEPSEEK_MODEL_ENV = "DEEPSEEK_MODEL"
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-pro"
+DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
 DEFAULT_DEEPSEEK_TIMEOUT_SECONDS = 60
 _CHAT_COMPLETIONS_PATH = "/chat/completions"
 _JSON_CONTENT_TYPE = "application/json"
@@ -601,18 +601,26 @@ def _parse_arguments(raw_arguments: Any) -> dict[str, Any]:
 
 
 def _parse_final_answer(content: Any) -> FinalAnswer:
-    """解析 message.content 中的 final answer JSON。"""
+    """解析 message.content 中的 final answer。
+
+    优先尝试 JSON 格式（{"answer","citations","key_facts"}）；
+    若非合法 JSON 或缺少 answer 字段，则将整个 content 视为 markdown 回答，
+    citations 和 key_facts 设为空。
+    """
 
     if not isinstance(content, str) or not content.strip():
         raise LlmClientFailure(FailureCode.LLM_MALFORMED_RESPONSE, _MALFORMED_MESSAGE)
     try:
         payload = json.loads(content)
-        answer = _required_str(payload, "answer")
-        citations = tuple(_citation_from_dict(item) for item in _required_list(payload, "citations"))
-        key_facts = tuple(str(item) for item in _required_list(payload, "key_facts"))
-    except (json.JSONDecodeError, TypeError, ValueError, KeyError) as exc:
-        raise LlmClientFailure(FailureCode.LLM_MALFORMED_RESPONSE, _MALFORMED_MESSAGE) from exc
-    return FinalAnswer(answer=answer, citations=citations, key_facts=key_facts)
+        if isinstance(payload, dict) and "answer" in payload:
+            answer = _required_str(payload, "answer")
+            citations = tuple(_citation_from_dict(item) for item in _required_list(payload, "citations"))
+            key_facts = tuple(str(item) for item in _required_list(payload, "key_facts"))
+            return FinalAnswer(answer=answer, citations=citations, key_facts=key_facts)
+    except (json.JSONDecodeError, TypeError, ValueError, KeyError):
+        pass
+    # fallback: 整个 content 作为 markdown 回答
+    return FinalAnswer(answer=content.strip(), citations=(), key_facts=())
 
 
 def _citation_from_dict(payload: Any) -> Citation:
