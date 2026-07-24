@@ -2517,8 +2517,6 @@ class FundReadingService:
         repository = _repository(Path(work_dir))
         sorted_docs = sorted(annual_docs, key=lambda d: d.year, reverse=True)
 
-        _class_a_re = re.compile(r"[）)\s]A$|[）)\s]A类$|联接\s*A$")
-        _class_c_re = re.compile(r"[）)\s]C$|[）)\s]C类$|联接\s*C$")
         _class_exclude_kw = ("NAV", "AUM", "标准差")
 
         for doc in sorted_docs:
@@ -2578,13 +2576,14 @@ class FundReadingService:
                                 cell_norm = _normalize_disclosure_text(cell)
                                 if any(kw in cell_norm for kw in _class_exclude_kw):
                                     continue
-                                if _class_a_re.search(cell):
+                                cls = _detect_share_class(cell)
+                                if cls == "A":
                                     col_map["A"] = idx
-                                elif _class_c_re.search(cell):
+                                elif cls == "C":
                                     col_map["C"] = idx
 
-                        # 期末行：第一列含"期末基金份额总额"（允许空格）
-                        if "期末基金份额总额" in row_0_norm:
+                        # 期末行：匹配"期末基金份额总额"及其变体（如"报告期末基金份额总额"）
+                        if row_0_norm.endswith("期末基金份额总额"):
                             end_row = row
 
                     # header-first 兜底：部分基金表格第一列为空，但列头直接是份额类别名
@@ -2596,10 +2595,18 @@ class FundReadingService:
                             cell_norm = _normalize_disclosure_text(cell)
                             if any(kw in cell_norm for kw in _class_exclude_kw):
                                 continue
-                            if _class_a_re.search(cell):
+                            cls = _detect_share_class(cell)
+                            if cls == "A":
                                 col_map["A"] = idx
-                            elif _class_c_re.search(cell):
+                            elif cls == "C":
                                 col_map["C"] = idx
+
+                    # 列位置兜底：份额变动表固定结构 col1=A类, col2=C类
+                    if not col_map and end_row:
+                        if len(end_row) >= 2:
+                            col_map["A"] = 1
+                        if len(end_row) >= 3:
+                            col_map["C"] = 2
 
                     # 从期末行按列索引读取份额
                     if col_map and end_row:
@@ -2615,6 +2622,40 @@ class FundReadingService:
                         row_0_norm = _normalize_disclosure_text(row[0])
                         if "合计" in row_0_norm and len(row) > 4:
                             individual_investor_ratio = str(row[4]).strip()
+
+            if not (total_shares_a or total_shares_c):
+                # 文本兜底：从段落中提取份额数据
+                for query in ("基金份额总额", "基金份额变动"):
+                    text_hits = tool_service.search_document(doc_id, query)
+                    for th in text_hits:
+                        if isinstance(th, ToolFailure) or not th.section_ref:
+                            continue
+                        section = tool_service.read_section(doc_id, th.section_ref)
+                        if not hasattr(section, "text"):
+                            continue
+                        extracted = _extract_scale_from_text(section.text)
+                        if extracted.get("total_shares_a"):
+                            total_shares_a = extracted["total_shares_a"]
+                        if extracted.get("total_shares_c"):
+                            total_shares_c = extracted["total_shares_c"]
+                        if total_shares_a or total_shares_c:
+                            break
+                    if total_shares_a or total_shares_c:
+                        break
+
+                # 文本兜底：持有人比例
+                if not individual_investor_ratio:
+                    holder_hits = tool_service.search_document(doc_id, "持有人")
+                    for hh in holder_hits:
+                        if isinstance(hh, ToolFailure) or not hh.section_ref:
+                            continue
+                        section = tool_service.read_section(doc_id, hh.section_ref)
+                        if not hasattr(section, "text"):
+                            continue
+                        extracted = _extract_scale_from_text(section.text)
+                        if extracted.get("individual_investor_ratio"):
+                            individual_investor_ratio = extracted["individual_investor_ratio"]
+                            break
 
             if not (total_shares_a or total_shares_c):
                 continue
@@ -4726,6 +4767,34 @@ def _normalize_disclosure_text(text: str) -> str:
     return re.sub(r"\s+", "", text)
 
 
+def _detect_share_class(cell_text: str) -> str | None:
+    """从表头单元格文本识别份额类别。
+
+    按 / 拆分后逐 token 匹配，支持"指数A"、"A/B"、"联接A"等格式。
+    返回 "A"、"C" 或 None。
+    """
+    text = _normalize_disclosure_text(cell_text)
+    # 联接 A / 联接 C
+    m = re.search(r"联接\s*([AC])", text)
+    if m:
+        return m.group(1)
+    for token in text.split("/"):
+        token = token.strip()
+        if not token:
+            continue
+        for label in ("A类", "C类", "A", "C"):
+            if token == label:
+                return label[0]
+            if token.endswith(label):
+                idx = len(token) - len(label) - 1
+                if idx >= 0:
+                    ch = token[idx]
+                    if ch.isascii() and ch.isalpha():
+                        continue
+                return label[0]
+    return None
+
+
 def _extract_nav_for_class(text: str, share_class: str) -> float | None:
     """类名匹配提取单位净值：在文本中查找 share_class 关联的基金份额净值数值。"""
 
@@ -4741,6 +4810,37 @@ def _extract_nav_for_class(text: str, share_class: str) -> float | None:
         return float(m.group(1))
     except ValueError:
         return None
+
+
+def _extract_scale_from_text(text: str) -> dict[str, str]:
+    """从段落文本提取份额/持有人比例，作为表格提取的兜底。
+
+    正则加 [^。]*? 前缀锚定，避免跨句匹配。
+    """
+    result: dict[str, str] = {}
+
+    # A类份额
+    m = re.search(r"[^。]*?A类(?:基金)?份额(?:总额)?\s*([\d,]+(?:\.[\d,]+)?)\s*份", text)
+    if m:
+        result["total_shares_a"] = m.group(1)
+
+    # C类份额
+    m = re.search(r"[^。]*?C类(?:基金)?份额(?:总额)?\s*([\d,]+(?:\.[\d,]+)?)\s*份", text)
+    if m:
+        result["total_shares_c"] = m.group(1)
+
+    # 总份额（无类别前缀时兜底）
+    if "total_shares_a" not in result and "total_shares_c" not in result:
+        m = re.search(r"[^。]*?基金份额总额\s*([\d,]+(?:\.[\d,]+)?)\s*份", text)
+        if m:
+            result["total_shares_a"] = m.group(1)
+
+    # 个人投资者比例
+    m = re.search(r"[^。]*?个人投资者[^。]*?(\d+\.?\d*)\s*%", text)
+    if m:
+        result["individual_investor_ratio"] = m.group(1) + "%"
+
+    return result
 
 
 def _compact_raw_text(raw_text: str) -> str:

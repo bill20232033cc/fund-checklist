@@ -4410,3 +4410,119 @@ class TestScoringFundTypeAware:
         assert len(applicable) == 6
         total_max = sum(i.max_score for i in applicable)
         assert total_max == 135
+
+
+class TestDetectShareClass:
+    """_detect_share_class 函数单元测试。"""
+
+    def test_exact_a(self):
+        assert reading_service_module._detect_share_class("A") == "A"
+
+    def test_exact_a_class(self):
+        assert reading_service_module._detect_share_class("A类") == "A"
+
+    def test_exact_c(self):
+        assert reading_service_module._detect_share_class("C") == "C"
+
+    def test_exact_c_class(self):
+        assert reading_service_module._detect_share_class("C类") == "C"
+
+    def test_index_a(self):
+        assert reading_service_module._detect_share_class("指数A") == "A"
+
+    def test_index_c(self):
+        assert reading_service_module._detect_share_class("指数C") == "C"
+
+    def test_connect_a(self):
+        assert reading_service_module._detect_share_class("联接A") == "A"
+
+    def test_connect_c(self):
+        assert reading_service_module._detect_share_class("联接C") == "C"
+
+    def test_connect_a_with_space(self):
+        assert reading_service_module._detect_share_class("联接 A") == "A"
+
+    def test_slash_ab_format(self):
+        assert reading_service_module._detect_share_class("A/B") == "A"
+
+    def test_slash_cb_format(self):
+        assert reading_service_module._detect_share_class("C类/B类") == "C"
+
+    def test_parenthesis_a(self):
+        assert reading_service_module._detect_share_class("）A") == "A"
+
+    def test_parenthesis_c(self):
+        assert reading_service_module._detect_share_class("）C类") == "C"
+
+    def test_nav_excluded(self):
+        """NAV 不在 _class_exclude_kw 过滤范围内，但函数本身不应匹配英文单词。"""
+        assert reading_service_module._detect_share_class("NAV") is None
+
+    def test_aum_excluded(self):
+        assert reading_service_module._detect_share_class("AUM") is None
+
+    def test_random_text(self):
+        assert reading_service_module._detect_share_class("基金份额") is None
+
+
+class TestExtractScaleFromText:
+    """_extract_scale_from_text 函数单元测试。"""
+
+    def test_extract_a_shares(self):
+        text = "本基金A类基金份额总额1,234,567.89份，C类基金份额不适用。"
+        result = reading_service_module._extract_scale_from_text(text)
+        assert result["total_shares_a"] == "1,234,567.89"
+
+    def test_extract_c_shares(self):
+        text = "本基金C类基金份额总额987,654.32份。"
+        result = reading_service_module._extract_scale_from_text(text)
+        assert result["total_shares_c"] == "987,654.32"
+
+    def test_extract_both_shares(self):
+        text = "A类份额总额100,000.00份，C类份额总额200,000.00份。"
+        result = reading_service_module._extract_scale_from_text(text)
+        assert result["total_shares_a"] == "100,000.00"
+        assert result["total_shares_c"] == "200,000.00"
+
+    def test_extract_total_shares_fallback(self):
+        """无A/C分类时，提取总份额兜底。"""
+        text = "报告期末基金份额总额500,000.00份。"
+        result = reading_service_module._extract_scale_from_text(text)
+        assert result["total_shares_a"] == "500,000.00"
+
+    def test_extract_a_shares_without_fund_prefix(self):
+        text = "A类份额1,000份。"
+        result = reading_service_module._extract_scale_from_text(text)
+        assert result["total_shares_a"] == "1,000"
+
+    def test_extract_c_shares_without_fund_prefix(self):
+        text = "C类份额2,000份。"
+        result = reading_service_module._extract_scale_from_text(text)
+        assert result["total_shares_c"] == "2,000"
+
+    def test_extract_a_shares_with_whitespace_around_number(self):
+        r"""\s* 匹配数字周围的空格（披露文档常见格式）。"""
+        text = "A类基金份额总额 3,000 份。"
+        result = reading_service_module._extract_scale_from_text(text)
+        assert result["total_shares_a"] == "3,000"
+
+    def test_extract_individual_investor_ratio(self):
+        text = "个人投资者持有份额占总份额的45.67%。"
+        result = reading_service_module._extract_scale_from_text(text)
+        assert result["individual_investor_ratio"] == "45.67%"
+
+    def test_prefix_anchor_allows_leading_chinese(self):
+        """前缀锚定 [^。]*? 允许 A类 前有中文修饰（如"本基金A类份额..."）。"""
+        text = "本基金A类份额总额9,999.99份。"
+        result = reading_service_module._extract_scale_from_text(text)
+        assert result["total_shares_a"] == "9,999.99"
+
+    def test_no_false_positive_on_unrelated(self):
+        """确保不会错误匹配不相关文本中的数字。"""
+        text = "基金管理人持有A类份额不适用。"
+        result = reading_service_module._extract_scale_from_text(text)
+        assert "total_shares_a" not in result
+
+    def test_empty_text(self):
+        result = reading_service_module._extract_scale_from_text("无相关信息。")
+        assert result == {}
