@@ -36,7 +36,7 @@ PDF
  -> 三层审计管道 (程序+LLM+复核，4 类 22 项)
 ```
 
-已实现的 CLI 入口：`read` / `multi-year` / `import` / `holdings` / `allocation` / `fees` / `audit` / `deep-audit` / `generate` / `ask`。
+已实现的 CLI 入口：`read` / `multi-year` / `import` / `holdings` / `download` / `allocation` / `fees` / `audit` / `deep-audit` / `generate` / `ask`。
 Phase 7 将新增：`interactive`。
 
 验收约束（适用于所有阶段）：
@@ -55,11 +55,10 @@ Phase 6 已完成（2026-07-22）：
 - **模板框架适配**：preferred_lens 接入 generate 流程
 - **基金类型感知**：评分框架 fund_type 感知（主动 6 指标 135→100 / 被动 3 指标 100 分制 / 债券 5 指标）
 
-Phase 7 已裁决（2026-07-25）并正在实施：
+Phase 7 已裁决（2026-07-25），待启动：
 - **多轮对话**：`interactive` 子命令，支持会话持久化和上下文记忆
 - **上下文治理**：Context Budget，支持长对话不超限
-- **Prompt 路由**：Scene Manifest + Fragments + Context Slots，对齐 Dayu
-- **Streaming**：StreamEvent 模型 + DeepSeek stream=True + CLI 流式输出（Slice 19A-19C, 19E）
+- **Prompt 路由**：Scene Config + Fragments + Context Slots，对齐 Dayu
 
 LLM provider 已支持 DeepSeek 与 Mimo（OpenAI-compatible adapter）；暂不需要接入 Gemini/OpenAI/Anthropic 等其他 provider。
 
@@ -202,7 +201,7 @@ uv run pytest tests/fund/agent/test_stream_events.py tests/fund/agent/test_llm_p
 ```
 - Phase 7 验证命令：
 ```bash
-uv run pytest tests/fund/cli/test_cli_interactive.py   tests/fund/service/test_chat_service.py   tests/fund/host/test_session_store.py   tests/fund/agent/test_context_budget.py   tests/fund/service/test_scene_manifest.py   tests/fund/service/test_prompt_composer_upgrade.py   -v --tb=short
+uv run pytest tests/fund/cli/test_cli_interactive.py   tests/fund/service/test_chat_service.py   tests/fund/host/test_session_store.py   tests/fund/agent/test_context_budget.py   tests/fund/service/test_scene_config.py   tests/fund/service/test_prompt_contributions.py   tests/fund/service/test_prompt_composer_upgrade.py   -v --tb=short
 ```
 
 ## 代码与文档同步

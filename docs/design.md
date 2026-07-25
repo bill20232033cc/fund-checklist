@@ -10,7 +10,7 @@
 ### 0.1 当前代码事实
 
 - 本仓库已实现 `fund_agent/` 完整分层（fund / service / host / agent / cli），`tests/` 覆盖 document_tools / service / agent / cli，`docs/design.md` 与 `docs/implementation-control.md` 为真源文档。
-- CLI 已实现 10 个子命令：`read` / `multi-year` / `import` / `holdings` / `allocation` / `fees` / `audit` / `deep-audit` / `generate` / `ask`。
+- CLI 已实现 11 个子命令：`read` / `multi-year` / `import` / `holdings` / `download` / `allocation` / `fees` / `audit` / `deep-audit` / `generate` / `ask`。
 - 已实现能力：本地 PDF 导入、Docling 转换、7 个 reading tools、Service 层 profile routing + disclosure target contract、结构化字段抽取（费率/业绩/持仓/资产配置）、多年度聚合、确定性信号评分（基金类型感知：主动基金 6 指标；被动基金 3 指标 100 分制）、8 章分析报告生成、三层审计管道。
 - 当前样本材料位于 `基金年报/`，包含多只基金多个年度的 PDF；已通过受控 import 管理。
 - `docs/fund-analysis-template-draft.md` 存在，按 `AGENTS.md` 规则，在报告生成、字段抽取或投资判断路径中使用。
@@ -1409,7 +1409,7 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - **Slice 19C**：MinimalHost `run_agent_stream()` 方法。✅ 已完成。
 - **Slice 19D**：Service 层 `ask_question`（含 profile routing）。✅ 已完成。
 - **Slice 19E**：CLI `ask` 子命令（流式默认）。✅ 已完成。
-- **Slice 19F**：端到端 smoke + read 回归快照 + 全量回归。依赖 19E。
+- **Slice 19F**：端到端 smoke + read 回归快照 + 全量回归。✅ 已完成。
 
 新增文件：`fund_agent/agent/stream_events.py`、`tests/fund/agent/test_stream_events.py`、`tests/fund/agent/test_llm_production_readiness.py`、`tests/fund/service/test_ask_question.py`
 
@@ -1436,40 +1436,49 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 **核心能力**：
 - Session 数据模型 + filesystem JSON 持久化
 - 三层记忆模型（Pinned State + Recent Turns + Episode Summary）
-- Scene Manifest + Fragments + Context Slots（对齐 Dayu Prompt 路由）
+- Scene Config + Fragments + Context Slots（对齐 Dayu Prompt 路由）
 - 上下文预算治理（Context Budget）
 - CLI `interactive` 子命令（prompt_toolkit + rich）
 - 会话恢复（--label）
 
-**Slice 列表**：
-- **7A**：Session 数据模型 + 持久化
-- **7B**：上下文截断（Context Budget）
-- **7C**：Scene Manifest 数据模型
-- **7D**：PromptComposer 升级（Fragments + Context Slots）
-- **7E**：Service 层 chat_turn use case
-- **7F**：Host 多轮会话托管
-- **7G**：CLI interactive 子命令（prompt_toolkit + rich）
-- **7H**：会话恢复（--label）
-- **7I**：Episode Summary（异步 LLM）
-- **7J**：扩展命令集
-- **7K**：多文档切换
-- **7L-7P**：集成测试 + 端到端验证
+**Slice 列表**（对齐计划文件 Wave 结构）：
+- **7A**：Session 数据模型 + JSON 持久化
+- **7B**：FundReadingService.resolve_by_fund_code()
+- **7C**：统一 INVESTMENT_ADVICE_KEYWORDS
+- **7D**：DeepSeekLlmClient token usage 追踪
+- **7E**：PromptComposer 升级（fragment assembly + contribution injection）
+- **7F**：Scene Config + Fragment 模板 + Prompt Contributions
+- **7G**：Service 层 chat_turn use case（新建 `chat_service.py`）
+- **7H**：Host 多轮会话托管
+- **7I**：CLI interactive 子命令（prompt_toolkit + rich）
+- **7J**：Integration wire-up（chat_turn → Host → CLI）
+- **7K**：会话恢复 + --label 支持
+- **7L**：Episode Summary（异步 LLM）
+- **7M**：上下文预算治理（Context Budget）
+- **7N**：扩展命令 + 多文档切换
+- **7O**：Rich Markdown 渲染
+- **7P**：端到端验证 + 全量回归
 
 **新增文件**：
 - `fund_agent/host/session_store.py` — Session JSON 持久化
 - `fund_agent/service/session_models.py` — Session/Turn/PinnedState 数据模型
-- `fund_agent/service/scene_manifest.py` — Scene Manifest 数据模型
+- `fund_agent/service/scene_config.py` — Scene Config 数据模型
+- `fund_agent/service/prompt_contributions.py` — Prompt Contributions 构建与选择
 - `fund_agent/service/prompt_composer.py` — 升级：fragment 装配 + contribution 注入
+- `fund_agent/service/chat_service.py` — chat_turn use case
 - `fund_agent/service/prompts/interactive/` — prompt fragment 模板
 - `fund_agent/agent/context_budget.py` — 上下文预算治理
 - `tests/fund/cli/test_cli_interactive.py` — interactive 测试
+- `tests/fund/service/test_chat_service.py` — chat_turn 测试
+- `tests/fund/service/test_scene_config.py` — Scene Config 测试
+- `tests/fund/service/test_prompt_contributions.py` — Prompt Contributions 测试
 ### 技术债
 
 - **P1-3**：提取 compute_signal_judgment / compute_risk_checklist 共享评分 helper。
 - **extraction.py 二次拆分**：当前 5931 行。signal_scoring.py（439 行）已完成一次拆分；残留 7 个评分/风险函数（约 450 行）待迁移。
   - 排期：Phase 7 完成后执行（理由：Phase 7 新增 Session/Scene/ContextBudget，会产生新的 import 依赖；并行做会产生 merge 冲突）。
   - 执行顺序：(1) 移 infer_fund_type + _next_tier_up/down + _compute_threshold_events 到 signal_scoring.py（消除循环依赖）(2) 移 compute_signal_judgment + 3 个 _compute_*_signal 到 signal_scoring.py (3) 新建 risk_assessment.py，移 STRESS_THRESHOLDS + compute_risk_checklist + compute_stress_test + _compute_ch6_stress_test (4) 更新 5 个文件的 import（extraction.py、audit_pipeline.py、__init__.py、chapter_generator.py、3 个测试文件）
-  - 预期收益：extraction.py 减少约 450 行（5727→5280），评分逻辑完全独立可测试。
+  - 预期收益：extraction.py 减少约 450 行（5931→5480），评分逻辑完全独立可测试。
 **Slice 16C**：Ch0 升级/降级阈值事件 + 一句话产品定义。从 Ch7 信号反推 Ch0 封面。✅ 已完成。含 tier-delta 阈值事件算法 + 确定性产品定义。
 **Slice 17A**：报告 Markdown 持久化 + metadata sidecar。文件名 `{fund_code}-{year}-analysis.meta.json`，与 .md 同目录。字段：fund_code、fund_name、report_year、generation_time（ISO 8601）、audit_score（无审计 null）、signal、normalized_score。_export_markdown 增加 signal_judgment 参数。
 **Slice 17A**：报告 Markdown 持久化 + metadata sidecar。文件名 `{fund_code}-{year}-analysis.meta.json`，与 .md 同目录。字段：fund_code、fund_name、report_year、generation_time（ISO 8601）、audit_score（无审计 null）、signal、normalized_score。_export_markdown 增加 signal_judgment 参数。✅ 已完成。

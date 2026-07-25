@@ -2082,21 +2082,21 @@ done
 | Slice | 内容 | 状态 |
 |-------|------|------|
 | **7A** | Session 数据模型 + 持久化（filesystem JSON） | 待启动 |
-| **7B** | 上下文截断（Context Budget） | 依赖 7A |
-| **7C** | Scene Manifest 数据模型 | 依赖 7A |
-| **7D** | PromptComposer 升级（Fragments + Context Slots） | 依赖 7C |
-| **7E** | Service 层 chat_turn use case | 依赖 7A, 7B |
-| **7F** | Host 多轮会话托管 | 依赖 7E |
-| **7G** | CLI interactive 子命令（prompt_toolkit + rich） | 依赖 7F |
-| **7H** | 会话恢复（--label） | 依赖 7G |
-| **7I** | Episode Summary（异步 LLM） | 依赖 7F |
-| **7J** | 扩展命令集 | 依赖 7G |
-| **7K** | 多文档切换 | 依赖 7G |
-| **7L** | 集成测试 | 依赖 7A-7K |
-| **7M** | 端到端验证（011649 基金） | 依赖 7L |
-| **7N** | DS Review | 依赖 7M |
-| **7O** | 全量回归 | 依赖 7N |
-| **7P** | 最终审计（F1-F4） | 依赖 7O |
+| **7B** | FundReadingService.resolve_by_fund_code() | 依赖 7A |
+| **7C** | 统一 INVESTMENT_ADVICE_KEYWORDS | 依赖 7A |
+| **7D** | DeepSeekLlmClient token usage 追踪 | 依赖 7A |
+| **7E** | PromptComposer 升级（fragment assembly + contribution injection） | 依赖 7A |
+| **7F** | Scene Config + Fragment 模板 + Prompt Contributions | 依赖 7E |
+| **7G** | Service 层 chat_turn use case | 依赖 7A, 7B, 7F |
+| **7H** | Host 多轮会话托管 | 依赖 7A |
+| **7I** | CLI interactive 子命令（prompt_toolkit + rich） | 依赖 7B, 7F |
+| **7J** | Integration wire-up（chat_turn → Host → CLI） | 依赖 7G, 7H, 7I |
+| **7K** | 会话恢复 + --label 支持 | 依赖 7A, 7I |
+| **7L** | Episode Summary（异步 LLM） | 依赖 7D, 7J |
+| **7M** | 上下文预算治理（Context Budget） | 依赖 7D, 7L |
+| **7N** | 扩展命令 + 多文档切换 | 依赖 7J |
+| **7O** | Rich Markdown 渲染 | 依赖 7J |
+| **7P** | 端到端验证 + 全量回归 | 依赖 7M, 7N, 7O |
 
 ### Phase 7 总体验收标准
 
@@ -2106,7 +2106,7 @@ done
 4. 会话恢复（--label）正确
 5. Episode Summary 异步触发并落盘
 6. 上下文预算裁减生效
-7. Scene Manifest + Fragments + Context Slots 正确装配
+7. Scene Config + Fragments + Context Slots 正确装配
 8. 投资建议检测每轮生效
 9. ask 命令行为不变（回归）
 10. 全量测试通过（≥200 tests）
@@ -2117,19 +2117,24 @@ done
 |------|---------|-----------|
 | `fund_agent/host/session_store.py` | **新增** — Session JSON 持久化 | 7A |
 | `fund_agent/service/session_models.py` | **新增** — Session/Turn/PinnedState 数据模型 | 7A |
-| `fund_agent/agent/context_budget.py` | **新增** — 上下文预算治理 | 7B |
-| `fund_agent/service/scene_manifest.py` | **新增** — Scene Manifest 数据模型 | 7C |
-| `fund_agent/service/prompt_composer.py` | 升级 — fragment 装配 + contribution 注入 | 7D |
-| `fund_agent/service/prompts/interactive/` | **新增** — prompt fragment 模板 | 7C, 7D |
-| `fund_agent/service/extraction.py` | 升级 — chat_turn use case | 7E |
-| `fund_agent/host/minimal_host.py` | 升级 — 多轮会话托管 | 7F |
-| `fund_agent/cli/main.py` | 升级 — interactive 子命令 | 7G |
-| `tests/fund/cli/test_cli_interactive.py` | **新增** — interactive 测试 | 7G |
-| `tests/fund/service/test_chat_service.py` | **新增** — chat_turn 测试 | 7E |
+| `fund_agent/service/scene_config.py` | **新增** — Scene Config 数据模型 | 7F |
+| `fund_agent/service/prompt_contributions.py` | **新增** — Prompt Contributions 构建与选择 | 7F |
+| `fund_agent/service/chat_service.py` | **新增** — chat_turn use case | 7G |
+| `fund_agent/service/prompt_composer.py` | 升级 — fragment 装配 + contribution 注入 | 7E |
+| `fund_agent/service/prompts/interactive/` | **新增** — prompt fragment 模板 | 7F |
+| `fund_agent/agent/context_budget.py` | **新增** — 上下文预算治理 | 7M |
+| `fund_agent/service/extraction.py` | 升级 — resolve_by_fund_code + INVESTMENT_ADVICE_KEYWORDS | 7B, 7C |
+| `fund_agent/service/audit_pipeline.py` | 升级 — 统一 INVESTMENT_ADVICE_KEYWORDS | 7C |
+| `fund_agent/agent/deepseek_llm.py` | 升级 — token usage 追踪 | 7D |
+| `fund_agent/host/minimal_host.py` | 升级 — 多轮会话托管 | 7H |
+| `fund_agent/cli/main.py` | 升级 — interactive 子命令 | 7I |
+| `tests/fund/cli/test_cli_interactive.py` | **新增** — interactive 测试 | 7I |
+| `tests/fund/service/test_chat_service.py` | **新增** — chat_turn 测试 | 7G |
 | `tests/fund/host/test_session_store.py` | **新增** — session 持久化测试 | 7A |
-| `tests/fund/agent/test_context_budget.py` | **新增** — 上下文预算测试 | 7B |
-| `tests/fund/service/test_scene_manifest.py` | **新增** — Scene Manifest 测试 | 7C |
-| `tests/fund/service/test_prompt_composer_upgrade.py` | **新增** — PromptComposer 升级测试 | 7D |
+| `tests/fund/agent/test_context_budget.py` | **新增** — 上下文预算测试 | 7M |
+| `tests/fund/service/test_scene_config.py` | **新增** — Scene Config 测试 | 7F |
+| `tests/fund/service/test_prompt_contributions.py` | **新增** — Prompt Contributions 测试 | 7F |
+| `tests/fund/service/test_prompt_composer_upgrade.py` | **新增** — PromptComposer 升级测试 | 7E |
 | `docs/design.md` | 更新 — Phase 7 设计 | — |
 | `docs/implementation-control.md` | 更新 — Phase 7 执行面板 | — |
 
@@ -2138,13 +2143,13 @@ done
 - `interactive` 破坏 `ask` 子命令现有行为 → 停止
 - 会话持久化导致数据损坏 → 停止
 - 上下文截断导致 LLM 回答质量下降 → 停止
-- Scene Manifest 装配失败 → 停止
+- Scene Config 装配失败 → 停止
 
 ### 验证命令
 
 ```bash
 # Phase 7 核心测试
-uv run pytest tests/fund/cli/test_cli_interactive.py   tests/fund/service/test_chat_service.py   tests/fund/host/test_session_store.py   tests/fund/agent/test_context_budget.py   tests/fund/service/test_scene_manifest.py   tests/fund/service/test_prompt_composer_upgrade.py   -v --tb=short
+uv run pytest tests/fund/cli/test_cli_interactive.py   tests/fund/service/test_chat_service.py   tests/fund/host/test_session_store.py   tests/fund/agent/test_context_budget.py   tests/fund/service/test_scene_config.py   tests/fund/service/test_prompt_contributions.py   tests/fund/service/test_prompt_composer_upgrade.py   -v --tb=short
 
 # Phase 5 ask 回归
 uv run pytest tests/fund/agent/test_stream_events.py   tests/fund/agent/test_llm_production_readiness.py   tests/fund/agent/test_llm_tool_loop.py   tests/fund/cli/test_cli.py -k ask   -v --tb=short
