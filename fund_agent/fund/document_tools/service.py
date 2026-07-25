@@ -332,10 +332,7 @@ class FundDocumentToolService:
 def _identity_from_store(store: DoclingDocumentStore) -> ReportIdentity:
     """从 Fund 层 store 读取安全身份，不暴露 raw Docling payload。"""
 
-    identity = getattr(store, "_identity", None)
-    if not isinstance(identity, ReportIdentity):
-        raise DocumentToolError(FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE)
-    return identity
+    return store.identity
 
 
 def _matches_filters(

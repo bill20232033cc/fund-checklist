@@ -185,7 +185,11 @@ class FilesystemReportRepository:
         try:
             self._catalog_path.parent.mkdir(parents=True, exist_ok=True)
             temporary = self._catalog_path.parent / f".{CATALOG_FILENAME}.{uuid4().hex}.tmp"
-            temporary.write_text(json.dumps(catalog, ensure_ascii=False, sort_keys=True, indent=2), encoding="utf-8")
+            payload = json.dumps(catalog, ensure_ascii=False, sort_keys=True, indent=2)
+            with open(temporary, 'w', encoding='utf-8') as f:
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(temporary, self._catalog_path)
         except OSError as exc:
             raise DocumentToolError(FailureCode.UNAVAILABLE, "catalog 暂不可写") from exc

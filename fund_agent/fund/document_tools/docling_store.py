@@ -100,6 +100,10 @@ class DoclingDocumentStore:
         self._health = _build_parser_health(self._texts, self._sections, self._tables_model)
 
     @property
+    def identity(self) -> ReportIdentity:
+        return self._identity
+
+    @property
     def parser_health(self) -> ParserHealth:
         """返回已通过的 parser health 摘要。
 

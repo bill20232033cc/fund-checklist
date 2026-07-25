@@ -130,6 +130,24 @@ class DeepSeekTransportProtocol(Protocol):
         """发送一次 chat completions 请求。"""
 
 
+def _ensure_socket_read_timeout(response: object, timeout_seconds: int) -> None:
+    """确保流式 HTTP 响应的底层 socket 具有读取超时。
+
+    urllib timeout 覆盖 connect + read，但 belt-and-suspenders 显式设置
+    避免极端情况下流式读取无限等待。
+    """
+    try:
+        fp = getattr(response, 'fp', None)
+        if fp is not None:
+            raw = getattr(fp, 'raw', None)
+            if raw is not None:
+                sock = getattr(raw, '_sock', None)
+                if sock is not None:
+                    sock.settimeout(timeout_seconds)
+    except Exception:
+        pass
+
+
 class UrlLibDeepSeekTransport:
     """基于标准库 urllib 的默认 DeepSeek transport。
 
@@ -174,6 +192,7 @@ class UrlLibDeepSeekTransport:
         )
         try:
             with urllib.request.urlopen(urllib_request, timeout=request.timeout_seconds) as response:
+                _ensure_socket_read_timeout(response, request.timeout_seconds)
                 for line in response:
                     yield line.decode("utf-8", errors="replace")
         except urllib.error.HTTPError as exc:
@@ -520,7 +539,7 @@ def _tool_schemas() -> list[dict[str, Any]]:
             {
                 "fund_code": {"type": "string"},
                 "requested_years": {"type": "array", "items": {"type": "integer"}},
-                "annual_report_documents": {"type": "array", "items": {"type": "string"}},
+                "annual_report_documents": {"type": "array", "items": {"type": "object", "properties": {"year": {"type": "integer"}, "document_id": {"type": "string"}}, "required": ["year", "document_id"]}},
                 "share_class": {"type": "string"},
             },
             ("fund_code", "requested_years", "annual_report_documents"),

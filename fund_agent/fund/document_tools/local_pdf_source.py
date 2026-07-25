@@ -26,6 +26,11 @@ from fund_agent.fund.document_tools.models import PdfImportRequest, PdfImportRes
 
 _ACCEPTED_CONTENT_TYPES = frozenset({PDF_CONTENT_TYPE})
 _DOCUMENT_ID_FUND_CODE_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
+_PARSED_DOCUMENT_ID_PATTERN = re.compile(
+    r"^[A-Za-z0-9_.-]+-\d{4}-"  # fund_code-year-
+    r"(?:annual_report)-"       # report_type (MVP: annual_report only)
+    r"[a-f0-9]{16}$"            # fingerprint prefix (16 hex chars)
+)
 
 
 class PdfBlobStore:
@@ -260,7 +265,10 @@ def parse_blob_ref(stored_blob_ref: str) -> str:
     prefix = f"{LOCAL_PDF_BLOB_REF_PREFIX}:"
     if not stored_blob_ref.startswith(prefix):
         raise DocumentToolError(FailureCode.NOT_FOUND, "PDF blob 引用不存在")
-    return stored_blob_ref[len(prefix) :]
+    document_id = stored_blob_ref[len(prefix):]
+    if not _PARSED_DOCUMENT_ID_PATTERN.fullmatch(document_id):
+        raise DocumentToolError(FailureCode.NOT_FOUND, "PDF blob 引用格式无效")
+    return document_id
 
 
 def _normalize_request(request: PdfImportRequest) -> PdfImportRequest:
@@ -389,5 +397,8 @@ def _write_identity_index(root_dir: Path, index: dict[str, dict[str, object]]) -
     path = root / METADATA_FILENAME
     temporary = root / f".{METADATA_FILENAME}.{uuid4().hex}.tmp"
     payload = json.dumps(index, ensure_ascii=False, sort_keys=True, indent=2)
-    temporary.write_text(payload, encoding="utf-8")
+    with open(temporary, 'w', encoding='utf-8') as f:
+        f.write(payload)
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(temporary, path)

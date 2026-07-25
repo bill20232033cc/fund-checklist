@@ -5,6 +5,7 @@ from __future__ import annotations
 import queue
 import threading
 import time
+import weakref
 from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import Enum
@@ -155,10 +156,15 @@ class MinimalHost:
         timed_out = False
         agent_error: str | None = None
 
+        agent_ref = weakref.ref(self._agent)
+
         def _run_agent() -> None:
             nonlocal agent_result, agent_error
+            agent = agent_ref()
+            if agent is None:
+                return
             try:
-                agent_result = self._agent.run(
+                agent_result = agent.run(
                     document_id=document_id,
                     query=query,
                 )

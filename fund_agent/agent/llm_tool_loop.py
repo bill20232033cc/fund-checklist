@@ -524,23 +524,23 @@ def _final_result(
     if not evidence_texts:
         return _failed_result(trace, FailureCode.UNAVAILABLE, _NO_EVIDENCE_MESSAGE)
 
-    # citations 非空时执行受控 citation 校验；为空时为 markdown fallback，跳过校验
-    if final_answer.citations:
-        citation_evidence = tuple(
-            (_citation_key(citation), result.evidence_text)
-            for result in tool_results
-            for citation in result.citations
-            if citation.locator.locator_kind in {LocatorKind.SECTION, LocatorKind.TABLE}
-        )
-        controlled_citation_keys = {key for key, _ in citation_evidence}
-        final_citation_keys = {_citation_key(citation) for citation in final_answer.citations}
-        if not controlled_citation_keys or any(
-            _citation_key(citation) not in controlled_citation_keys for citation in final_answer.citations
-        ):
-            return _failed_result(trace, FailureCode.UNAVAILABLE, _MISSING_CITATION_MESSAGE)
+    if not final_answer.citations:
+        return _failed_result(trace, FailureCode.UNAVAILABLE, _MISSING_CITATION_MESSAGE)
 
-    # key_facts 校验仅在 citations 非空时执行（markdown fallback 时跳过）
-    if final_answer.citations and final_answer.key_facts:
+    citation_evidence = tuple(
+        (_citation_key(citation), result.evidence_text)
+        for result in tool_results
+        for citation in result.citations
+        if citation.locator.locator_kind in {LocatorKind.SECTION, LocatorKind.TABLE}
+    )
+    controlled_citation_keys = {key for key, _ in citation_evidence}
+    final_citation_keys = {_citation_key(citation) for citation in final_answer.citations}
+    if not controlled_citation_keys or any(
+        _citation_key(citation) not in controlled_citation_keys for citation in final_answer.citations
+    ):
+        return _failed_result(trace, FailureCode.UNAVAILABLE, _MISSING_CITATION_MESSAGE)
+
+    if final_answer.key_facts:
         for key_fact in final_answer.key_facts:
             fact = key_fact.strip()
             if not fact or fact not in final_answer.answer or not any(

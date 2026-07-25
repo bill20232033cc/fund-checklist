@@ -503,8 +503,9 @@ def test_deepseek_final_answer_without_citation_fails_closed(tmp_path: Path) -> 
 
     result = runner.run(document_id=_DOCUMENT_ID, query="基金经理")
 
-    assert result.failure is None
-    assert result.answer == "基金经理张明负责本基金投资管理。"
+    assert isinstance(result.failure, ToolFailure)
+    assert result.failure.code is FailureCode.UNAVAILABLE
+    assert result.answer == ""
 
 
 def test_deepseek_final_answer_without_evidence_fails_closed(tmp_path: Path) -> None:

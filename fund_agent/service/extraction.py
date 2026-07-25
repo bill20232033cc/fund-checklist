@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import subprocess
 from collections.abc import Callable
@@ -113,6 +114,9 @@ from .signal_scoring import (
     to_risk_item,
     to_signal_indicator,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 HostFactory = Callable[[FundDocumentToolService], MinimalHost]
@@ -847,37 +851,6 @@ class FundReadingService:
         else:
             augmented_query = request.question
 
-        # 如果路由上下文已包含完整数据，直接返回，不调用 LLM
-        if routing_context and any(keyword in routing_context for keyword in ['股票名称', '持仓', '净值增长率', '管理费', '托管费']):
-            # 投资建议关键词检测：routing context 也必须过安全校验
-            if any(kw in routing_context for kw in _INVESTMENT_ADVICE_KEYWORDS):
-                return AskQuestionResult(
-                    answer="",
-                    citations=(),
-                    tool_trace=(),
-                    routing_trace=tuple(routing_trace),
-                    failure=ToolFailure(code="investment_advice_blocked", message=_INVESTMENT_ADVICE_MESSAGE),
-                )
-            # 从路由上下文提取答案
-            answer = routing_context
-            # 从 routing_trace 提取 citations
-            citations_list = []
-            for attempt in routing_trace:
-                if attempt.result_kind == _ROUTE_RESULT_SUCCESS:
-                    # 这里简化处理，实际应该从 result 中提取 citations
-                    pass
-            # 通知回调
-            if on_event is not None:
-                on_event(StreamEvent(type=StreamEventType.CONTENT_DELTA, payload=answer, sequence=0))
-                on_event(StreamEvent(type=StreamEventType.DONE, payload=None, sequence=1))
-            return AskQuestionResult(
-                answer=answer,
-                citations=tuple(citations_list),
-                tool_trace=(),
-                routing_trace=tuple(routing_trace),
-                failure=None,
-            )
-
         # 创建 LLM runner 并通过 Host 运行
         runner = self._runner_factory(tool_service)
         llm_host = MH(runner)  # type: ignore[arg-type]
@@ -1359,6 +1332,7 @@ class FundReadingService:
             except DocumentToolError:
                 pass  # 已分类错误，继续 fallback
             except Exception:
+                logger.warning("extract_holdings: 未分类异常", exc_info=True)
                 _extraction_error = True  # 未分类异常，记录标记
             # equity 成功但持仓为空时，按基金类型二次 fallback
             if not holdings and fund_name:
@@ -1628,7 +1602,7 @@ class FundReadingService:
                 except DocumentToolError:
                     pass
                 except Exception:
-                    pass  # 资产配置非关键路径，继续
+                    logger.warning("extract_allocation: 资产配置抽取异常", exc_info=True)
 
         table_citation = None
         for citation in routed.agent_result.citations:
@@ -1752,7 +1726,7 @@ class FundReadingService:
             except DocumentToolError:
                 continue
             except Exception:
-                continue  # 费率抽取非关键路径，跳过该 spec
+                logger.warning("extract_fee_rates: 费率抽取异常", exc_info=True)
 
         if not fees:
             return AnnualFeeResult(
@@ -2446,6 +2420,7 @@ class FundReadingService:
             try:
                 store = repository.load_store(doc.document_id)
             except Exception:
+                logger.warning("aggregate_multi_year: 加载 store 失败 doc=%s", doc.document_id, exc_info=True)
                 continue
             result = self._extract_annual_performance_from_store(
                 document_id=doc.document_id,
