@@ -54,9 +54,54 @@ _MISSING_CITATION_MESSAGE = "LLM 最终回答缺少受控 citation"
 _UNSUPPORTED_FACT_MESSAGE = "LLM 最终回答包含未由工具结果支持的关键事实"
 _STEP_LIMIT_MESSAGE = "LLM 工具调用超过限制"
 _UNAVAILABLE_MESSAGE = "LLM 工具循环暂不可用"
-from fund_agent.service.investment_guard import INVESTMENT_ADVICE_KEYWORDS as _INVESTMENT_ADVICE_KEYWORDS
-
+_INVESTMENT_ADVICE_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "买入", "卖出", "建议买入", "建议卖出", "建议加仓", "建议减仓",
+        "推荐买入", "推荐卖出", "强烈建议", "强烈推荐", "强烈买入", "强烈卖出",
+        "增持", "减持", "目标价", "预期收益", "预计涨幅", "预期回报",
+    }
+)
 _INVESTMENT_ADVICE_MESSAGE = "LLM 最终回答包含投资建议关键词"
+
+
+@dataclass(frozen=True)
+class TokenUsage:
+    """LLM API 单次调用 token 用量。
+
+    参数:
+        prompt_tokens: 输入消耗 token。
+        completion_tokens: 输出消耗 token。
+        total_tokens: 总 token（prompt + completion），缺省自动求和。
+    """
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+    def __post_init__(self):
+        if self.total_tokens == 0 and (self.prompt_tokens or self.completion_tokens):
+            object.__setattr__(self, "total_tokens", self.prompt_tokens + self.completion_tokens)
+
+    def __add__(self, other: TokenUsage) -> TokenUsage:
+        if not isinstance(other, TokenUsage):
+            return NotImplemented
+        return TokenUsage(
+            prompt_tokens=self.prompt_tokens + other.prompt_tokens,
+            completion_tokens=self.completion_tokens + other.completion_tokens,
+        )
+
+
+@dataclass(frozen=True)
+class ChatResponse:
+    """LLM next_step 返回结果，包含 step 与 token usage。
+
+    参数:
+        step: 下一步行为（ToolCall 或 FinalAnswer）。
+        usage: 本次调用的 token 用量；不可用时为 None。
+    """
+
+    step: ToolCall | FinalAnswer
+    usage: TokenUsage | None = None
 
 
 class LlmClientFailure(Exception):
@@ -180,8 +225,8 @@ class LlmClientProtocol(Protocol):
         document_id: str,
         query: str,
         tool_results: tuple[ToolResult, ...],
-    ) -> LlmStep:
-        """返回下一步 LLM 行为。"""
+    ) -> ChatResponse:
+        """返回下一步 LLM 行为（含 token usage）。"""
 
 
 class FakeLlmClient:
@@ -210,8 +255,8 @@ class FakeLlmClient:
         document_id: str,
         query: str,
         tool_results: tuple[ToolResult, ...],
-    ) -> LlmStep:
-        """返回脚本中的下一步。"""
+    ) -> ChatResponse:
+        """返回脚本中的下一步，包装为 ChatResponse。"""
 
         del document_id, query
         if self._index >= len(self._steps):
@@ -219,8 +264,8 @@ class FakeLlmClient:
         step = self._steps[self._index]
         self._index += 1
         if callable(step):
-            return step(tool_results)
-        return step
+            return ChatResponse(step=step(tool_results))
+        return ChatResponse(step=step)
 
 
 class LlmToolLoopRunner:
@@ -271,7 +316,7 @@ class LlmToolLoopRunner:
         tool_results: list[ToolResult] = []
         for _ in range(self._max_steps):
             try:
-                step = self._llm_client.next_step(
+                chat_response = self._llm_client.next_step(
                     document_id=document_id,
                     query=query,
                     tool_results=tuple(tool_results),
@@ -281,6 +326,7 @@ class LlmToolLoopRunner:
             except Exception:
                 return _failed_result(tuple(trace), FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE)
 
+            step = chat_response.step
             if isinstance(step, FinalAnswer):
                 return _final_result(step, tuple(tool_results), tuple(trace))
             if isinstance(step, ToolCall):
@@ -314,7 +360,7 @@ class LlmToolLoopRunner:
         tool_results: list[ToolResult] = []
         for _ in range(self._max_steps):
             try:
-                step = self._llm_client.next_step(
+                chat_response = self._llm_client.next_step(
                     document_id=document_id,
                     query=query,
                     tool_results=tuple(tool_results),
@@ -334,6 +380,7 @@ class LlmToolLoopRunner:
                 )
                 return
 
+            step = chat_response.step
             if isinstance(step, FinalAnswer):
                 final = _final_result(step, tuple(tool_results), tuple(trace))
                 if final.failure is not None:

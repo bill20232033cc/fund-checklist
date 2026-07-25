@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.parse import urlsplit, urlunsplit
 
-from fund_agent.agent.llm_tool_loop import FinalAnswer, LlmClientFailure, ToolCall, ToolResult
+from fund_agent.agent.llm_tool_loop import ChatResponse, FinalAnswer, LlmClientFailure, TokenUsage, ToolCall, ToolResult
 from fund_agent.agent.stream_events import StreamEvent, StreamEventType
 from fund_agent.fund.document_tools.constants import FailureCode, LocatorKind, ToolName
 from fund_agent.fund.document_tools.models import Citation, Locator
@@ -231,6 +231,12 @@ class DeepSeekLlmClient:
         self._env = env
         self._timeout_seconds = timeout_seconds
         self._options = options or ExecutionOptions()
+        self._cumulative_usage = TokenUsage()
+
+    @property
+    def cumulative_usage(self) -> TokenUsage:
+        """返回会话累计 token 用量。"""
+        return self._cumulative_usage
 
     def next_step(
         self,
@@ -238,8 +244,8 @@ class DeepSeekLlmClient:
         document_id: str,
         query: str,
         tool_results: tuple[ToolResult, ...],
-    ) -> ToolCall | FinalAnswer:
-        """调用 DeepSeek 并解析为受控 ToolCall 或 FinalAnswer。
+    ) -> ChatResponse:
+        """调用 DeepSeek 并解析为 ChatResponse（含 ToolCall/FinalAnswer + token usage）。
 
         network error / 429 / timeout → 3 次指数退避重试（1s/2s/4s）。
         auth error（401/403）→ 不重试，立即 fail。
@@ -278,7 +284,10 @@ class DeepSeekLlmClient:
                 if use_stream:
                     lines = list(self._transport.send_stream(request))
                     body = json.dumps(_collect_sse_full_response(iter(lines)), ensure_ascii=False)
-                    return _parse_response(body)
+                    chat_response = _parse_response(body)
+                    if chat_response.usage:
+                        self._cumulative_usage += chat_response.usage
+                    return chat_response
                 response = self._transport.send(request)
             except DeepSeekTransportUnavailable as exc:
                 if exc.status_code in (401, 403):
@@ -291,7 +300,10 @@ class DeepSeekLlmClient:
             if response.status_code in (401, 403):
                 raise LlmClientFailure(FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE)
             if 200 <= response.status_code < 300:
-                return _parse_response(response.body)
+                chat_response = _parse_response(response.body)
+                if chat_response.usage:
+                    self._cumulative_usage += chat_response.usage
+                return chat_response
             # 非 2xx → 重试
             last_exc = LlmClientFailure(FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE)
             if attempt < max_retries - 1:
@@ -565,8 +577,8 @@ def _tool_schema(tool_name: ToolName, properties: dict[str, Any], required: tupl
     }
 
 
-def _parse_response(body: str) -> ToolCall | FinalAnswer:
-    """解析 provider response body 为受控 ToolCall 或 FinalAnswer。"""
+def _parse_response(body: str) -> ChatResponse:
+    """解析 provider response body 为 ChatResponse（含 step + token usage）。"""
 
     try:
         payload = json.loads(body)
@@ -574,12 +586,29 @@ def _parse_response(body: str) -> ToolCall | FinalAnswer:
     except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
         raise LlmClientFailure(FailureCode.LLM_MALFORMED_RESPONSE, _MALFORMED_MESSAGE) from exc
 
+    usage = _extract_usage(payload)
+
     if not isinstance(message, dict):
         raise LlmClientFailure(FailureCode.LLM_MALFORMED_RESPONSE, _MALFORMED_MESSAGE)
     tool_calls = message.get("tool_calls")
     if tool_calls:
-        return _parse_tool_call(tool_calls)
-    return _parse_final_answer(message.get("content"))
+        return ChatResponse(step=_parse_tool_call(tool_calls), usage=usage)
+    return ChatResponse(step=_parse_final_answer(message.get("content")), usage=usage)
+
+
+def _extract_usage(payload: dict) -> TokenUsage | None:
+    """从 API response payload 提取 token usage。"""
+    usage_raw = payload.get("usage")
+    if not isinstance(usage_raw, dict):
+        return None
+    try:
+        return TokenUsage(
+            prompt_tokens=int(usage_raw.get("prompt_tokens") or 0),
+            completion_tokens=int(usage_raw.get("completion_tokens") or 0),
+            total_tokens=int(usage_raw.get("total_tokens") or 0),
+        )
+    except (TypeError, ValueError):
+        return None
 
 
 def _parse_tool_call(tool_calls: Any) -> ToolCall:
