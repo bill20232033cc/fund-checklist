@@ -1078,10 +1078,26 @@ def _run_interactive_command(
 
     template_dir = Path(__file__).parent.parent / "service" / "prompts"
     prompt_composer = PromptComposer(template_dir=template_dir)
+
+    # 构建 tool service：加载所有已解析 document 的 store
+    from fund_agent.fund.document_tools.service import FundDocumentToolService
+    _stores: dict[str, object] = {}
+    _repo = FilesystemReportRepository(
+        catalog_path=work_dir / CATALOG_FILENAME, blob_root=work_dir / "pdf_blobs",
+        docling_json_root=work_dir / "docling_json",
+    )
+    for _doc in resolution.documents:
+        try:
+            _stores[_doc.document_id] = _repo.load_store(_doc.document_id)
+        except Exception:
+            pass
+    _tool_svc = FundDocumentToolService(_stores) if _stores else None
+
     chat_service = ChatService(
         session_store=session_store,
         prompt_composer=prompt_composer,
         scene_config=INTERACTIVE_SCENE_CONFIG,
+        tool_service=_tool_svc,
     )
 
     print(f"\n已选择 {selected_year} 年年报。输入问题开始对话，/help 查看命令，exit 退出。", file=stdout)
