@@ -1,0 +1,211 @@
+"""Session 数据模型 + SessionStore 持久化测试。
+
+覆盖:
+- PinnedState / Turn / EpisodeSummary / Session 模型构造
+- SessionStore: create / save / load / list / delete
+- 原子写入防损坏
+- label 双向映射
+"""
+
+import json
+import os
+from pathlib import Path
+from unittest import mock
+
+import pytest
+
+from fund_agent.host.session_store import SessionStore
+from fund_agent.service.session_models import (
+    EpisodeSummary,
+    PinnedState,
+    Session,
+    Turn,
+)
+
+
+class TestPinnedState:
+    """PinnedState 数据模型测试。"""
+
+    def test_default_values(self):
+        """所有字段有合理默认值。"""
+        ps = PinnedState(fund_code="011649")
+        assert ps.fund_code == "011649"
+        assert ps.available_document_ids == ()
+        assert ps.active_document_id is None
+        assert ps.active_year is None
+        assert ps.user_constraints == {}
+
+    def test_full_construction(self):
+        """完整字段构造。"""
+        ps = PinnedState(
+            fund_code="011649",
+            available_document_ids=("id-2021", "id-2022"),
+            active_document_id="id-2022",
+            active_year=2022,
+            user_constraints={"max_tokens": 8000},
+        )
+        assert ps.active_year == 2022
+        assert len(ps.available_document_ids) == 2
+
+
+class TestTurn:
+    """Turn 数据模型测试。"""
+
+    def test_user_turn(self):
+        """user turn 构造。"""
+        turn = Turn(role="user", content="基金经理是谁？")
+        assert turn.role == "user"
+        assert turn.content == "基金经理是谁？"
+        assert turn.tool_trace == ()
+        assert turn.timestamp is not None
+
+    def test_assistant_turn_with_citations(self):
+        """assistant turn 含 citations 和 tool_trace。"""
+        turn = Turn(
+            role="assistant",
+            content="基金经理是张三，任期5年。",
+            citations=("sec_3.1",),
+            tool_trace=("search_document",),
+        )
+        assert turn.role == "assistant"
+        assert len(turn.citations) == 1
+        assert len(turn.tool_trace) == 1
+
+
+class TestEpisodeSummary:
+    """EpisodeSummary 数据模型测试。"""
+
+    def test_construction(self):
+        ep = EpisodeSummary(
+            episode_id="ep-001",
+            start_turn_id=0,
+            end_turn_id=5,
+            title="持仓分析讨论",
+            goal="了解基金持仓变化",
+            confirmed_facts=("前十大持仓集中度60%",),
+            open_questions=("未来调仓方向？",),
+        )
+        assert ep.start_turn_id == 0
+        assert ep.end_turn_id == 5
+        assert len(ep.confirmed_facts) == 1
+
+
+class TestSession:
+    """Session 数据模型测试。"""
+
+    def test_create_session(self):
+        """Session 创建时生成 session_id 和时间戳。"""
+        session = Session.create(fund_code="011649")
+        assert session.session_id is not None
+        assert len(session.session_id) > 0
+        assert session.status == "ACTIVE"
+        assert session.pinned_state.fund_code == "011649"
+        assert session.created_at is not None
+
+    def test_add_turn_appends(self):
+        """add_turn 追加 turn 并更新 updated_at。"""
+        session = Session.create(fund_code="011649")
+        assert len(session.turns) == 0
+        session = session.add_turn(Turn(role="user", content="hello"))
+        assert len(session.turns) == 1
+
+    def test_close_session(self):
+        """close 变更状态为 CLOSED。"""
+        session = Session.create(fund_code="011649")
+        assert session.status == "ACTIVE"
+        session = session.close()
+        assert session.status == "CLOSED"
+
+
+class TestSessionStore:
+    """SessionStore 持久化测试。"""
+
+    @pytest.fixture
+    def store_dir(self, tmp_path: Path) -> Path:
+        return tmp_path / "sessions"
+
+    @pytest.fixture
+    def store(self, store_dir: Path) -> SessionStore:
+        return SessionStore(store_dir)
+
+    def test_create_and_save(self, store: SessionStore, store_dir: Path):
+        """create→save 后 JSON 文件存在且可加载。"""
+        session = store.create(fund_code="011649")
+        assert session.session_id is not None
+        json_path = store_dir / f"{session.session_id}.json"
+        assert json_path.exists()
+
+        loaded = store.load(session.session_id)
+        assert loaded.session_id == session.session_id
+        assert loaded.pinned_state.fund_code == "011649"
+
+    def test_create_with_label(self, store: SessionStore):
+        """带 label 创建：labels.json 双向映射建立。"""
+        session = store.create(fund_code="011649", label="my-session")
+        loaded = store.load("my-session")
+        assert loaded.session_id == session.session_id
+
+    def test_list_sessions(self, store: SessionStore):
+        """list_sessions 返回所有会话摘要。"""
+        store.create(fund_code="011649")
+        store.create(fund_code="000001")
+        sessions = store.list_sessions()
+        assert len(sessions) == 2
+
+    def test_list_empty(self, store: SessionStore):
+        """无会话时返回空列表。"""
+        assert store.list_sessions() == []
+
+    def test_delete_session(self, store: SessionStore, store_dir: Path):
+        """delete 移除 JSON 文件和 label 映射。"""
+        session = store.create(fund_code="011649", label="test")
+        assert (store_dir / f"{session.session_id}.json").exists()
+        store.delete(session.session_id)
+        assert not (store_dir / f"{session.session_id}.json").exists()
+        # label 映射也应清理
+        labels_path = store_dir / "labels.json"
+        if labels_path.exists():
+            labels = json.loads(labels_path.read_text(encoding="utf-8"))
+            assert session.session_id not in labels.get("by_id", {})
+
+    def test_save_and_load_preserves_turns(self, store: SessionStore):
+        """保存后加载，turns 和 pinned_state 完整保留。"""
+        session = store.create(fund_code="011649")
+        session = session.add_turn(Turn(role="user", content="Q1"))
+        session = session.add_turn(Turn(role="assistant", content="A1"))
+        store.save(session)
+
+        loaded = store.load(session.session_id)
+        assert len(loaded.turns) == 2
+        assert loaded.turns[0].content == "Q1"
+
+    def test_load_nonexistent_raises(self, store: SessionStore):
+        """加载不存在的 session 抛出 FileNotFoundError。"""
+        with pytest.raises(FileNotFoundError):
+            store.load("nonexistent-id")
+
+    def test_atomic_write_no_corruption(self, store: SessionStore, store_dir: Path):
+        """原子写入：临时文件先写入再 os.replace。"""
+        session = store.create(fund_code="011649")
+        json_path = store_dir / f"{session.session_id}.json"
+        content_before = json_path.read_text(encoding="utf-8")
+
+        # 模拟写入中途崩溃（在 os.replace 之前）
+        original_replace = os.replace
+        def _fake_replace(src, dst):
+            if dst == str(json_path):
+                raise KeyboardInterrupt("模拟中断")
+            return original_replace(src, dst)
+
+        session2 = session.add_turn(Turn(role="user", content="bad write"))
+        with mock.patch("os.replace", side_effect=_fake_replace):
+            try:
+                store.save(session2)
+            except KeyboardInterrupt:
+                pass
+
+        # 原文件应保持完整
+        assert json_path.exists()
+        content_after = json_path.read_text(encoding="utf-8")
+        data = json.loads(content_after)
+        assert data["session_id"] == session.session_id
