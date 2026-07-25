@@ -20,6 +20,7 @@ from fund_agent.agent.deepseek_llm import (
     _tool_schemas,
 )
 from fund_agent.agent.llm_tool_loop import (
+    ChatResponse,
     _final_result,
     _truncate_evidence,
 )
@@ -190,7 +191,7 @@ class TestNextStepRetry:
             timeout_seconds=5,
         )
         result = client.next_step(document_id="test-doc", query="test", tool_results=())
-        assert isinstance(result, ToolCall)
+        assert isinstance(result.step, ToolCall)
         assert transport.calls == 3
 
     def test_no_retry_on_auth_error_transport_exception(self):
@@ -376,28 +377,28 @@ class _ThreeStepFakeClient:
     def next_step(self, *, document_id, query, tool_results):
         if self._step == 0:
             self._step = 1
-            return ToolCall(
+            return ChatResponse(step=ToolCall(
                 tool_name=ToolName.SEARCH_DOCUMENT,
                 document_id=document_id,
                 query="基金经理",
-            )
+            ))
         if self._step == 1:
             self._step = 2
             # 从搜索结果中取第一个 section_ref
             search_results = tool_results[-1].result
             section_ref = search_results[0].citation.locator.section_ref
-            return ToolCall(
+            return ChatResponse(step=ToolCall(
                 tool_name=ToolName.READ_SECTION,
                 document_id=document_id,
                 section_ref=section_ref,
-            )
+            ))
         # 从 read_section 结果取 citation
         section_citation = tool_results[-1].citations[0]
-        return FinalAnswer(
+        return ChatResponse(step=FinalAnswer(
             answer="该基金的基金经理是张明。",
             citations=(section_citation,),
             key_facts=("张明",),
-        )
+        ))
 
 
 class TestRunStream:
@@ -447,11 +448,11 @@ class TestRunStream:
 
         class AdviceClient:
             def next_step(self, *, document_id, query, tool_results):
-                return FinalAnswer(
+                return ChatResponse(step=FinalAnswer(
                     answer="建议买入该基金。",
                     citations=(_make_citation(document_id),),
                     key_facts=("建议买入",),
-                )
+                ))
 
         runner = LlmToolLoopRunner(tool_service=tool_service, llm_client=AdviceClient())
         events = list(runner.run_stream(document_id="test-doc", query="test"))
