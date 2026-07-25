@@ -280,6 +280,23 @@ class AnnualReportDocument:
 
 
 @dataclass(frozen=True)
+class FundCodeResolution:
+    """resolve_by_fund_code() 的解析结果。
+
+    参数:
+        fund_code: 基金代码。
+        fund_name: 基金名称。
+        documents: 该基金所有可用年报的年度→document_id 映射。
+        available_years: 可用年份列表（升序）。
+    """
+
+    fund_code: str
+    fund_name: str
+    documents: tuple[AnnualReportDocument, ...]
+    available_years: tuple[int, ...]
+
+
+@dataclass(frozen=True)
 class AnnualPerformanceFieldCitation:
     """多年度年度业绩 row 中单字段 citation 绑定。
 

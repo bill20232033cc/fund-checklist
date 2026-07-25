@@ -53,6 +53,7 @@ from .models import (
     AnnualPerformanceExtraction,
     AnnualPerformanceFieldCitation,
     AnnualReportDocument,
+    FundCodeResolution,
     AssetAllocationItem,
     ChapterEvidence,
     DeepAuditItem,
@@ -3645,6 +3646,52 @@ class FundReadingService:
             return md_path, "pandoc 未安装，已回退为 Markdown 格式"
         except subprocess.CalledProcessError:
             return md_path, "PDF 导出失败，已回退为 Markdown 格式"
+
+    def resolve_by_fund_code(
+        self,
+        fund_code: str,
+        work_dir: Path,
+    ) -> FundCodeResolution | None:
+        """按基金代码查找 catalog 中所有可用年报文档。
+
+        参数:
+            fund_code: 基金代码。
+            work_dir: 工作目录（含 completed_reports.json）。
+
+        返回:
+            FundCodeResolution；无匹配时返回 None。
+        """
+        catalog_path = work_dir / CATALOG_FILENAME
+        if not catalog_path.exists():
+            return None
+
+        repository = _repository(work_dir)
+        catalog_reports = repository.list_reports()
+
+        seen_years: dict[int, str] = {}
+        fund_name = ""
+        for report in catalog_reports:
+            if report.get("fund_code") == fund_code:
+                year_val = report.get("year")
+                if isinstance(year_val, int):
+                    seen_years[year_val] = str(report.get("document_id", ""))
+                if not fund_name:
+                    fund_name = str(report.get("fund_name", ""))
+
+        if not seen_years:
+            return None
+
+        years_sorted = tuple(sorted(seen_years.keys()))
+        documents = tuple(
+            AnnualReportDocument(year=y, document_id=seen_years[y])
+            for y in years_sorted
+        )
+        return FundCodeResolution(
+            fund_code=fund_code,
+            fund_name=fund_name,
+            documents=documents,
+            available_years=years_sorted,
+        )
 
     def list_reports(self, request: ListReportsRequest) -> ListReportsResult:
         """列出本地 completed reports 的安全摘要。
