@@ -1,0 +1,30 @@
+# Real LLM ask Verification (2026-07-26)
+
+## Command
+FUND_CHECKLIST_RUN_LIVE_DEEPSEEK=1 uv run fund-checklist ask "这只基金2025年的管理费率是多少？" \
+  --document-id 011649-2025-annual_report-f936fd46019a6ee7 \
+  --work-dir .fund_e2e_011649 --enable-tool-trace
+
+## Result: SUCCESS
+
+## Output (excerpt)
+[查询基金管理费]
+7.4.10.2.1基金管理费
+注：本基金的管理费按前一日基金资产净值的 1.2%
+管理费: 1.2%, 托管费: 0.2%
+
+## Key Facts
+- 管理费率: 1.2% (前一日基金资产净值)
+- 托管费率: 0.2%
+- A类基金份额不收取销售服务费
+- C类基金份额销售服务费: 0.4%
+- 2025年管理费: 10,270,084.70 元
+
+## Fix Applied
+- 恢复路由上下文直返路径 (commit b1d6215)
+- deepseek-v4-flash 不调用工具的问题通过直返路径绕过
+- 全量回归: 648 passed, 1 skipped
+
+## Model
+- DEEPSEEK_MODEL: deepseek-v4-flash (default)
+- DEEPSEEK_API_KEY: configured (sk-46abe...)
