@@ -1431,7 +1431,7 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 > 裁决时间：2026-07-25 | 状态：🔵 待启动
 > 计划文件：`.sisyphus/plans/phase7-interactive.md`
 
-**裁决汇总**：16 项裁决，详见计划文件。
+**裁决汇总**：17 项裁决，详见计划文件。
 
 **核心能力**：
 - Session 数据模型 + filesystem JSON 持久化
@@ -1443,6 +1443,7 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 **Slice 列表**（对齐计划文件 Wave 结构）：
 - **7A**：Session 数据模型 + JSON 持久化
+- **7X**：ToolResult 统一信封 + ToolExecutionContext（7F/7J/7L/7M 增强点：7F 注入 ToolExecutionContext 到 prompt contribution；7J wire-up 中 agent loop 所有工具返回走 envelope；7L Episode Summary 输出走 ToolResult envelope；7M Context Budget 裁决依赖 ToolExecutionContext.working_memory_overflow）
 - **7B**：FundReadingService.resolve_by_fund_code()
 - **7C**：统一 INVESTMENT_ADVICE_KEYWORDS
 - **7D**：DeepSeekLlmClient token usage 追踪

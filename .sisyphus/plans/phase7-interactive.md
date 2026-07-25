@@ -2,7 +2,7 @@
 
 ## TL;DR
 
-> **Quick Summary**：实现 `fund-checklist interactive --fund-code 011649` 多轮对话模式，三层记忆模型（Pinned State + Recent Turns + Episode Summary），对齐 Dayu Agent 的 Scene Manifest + Prompt Contributions + Context Budget 机制，融合 Phase 8 上下文治理。
+> **Quick Summary**：实现 `fund-checklist interactive --fund-code 011649` 多轮对话模式，三层记忆模型（Pinned State + Recent Turns + Episode Summary），对齐 Dayu Agent 的 Scene Manifest + Prompt Contributions + Context Budget 机制，融合 Phase 8 上下文治理。同步修复 Dayu Engine/Contracts 深度对比发现的 8 项差距中的 7 项（1 项推迟到 Phase 8）。
 >
 > **Deliverables**：
 > - Session 数据模型 + filesystem JSON 持久化
@@ -18,7 +18,7 @@
 > - 扩展命令集（/stats /save /export /model /verbose）+ 多文档切换 + Rich Markdown 渲染
 > - 011649 基金端到端验证 + 全量回归
 >
-> **Estimated Effort**：Large（16 Slice + 审计）
+> **Estimated Effort**：Large（17 Slice + 审计）
 > **Parallel Execution**：YES — 5 波并行
 > **Critical Path**：7E → 7F → 7J → 7L → 7M → 7P → F1-F4
 > **Test Strategy**：TDD（RED → GREEN → REFACTOR）
@@ -95,6 +95,26 @@ Memory                 →  Pinned State(不占预算) + Episodes(共享总池) 
 | 3 | 当前 ask 路径无 token usage 追踪 | 阻塞上下文预算治理 |
 | 4 | `_collect_matching_docs()` 在 CLI 层，Service 不可达 | 阻塞 `--fund-code` 入口 |
 
+### Dayu Engine/Contracts 深度差距分析
+
+> 来源：`.sisyphus/drafts/dayu-engine-contracts-phase7-analysis.md`（2026-07-25）
+> 方法：逐文件对比 Dayu `engine/` `contracts/` `host/` 源码与 Phase 7 17 Slice 设计
+
+经对比发现 **8 项具体差距**，其中 **7 项在 Phase 7 解决**，1 项推迟到 Phase 8：
+
+| # | 差距 | 严重度 | Phase 7 对应 | 方案 |
+|---|------|--------|-------------|------|
+| 1 | 工具结果无统一 `ok/error/truncation` 信封 | 🔴 中 | **新增 7X** | 新增 `ToolResult` dataclass + `project_for_llm()` |
+| 2 | 无 TruncationManager + fetch_more 续读 | 🔴 低 | 推迟 Phase 8 | 等 regenerate 场景有需求再补 |
+| 3 | 无 ToolExecutionContext（run_id/iteration_id） | 🔴 低 | **新增 7X** | 新增 `ToolExecutionContext` dataclass，注入 tool trace |
+| 4 | Service→Host 无显式契约对象 | 🟡 中 | **7J 增强** | 新增 `ChatTurnContract` dataclass |
+| 5 | SceneConfig 缺失 model/runtime 配置 | 🟡 低 | **7F 增强** | 新增 `SceneModelSpec` + `SceneRuntimeSpec` |
+| 6 | 工具集合无 scene-level 过滤 | 🟡 低 | **7F 增强** | SceneConfig 新增 `allowed_tools` 字段 |
+| 7 | Episode Summary 不生成 PinnedState 补丁 | 🟢 中 | **7L 增强** | compaction prompt 输出 `pinned_state_patch` |
+| 8 | WorkingMemory 无单轮溢出兜底 | 🟢 低 | **7M 增强** | 增加 `overflow_threshold` 检查 |
+
+**总代码增量**：~195 行（7 项）— 不增加 Phase 7 总工期
+
 ---
 
 ## Work Objectives
@@ -105,13 +125,16 @@ Memory                 →  Pinned State(不占预算) + Episodes(共享总池) 
 
 ### Concrete Deliverables
 
+- `fund_agent/agent/tool_result.py` — **新增** ToolResult 统一信封（`ok/error/truncation/meta` + `project_for_llm()`）
+- `fund_agent/agent/tool_context.py` — **新增** ToolExecutionContext（run_id/iteration_id/tool_call_id）
 - `fund_agent/host/session_store.py` — Session JSON 持久化
 - `fund_agent/service/session_models.py` — Session/Turn/PinnedState 数据模型
 - `fund_agent/service/prompt_composer.py` — 升级：fragment 装配 + contribution 注入
 - `fund_agent/service/prompts/interactive/` — 5 个 prompt fragment 模板
-- `fund_agent/service/scene_config.py` — Interactive Scene 配置
-- `fund_agent/agent/context_budget.py` — 上下文预算治理
+- `fund_agent/service/scene_config.py` — **增强** Interactive Scene 配置 + SceneModelSpec + allowed_tools
+- `fund_agent/agent/context_budget.py` — 上下文预算治理（含 WorkingMemory overflow 兜底）
 - `fund_agent/service/chat_service.py` — chat_turn use case
+- `fund_agent/service/chat_contract.py` — **新增** ChatTurnContract（Service→Host 显式契约）
 - `fund_agent/host/minimal_host.py` — 扩展：多轮会话托管
 - `fund_agent/cli/main.py` — `interactive` 子命令
 - 统一 `INVESTMENT_ADVICE_KEYWORDS` 常量
@@ -123,8 +146,13 @@ Memory                 →  Pinned State(不占预算) + Episodes(共享总池) 
 - [ ] `fund-checklist interactive --fund-code 011649` → REPL 正常进入，列出可用年份
 - [ ] 3 轮连续对话：上下文正确传递（基金经理→任期→规模）
 - [ ] 会话文件 `{work_dir}/sessions/{session_id}.json` 正确创建且可恢复
-- [ ] Episode Summary：≥10 轮后触发异步压缩，summary 落盘
-- [ ] 上下文预算：超出软限制时工具结果被裁剪
+- [ ] Episode Summary：≥10 轮后触发异步压缩，summary + pinned_state_patch 落盘
+- [ ] 上下文预算：超出软限制时工具结果被裁剪；单轮溢出时退化为最小保真视图
+- [ ] ToolResult 信封：所有工具输出经 `ok/error/truncation/meta` 包装后投射给 LLM
+- [ ] ToolExecutionContext：每次工具调用在 trace 中记录 run_id/iteration_id/tool_call_id
+- [ ] ChatTurnContract：Service→Host 通过单一 dataclass 传递执行参数
+- [ ] SceneModelSpec：ask 用 flash 模型、interactive 用 thinking 模型（可验证）
+- [ ] 工具 scene 过滤：`allowed_tools` 字段控制每个 scene 的 LLM 可见工具集
 - [ ] 投资建议关键词每轮检测：含"建议买入"被拦截
 - [ ] `fund-checklist ask` 路径行为不变（全量回归）
 - [ ] 流式输出正常（rich Markdown 渲染）
@@ -134,6 +162,10 @@ Memory                 →  Pinned State(不占预算) + Episodes(共享总池) 
 - 三层记忆模型完整可用
 - `--fund-code` 解析到多年度 document_id
 - PromptComposer 支持 fragment + contribution
+- ToolResult 信封统一工具输出（`ok/error/truncation/meta`）
+- ChatTurnContract 作为 Service→Host 显式契约
+- SceneConfig 包含 model/runtime 配置 + allowed_tools 过滤
+- Episode Summary 生成时同步输出 pinned_state_patch
 - 投资建议检测 fail-closed
 - 会话原子写入
 - TDD 测试覆盖
@@ -177,26 +209,27 @@ Evidence saved to `.sisyphus/evidence/task-{N}-{scenario-slug}.{ext}`.
 ### Parallel Execution Waves
 
 ```
-Wave 1 (Start Immediately — 6 PARALLEL, foundation):
+Wave 1 (Start Immediately — 7 PARALLEL, foundation + infrastructure):
+├── 7X: Engine 基础设施 — ToolResult 信封 + ToolExecutionContext [2 files] ← 新增
 ├── 7A: Session 数据模型 + JSON 持久化 [2 files]
 ├── 7B: FundReadingService.resolve_by_fund_code() [2 files]
 ├── 7C: 统一 INVESTMENT_ADVICE_KEYWORDS [2 files]
 ├── 7D: DeepSeekLlmClient token usage 追踪 [1 file]
 ├── 7E: PromptComposer 升级 (fragment assembly + contribution injection) [1 file]
-└── 7F: Interactive + Ask 双 Scene Config + Fragment 模板 + Prompt Contributions [8 files]
+└── 7F: 双 Scene Config + Fragment 模板 + Prompt Contributions + SceneModelSpec + allowed_tools [8 files] ← 增强
 
 Wave 2 (After Wave 1 — 3 PARALLEL, core implementation):
 ├── 7G: Service 层 chat_turn use case (depends: 7A, 7B, 7F) [2 files]
-├── 7H: Host 多轮会话托管 (depends: 7A) [2 files]
+├── 7H: Host 多轮会话托管 (depends: 7A, 7X) [2 files] ← 依赖 7X
 └── 7I: CLI interactive 子命令 (depends: 7B, 7F) [2 files]
 
-Wave 3 (After Wave 2 — sequential chain):
-├── 7J: Integration: wire-up chat_turn → Host → CLI (depends: 7G, 7H, 7I) [3 files]
+Wave 3 (After Wave 2 — 3 tasks, 2 parallel + 1 sequential):
+├── 7J: Integration: wire-up chat_turn → Host → CLI + ChatTurnContract (depends: 7G, 7H, 7I, 7X) [4 files] ← 增强
 ├── 7K: 会话恢复 + --label 支持 (depends: 7A, 7I) [parallel with 7J]
-├── 7L: Episode Summary (异步 LLM) (depends: 7D, 7J) [2 files]
+└── 7L: Episode Summary 异步 LLM + PinnedState patch (depends: 7D, 7J) [2 files] ← 增强
 
 Wave 4 (After Wave 3 — 3 PARALLEL):
-├── 7M: 上下文预算治理 (depends: 7D, 7L) [2 files]
+├── 7M: 上下文预算治理 + WorkingMemory overflow 兜底 (depends: 7D, 7L, 7X) [2 files] ← 增强
 ├── 7N: 扩展命令 + 多文档 (depends: 7J) [2 files]
 └── 7O: Rich Markdown 渲染 (depends: 7J) [2 files]
 
@@ -212,21 +245,31 @@ Wave FINAL (After ALL tasks — 4 PARALLEL):
 
 ### Dependency Matrix
 
-- **7A-7F**: None → Wave 2
+- **7X**: None → 7H, 7J, 7M (新增基础设施，被 Host/Integration/ContextBudget 消费)
+- **7A**: None → 7G, 7H, 7K
+- **7B**: None → 7G, 7I
+- **7C**: None → (独立，无下游依赖)
+- **7D**: None → 7L, 7M
+- **7E**: None → 7G, 7I
+- **7F**: None → 7G, 7I
 - **7G**: 7A, 7B, 7F → 7J
-- **7H**: 7A → 7J
+- **7H**: 7A, 7X → 7J
 - **7I**: 7B, 7F → 7J, 7K
-- **7J**: 7G, 7H, 7I → 7L, 7M, 7N, 7O
+- **7J**: 7G, 7H, 7I, 7X → 7L, 7M, 7N, 7O
 - **7K**: 7A, 7I → (parallel with 7J)
 - **7L**: 7D, 7J → 7M
-- **7M**: 7D, 7L → 7P
+- **7M**: 7D, 7L, 7X → 7P
 - **7N**: 7J → 7P
 - **7O**: 7J → 7P
 - **7P**: 7M, 7N, 7O → F1-F4
 
+> **Critical Path**: 7X → 7H → 7J → 7L → 7M → 7P → F1-F4
+> **Max Concurrent**: 7 (Wave 1)
+> **Net New Code**: ~195 lines across 7 gaps (不影响总工期)
+
 ### Agent Dispatch Summary
 
-- **Wave 1**: **6** — 7A→`quick`, 7B→`quick`, 7C→`quick`, 7D→`quick`, 7E→`deep`, 7F→`deep`
+- **Wave 1**: **7** — 7X→`quick`, 7A→`quick`, 7B→`quick`, 7C→`quick`, 7D→`quick`, 7E→`deep`, 7F→`deep`
 - **Wave 2**: **3** — 7G→`deep`, 7H→`deep`, 7I→`visual-engineering`
 - **Wave 3**: **3** — 7J→`deep`, 7K→`quick`, 7L→`deep`
 - **Wave 4**: **3** — 7M→`unspecified-high`, 7N→`quick`, 7O→`visual-engineering`
@@ -236,6 +279,91 @@ Wave FINAL (After ALL tasks — 4 PARALLEL):
 ---
 
 ## TODOs
+
+> Implementation + Test = ONE Task。Never separate。
+> 新增 7X 为 Dayu Engine/Contracts 差距修复基础设施 Slice（来源：`.sisyphus/drafts/dayu-engine-contracts-phase7-analysis.md`）。
+> **A task WITHOUT QA Scenarios is INCOMPLETE. No exceptions.**
+
+- [ ] 7X. Engine 基础设施 — ToolResult 统一信封 + ToolExecutionContext
+
+  **What to do**:
+  - **Part 1: ToolResult 统一信封** (`fund_agent/agent/tool_result.py` 新建)
+    - 定义 `ToolResult` frozen dataclass：
+      - `ok: bool` — 工具执行是否成功
+      - `value: Any` — 成功时的结构化数据
+      - `error_code: str | None` — 失败时的稳定 code（复用既有 failure code）
+      - `error_message: str` — 人类可读错误信息
+      - `truncation: dict | None` — 截断元数据 `{strategy, kept, total}`
+      - `meta: dict` — 额外元数据
+    - 提供工厂函数：`ToolResult.success(value, truncation=None, meta=None)` / `ToolResult.error(code, message)`
+    - 提供 `project_for_llm() → dict`：生成 LLM-facing 投影
+      - ok=True + value 是 dict → `{**value, "truncation": ..., "meta": ...}`
+      - ok=True + value 是 str → `{"content": value, "truncation": ...}`
+      - ok=False → `{"error": code, "message": message}`
+    - 参考 Dayu: `engine/tool_result.py` 的 `build_success()` / `build_error()` / `project_for_llm()`
+  - **Part 2: ToolExecutionContext** (`fund_agent/agent/tool_context.py` 新建)
+    - 定义 `ToolExecutionContext` frozen dataclass：
+      - `run_id: str` — 当前 Host run ID
+      - `iteration_id: str` — 当前 Engine iteration ID（格式 `iter_001`）
+      - `tool_call_id: str` — 当前工具调用 ID
+      - `index_in_iteration: int = 0` — 本轮中的顺序索引
+    - 在 `LlmToolLoopRunner` 执行工具前构造 context，传给 `ToolTraceEntry`
+    - 参考 Dayu: `contracts/protocols.py` 的 `ToolExecutionContext`
+  - 测试：ToolResult.success/error 构造 / project_for_llm 投影 / ToolExecutionContext 字段完整性
+
+  **Must NOT do**:
+  - 不修改现有 `FundDocumentToolService` 的工具签名（信封是可选的包装层）
+  - 不强制所有工具立即迁移到 ToolResult（渐进式采用）
+  - 不做 TruncationManager + fetch_more（推迟到 Phase 8）
+
+  **Recommended Agent Profile**:
+  - **Category**: `quick`
+  - **Skills**: [`git-master`]
+
+  **Parallelization**:
+  - **Can Run In Parallel**: YES
+  - **Parallel Group**: Wave 1 (with 7A-7F)
+  - **Blocks**: 7H, 7J, 7M
+
+  **References**:
+  - Dayu: `dayu/engine/tool_result.py` — build_success/build_error/project_for_llm 模式
+  - Dayu: `dayu/contracts/protocols.py:ToolExecutionContext` — 6 字段设计
+  - `fund_agent/agent/llm_tool_loop.py:ToolTraceEntry` — 现有 tool trace 结构
+  - `fund_agent/fund/document_tools/constants.py` — 既有 failure code 枚举
+
+  **Acceptance Criteria** (TDD):
+  - [ ] 测试文件：`tests/fund/agent/test_tool_result.py` 新建（≥6 tests）
+  - [ ] 测试文件：`tests/fund/agent/test_tool_context.py` 新建（≥3 tests）
+  - [ ] `uv run pytest tests/fund/agent/test_tool_result.py tests/fund/agent/test_tool_context.py` → PASS
+
+  **QA Scenarios**:
+
+  ```
+  Scenario: ToolResult 成功 + 截断
+    Tool: Bash (Python REPL)
+    Steps:
+      1. result = ToolResult.success(value={"rows": [...]}, truncation={"strategy": "row_limit", "kept": 20, "total": 50})
+      2. llm_view = result.project_for_llm()
+      3. assert llm_view["rows"] == [...]
+      4. assert llm_view["truncation"]["kept"] == 20
+      5. assert "ok" not in llm_view  # 内部字段不暴露给 LLM
+    Expected Result: LLM 看到结构化数据 + 截断标记，看不到 ok/error_code
+    Evidence: .sisyphus/evidence/task-7x-envelope.txt
+
+  Scenario: ToolResult 错误
+    Tool: Bash (Python REPL)
+    Steps:
+      1. result = ToolResult.error(code="not_found", message="未找到基金经理章节")
+      2. llm_view = result.project_for_llm()
+      3. assert llm_view == {"error": "not_found", "message": "未找到基金经理章节"}
+    Expected Result: LLM 看到标准化错误结构
+    Evidence: .sisyphus/evidence/task-7x-error.txt
+  ```
+
+  **Commit**: YES
+  - Message: `feat(phase7): ToolResult envelope + ToolExecutionContext infrastructure`
+  - Files: `fund_agent/agent/tool_result.py`, `fund_agent/agent/tool_context.py`
+  - Pre-commit: `uv run pytest tests/fund/agent/test_tool_result.py tests/fund/agent/test_tool_context.py`
 
 - [ ] 7A. Session 数据模型 + filesystem JSON 持久化
 
@@ -536,7 +664,7 @@ Wave FINAL (After ALL tasks — 4 PARALLEL):
   - Files: `fund_agent/service/prompt_composer.py`, `fund_agent/agent/deepseek_llm.py`
   - Pre-commit: `uv run pytest tests/fund/service/test_prompt_composer.py tests/fund/service/test_prompt_composer_upgrade.py tests/fund/cli/test_cli.py -k ask`
 
-- [ ] 7F. Interactive + Ask 双 Scene Config + Fragment 模板 + Prompt Contributions
+- [ ] 7F. 双 Scene Config + Fragment 模板 + Prompt Contributions + SceneModelSpec + allowed_tools
 
   **What to do**:
   - **Part 1: Scene 配置**
@@ -553,9 +681,25 @@ Wave FINAL (After ALL tasks — 4 PARALLEL):
     - `fund_agent/service/prompt_contributions.py`
     - `build_runtime_contribution()` / `build_fund_context_contribution()` / `build_memory_contribution()`
     - `select_contributions(raw, context_slots) → dict`
+  - **Part 4: SceneModelSpec + SceneRuntimeSpec** ← 新增（Dayu Gap #5）
+    - `SceneModelSpec` frozen dataclass：`default_name: str`（默认从环境变量读取）, `temperature: float = 0.7`
+    - `SceneRuntimeSpec` frozen dataclass：`max_iterations: int = 12`, `tool_timeout_seconds: float = 60.0`
+    - `ASK_SCENE_CONFIG.model = SceneModelSpec(default_name="deepseek-v4-flash", temperature=0.3)`
+    - `ASK_SCENE_CONFIG.runtime = SceneRuntimeSpec(max_iterations=8)`
+    - `INTERACTIVE_SCENE_CONFIG.model = SceneModelSpec(default_name="deepseek-v4-pro-thinking", temperature=0.7)`
+    - `INTERACTIVE_SCENE_CONFIG.runtime = SceneRuntimeSpec(max_iterations=20)`
+    - 在 `ChatService.chat_turn()` 中读取 scene config 的 model/runtime 传给 `DeepSeekLlmClient`
+    - 参考 Dayu: `config/prompts/manifests/interactive.json` → `model.default_name` + `runtime.agent.max_iterations`
+  - **Part 5: allowed_tools scene 级工具过滤** ← 新增（Dayu Gap #6）
+    - SceneConfig 增加 `allowed_tools: tuple[str, ...]` 字段（空 = 全部允许，向后兼容）
+    - `ASK_SCENE_CONFIG.allowed_tools`：`search_document, read_section, list_tables, read_table, get_excerpt`（5 个核心 reading tools）
+    - `INTERACTIVE_SCENE_CONFIG.allowed_tools`：以上 5 个 + `aggregate_multi_year_annual_performance`（6 个）
+    - 在 `LlmToolLoopRunner` 中：按 `allowed_tools` 过滤 `tool_registry.get_schemas()` 再发给 LLM
+    - 参考 Dayu: scene manifest 的 `tool_selection.mode=select` + `tool_tags_any`
 
   **Must NOT do**:
   - episode summary 内容先为空占位
+  - 不破坏现有 `compose()` 单模板调用方（向后兼容）
 
   **Recommended Agent Profile**:
   - **Category**: `deep`
@@ -563,34 +707,44 @@ Wave FINAL (After ALL tasks — 4 PARALLEL):
 
   **Parallelization**:
   - **Can Run In Parallel**: YES
-  - **Parallel Group**: Wave 1 (with 7A-7E)
+  - **Parallel Group**: Wave 1 (with 7A-7E, 7X)
   - **Blocks**: 7G, 7I
 
   **References**:
-  - Dayu: `dayu/config/prompts/manifests/interactive.json` — fragment 列表
+  - Dayu: `dayu/config/prompts/manifests/interactive.json` — fragment 列表 + model + tool_selection
   - Dayu: `workspace/prompts/base/agents.md` / `soul.md` / `fact_rules.md` — 内容参考
   - Dayu: `dayu/services/prompt_contributions.py` — build + select 模式
   - `fund_agent/service/prompts/system_base.md` — 现有模板风格
+  - `fund_agent/agent/deepseek_llm.py` — 现有 model_name/temperature 硬编码位置
 
   **Acceptance Criteria** (TDD):
-  - [ ] 测试文件：`tests/fund/service/test_scene_config.py` 新建
-  - [ ] 测试文件：`tests/fund/service/test_prompt_contributions.py` 新建
-  - [ ] `uv run pytest tests/fund/service/test_scene_config.py tests/fund/service/test_prompt_contributions.py` → PASS（≥10 tests）
+  - [ ] 测试文件：`tests/fund/service/test_scene_config.py` 新建（≥12 tests，含 SceneModelSpec + allowed_tools）
+  - [ ] 测试文件：`tests/fund/service/test_prompt_contributions.py` 新建（≥5 tests）
+  - [ ] `uv run pytest tests/fund/service/test_scene_config.py tests/fund/service/test_prompt_contributions.py` → PASS
 
   **QA Scenarios**:
   ```
-  Scenario: ASK_SCENE_CONFIG 渲染 ask prompt
+  Scenario: ASK_SCENE_CONFIG 用 flash 模型且工具少于 interactive
     Tool: Bash (pytest)
     Steps:
-      1. composer.compose_from_scene(ASK_SCENE_CONFIG, contributions)
-      2. assert system_prompt 包含 "fund-checklist" 和 "annual report"
-      3. assert system_prompt 不包含 "会话"（interactive 特有）
-    Expected Result: ask 用简洁 prompt，interactive 用完整 prompt
+      1. assert ASK_SCENE_CONFIG.model.default_name 包含 "flash"
+      2. assert ASK_SCENE_CONFIG.runtime.max_iterations == 8
+      3. assert "aggregate_multi_year" not in ASK_SCENE_CONFIG.allowed_tools
+      4. assert "aggregate_multi_year" in INTERACTIVE_SCENE_CONFIG.allowed_tools
+    Expected Result: ask 用快模型+少工具，interactive 用思考模型+多工具
     Evidence: .sisyphus/evidence/task-7f-scene-config.txt
+
+  Scenario: allowed_tools 空 = 全部允许（向后兼容）
+    Tool: Bash (pytest)
+    Steps:
+      1. scene = SceneConfig(scene="test", fragments=..., allowed_tools=())
+      2. assert scene.allowed_tools == ()
+    Expected Result: 空元组不限制工具
+    Evidence: .sisyphus/evidence/task-7f-backward-compat.txt
   ```
 
   **Commit**: YES
-  - Message: `feat(phase7): dual scene config + fragment templates + prompt contributions`
+  - Message: `feat(phase7): dual scene config + fragments + contributions + SceneModelSpec + allowed_tools`
   - Files: `fund_agent/service/scene_config.py`, `fund_agent/service/prompt_contributions.py`, `fund_agent/service/prompts/base/*.md`, `fund_agent/service/prompts/ask/*.md`, `fund_agent/service/prompts/interactive/scene.md`
   - Pre-commit: `uv run pytest tests/fund/service/test_scene_config.py tests/fund/service/test_prompt_contributions.py`
 
@@ -829,19 +983,33 @@ Wave FINAL (After ALL tasks — 4 PARALLEL):
   - Files: `fund_agent/cli/main.py`, `pyproject.toml`（如新增依赖）
   - Pre-commit: `uv run pytest tests/fund/cli/test_cli_interactive.py tests/fund/cli/test_cli.py`
 
-- [ ] 7J. Integration: wire-up chat_turn → Host → CLI → PromptComposer 全链路
+- [ ] 7J. Integration: wire-up chat_turn → Host → CLI + ChatTurnContract
 
   **What to do**:
   - 将 7G/7H/7I 的实现串联为完整 interactive 对话通路
   - 修改 `_run_interactive_command()`：集成 ChatService + MinimalHost + SessionStore
   - 修改 `ChatService.chat_turn()`：调用 PromptComposer.compose_from_scene() + Host.run_chat_turn()
+  - **Part: ChatTurnContract** ← 新增（Dayu Gap #4）
+    - 新建 `fund_agent/service/chat_contract.py`
+    - `ChatTurnContract` frozen dataclass（Service → Host 单一契约）：
+      - `scene: str` — "ask" | "interactive"
+      - `session_id: str`
+      - `user_text: str`
+      - `document_id: str | None = None` — None 时使用 session 的 active_document_id
+      - `model_name: str | None = None` — None 时使用 scene 默认
+      - `max_iterations: int | None = None` — None 时使用 scene 默认
+      - `timeout_ms: int | None = None`
+      - `disable_tools: bool = False` — 用于 regenerate 等纯文本场景（Phase 8 预留）
+    - Host 接口从 `run_chat_turn(session, user_text, document_id)` 改为 `run_chat_turn(contract: ChatTurnContract)`
+    - 参考 Dayu: `contracts/agent_execution.py` 的 `ExecutionContract`（简化版）
   - ask 路径已通过 7E 迁移到 PromptComposer（不在此 Slice 范围）
   - 流式输出与 StreamEvent 回调链路完整
-  - 测试：全链路 smoke / 流式输出完整性 / 错误传播
+  - 测试：全链路 smoke / ChatTurnContract 字段完整性 / 流式输出 / 错误传播
 
   **Must NOT do**:
   - 不改动 ask 路径（7E 已完成迁移）
   - 不实现 Episode Summary 逻辑（留给 7L）
+  - ChatTurnContract 不做 `AcceptedExecutionSpec` 的四层收敛（单用户 CLI 不需要）
 
   **Recommended Agent Profile**:
   - **Category**: `deep`
@@ -851,16 +1019,17 @@ Wave FINAL (After ALL tasks — 4 PARALLEL):
   - **Can Run In Parallel**: NO
   - **Parallel Group**: Wave 3 (before 7L)
   - **Blocks**: 7L, 7M, 7N, 7O
-  - **Blocked By**: 7G, 7H, 7I
+  - **Blocked By**: 7G, 7H, 7I, 7X
 
   **References**:
   - `fund_agent/cli/main.py:_run_ask_command()` — 全链路 wiring 参考
   - `fund_agent/service/extraction.py:ask_question()` — Service → Host → runner 模式
+  - Dayu: `dayu/contracts/agent_execution.py:ExecutionContract` — 契约设计参考
   - 所有 Wave 1-2 产物
 
   **Acceptance Criteria** (TDD):
-  - [ ] 扩展测试：`tests/fund/cli/test_cli_interactive.py` 增加全链路测试
-  - [ ] `uv run pytest tests/fund/cli/test_cli_interactive.py -k integration` → PASS（≥3 tests）
+  - [ ] 扩展测试：`tests/fund/cli/test_cli_interactive.py` 增加全链路测试（≥4 tests，含 ChatTurnContract）
+  - [ ] `uv run pytest tests/fund/cli/test_cli_interactive.py -k integration` → PASS
   - [ ] 回退：`uv run pytest tests/fund/cli/test_cli.py` → PASS
 
   **QA Scenarios**:
@@ -874,6 +1043,16 @@ Wave FINAL (After ALL tasks — 4 PARALLEL):
       3. turn2: "任期多久？" → 含年份
       4. turn3: "规模多大？" → 含数字
     Expected Result: 3 轮均正常，上下文正确
+
+  Scenario: ChatTurnContract 传递 scene 默认配置
+    Tool: Bash (pytest)
+    Steps:
+      1. contract = ChatTurnContract(scene="interactive", session_id="s1", user_text="hello")
+      2. assert contract.model_name is None  # 由 Host 从 scene config 读取
+      3. assert contract.max_iterations is None
+      4. 验证 Host 正确从 INTERACTIVE_SCENE_CONFIG 取默认值
+    Expected Result: contract 只传显式覆盖，默认值由 scene config 提供
+    Evidence: .sisyphus/evidence/task-7j-contract.txt
     Evidence: .sisyphus/evidence/task-7i-smoke.txt
   ```
 
@@ -937,18 +1116,24 @@ Wave FINAL (After ALL tasks — 4 PARALLEL):
   - Files: `fund_agent/cli/main.py`, `fund_agent/host/session_store.py`
   - Pre-commit: `uv run pytest tests/fund/cli/test_cli_interactive.py`
 
-- [ ] 7L. Episode Summary（异步 LLM 压缩）
+- [ ] 7L. Episode Summary（异步 LLM 压缩 + PinnedState patch）
 
   **What to do**:
   - 实现触发条件：`total_turns >= 10 OR total_tokens >= model_context_window * 0.6`（`model_context_window` 为模型上下文窗口大小，0.6 表示达到模型上下文窗口的 60%）
   - 实现异步生成：`threading.Thread` 后台调用 LLM
   - LLM 调用：复用 `DeepSeekLlmClient.generate_text()`，传入结构化 prompt
     - 输入：PinnedState + 待压缩 Turn 列表（最老的 N 轮）
-    - 输出 JSON：`{title, goal, confirmed_facts, open_questions, next_step}`
+    - 输出 JSON：`{episode_summary: {title, goal, confirmed_facts, open_questions, next_step}, pinned_state_patch: {current_goal, confirmed_facts, open_questions}}` ← 增强
+  - **新增 Part: PinnedStatePatch** ← Dayu Gap #7
+    - 在 compaction prompt 中要求 LLM 输出 `pinned_state_patch` 字段
+    - `pinned_state_patch` 三态语义：`None` = 不修改，`""` = 显式清空，非空 = 覆盖
+    - Session 模型增加 `apply_pinned_state_patch(patch: dict) → None` 方法
+    - 压缩后自动更新 Session.pinned_state.current_goal / confirmed_facts / open_questions
+    - 参考 Dayu: `ConversationPinnedStatePatch` + `apply_to()` 模式
   - 压缩后：更新 Session.episode_summaries，推进 compacted_turn_count
   - 压缩使用独立的 `"conversation_compaction"` prompt 模板
   - 不阻塞主对话：后台线程完成前，继续使用旧 memory
-  - 测试：触发条件 / 压缩结果落盘 / 不阻塞主线程
+  - 测试：触发条件 / 压缩结果落盘 / pinned_state_patch 应用 / 不阻塞主线程
 
   **Must NOT do**:
   - 不压缩最近 3 轮（compaction_tail_preserve_turns=3）
@@ -962,44 +1147,44 @@ Wave FINAL (After ALL tasks — 4 PARALLEL):
 
   **Parallelization**:
   - **Can Run In Parallel**: NO
-  - **Parallel Group**: Wave 3 (after 7I)
-  - **Blocks**: 7L
-  - **Blocked By**: 7D, 7I
+  - **Parallel Group**: Wave 3 (after 7J)
+  - **Blocks**: 7M
+  - **Blocked By**: 7D, 7J
 
   **References**:
   - `fund_agent/host/minimal_host.py` — `threading.Thread` + `queue.Queue` 的流式执行模式
   - `fund_agent/agent/deepseek_llm.py:generate_text()` — 非流式 LLM 调用
   - Dayu: `dayu/host/conversation_memory.py:DefaultEpisodicMemoryCompressor.compress()` — 压缩 prompt 结构
-  - Dayu: `dayu/host/conversation_memory.py:schedule_compaction()` — 后台调度模式
+  - Dayu: `dayu/host/conversation_memory.py:ConversationPinnedStatePatch` — 三态语义
   - Dayu: `dayu/config/prompts/manifests/conversation_compaction.json` — compaction scene 配置
 
   **Acceptance Criteria** (TDD):
-  - [ ] 测试文件：`tests/fund/host/test_episode_summary.py` 新建
-  - [ ] `uv run pytest tests/fund/host/test_episode_summary.py` → PASS（≥6 tests）
+  - [ ] 测试文件：`tests/fund/host/test_episode_summary.py` 新建（≥8 tests，含 pinned_state_patch）
+  - [ ] `uv run pytest tests/fund/host/test_episode_summary.py` → PASS
 
   **QA Scenarios**:
 
   ```
-  Scenario: 触发条件 → 异步压缩
+  Scenario: 触发条件 → 异步压缩 + pinned_state_patch 应用
     Tool: Bash (pytest)
     Steps:
-      1. 创建 session，手动填充 10 轮对话
+      1. 创建 session，手动填充 10 轮对话（涉及"持仓变化"主题）
       2. 调用 chat_turn（第 11 轮）
-      3. assert episode_summary 压缩已触发（后台线程启动）
-      4. 等待线程完成
-      5. assert session.episodes 非空
+      3. 等待线程完成
+      4. assert session.episodes 非空
+      5. assert session.pinned_state.current_goal 包含 "持仓"（LLM 提取的语义目标）
       6. assert session.compacted_turn_count > 0
-    Expected Result: 后台压缩完成，episode summary 落盘
-    Evidence: .sisyphus/evidence/task-7k-compaction.txt
+    Expected Result: summary 落盘 + pinned_state 被 patch 更新
+    Evidence: .sisyphus/evidence/task-7l-compaction.txt
 
-  Scenario: 压缩不阻塞主对话
+  Scenario: pinned_state_patch 不覆盖未提及字段
     Tool: Bash (pytest)
     Steps:
-      1. 填充 10 轮对话
-      2. 立即发送第 11 轮问题（不等压缩完成）
-      3. assert 第 11 轮回答正常返回
-    Expected Result: 压缩不影响用户交互
-    Evidence: .sisyphus/evidence/task-7k-nonblocking.txt
+      1. 原始 pinned_state.current_goal = "分析基金风险"
+      2. LLM 返回 patch 不含 current_goal 字段
+      3. apply 后 pinned_state.current_goal 仍为 "分析基金风险"
+    Expected Result: None 语义正确——不修改未提及字段
+    Evidence: .sisyphus/evidence/task-7l-patch-semantics.txt
   ```
 
   **Commit**: YES
@@ -1007,7 +1192,7 @@ Wave FINAL (After ALL tasks — 4 PARALLEL):
   - Files: `fund_agent/host/minimal_host.py`, `fund_agent/service/chat_service.py`, `fund_agent/service/prompts/interactive/compaction.md`
   - Pre-commit: `uv run pytest tests/fund/host/test_episode_summary.py`
 
-- [ ] 7M. 上下文预算治理（软/硬上限 + 工具结果裁剪）
+- [ ] 7M. 上下文预算治理（软/硬上限 + 工具结果裁剪 + WorkingMemory overflow 兜底）
 
   **What to do**:
   - 创建 `fund_agent/agent/context_budget.py`
@@ -1016,8 +1201,14 @@ Wave FINAL (After ALL tasks — 4 PARALLEL):
   - 硬上限：超过 90% 时，触发 `_compact_messages()` 应急压缩（保留 system + 最近 6 条消息）
   - `ToolResultBudgetCapper`：升序公平分配，MIN_RESULT_TOKENS=2000，截断后追加 `[CONTEXT_BUDGET_TRUNCATED]` 标记
   - 与 7D token 追踪集成：每次 LLM 调用后 `budget_state.record_usage(usage)`
-  - 与 7K Episode Summary 集成：软上限触发时优先触发压缩
-  - 测试：软上限裁减 / 硬上限应急 / 工具结果裁剪 / context_overflow 恢复
+  - 与 7L Episode Summary 集成：软上限触发时优先触发压缩
+  - **新增 Part: WorkingMemory 单轮溢出兜底** ← Dayu Gap #8
+    - 在 `build_messages` 构建 working memory 时增加 `overflow_threshold` 检查：
+      - 阈值公式：`max_context_tokens / max(2, forced_count + 1)`
+      - 如果单轮 turn 的估算 token 超过阈值，截断该 turn 的 assistant_text
+      - 截断后追加 `<truncated>` 标记
+    - 参考 Dayu: `DefaultWorkingMemoryPolicy._render_forced_turns()` + `_build_minimum_preserved_turn_view()`
+  - 测试：软上限裁减 / 硬上限应急 / 工具结果裁剪 / 单轮溢出截断 / context_overflow 恢复
 
   **Must NOT do**:
   - 不使用 tiktoken 客户端估算
@@ -1030,19 +1221,20 @@ Wave FINAL (After ALL tasks — 4 PARALLEL):
 
   **Parallelization**:
   - **Can Run In Parallel**: YES
-  - **Parallel Group**: Wave 4 (with 7M, 7N)
-  - **Blocks**: 7O
-  - **Blocked By**: 7D, 7K
+  - **Parallel Group**: Wave 4 (with 7N, 7O)
+  - **Blocks**: 7P
+  - **Blocked By**: 7D, 7L, 7X
 
   **References**:
   - `fund_agent/agent/deepseek_llm.py:ChatResponse` — 7D 新增的 cumulative_usage
   - Dayu: `dayu/engine/context_budget.py:ContextBudgetState` — 软/硬上限 + 状态管理
   - Dayu: `dayu/engine/context_budget.py:ToolResultBudgetCapper.cap_results_for_budget()` — 升序公平分配
-  - Dayu: `dayu/host/conversation_memory.py:DefaultWorkingMemoryPolicy` — 单总池预算解析
+  - Dayu: `dayu/host/conversation_memory.py:DefaultWorkingMemoryPolicy._render_forced_turns()` — 溢出阈值
+  - `fund_agent/agent/tool_context.py` — 7X 新增的 ToolExecutionContext
 
   **Acceptance Criteria** (TDD):
-  - [ ] 测试文件：`tests/fund/agent/test_context_budget.py` 新建
-  - [ ] `uv run pytest tests/fund/agent/test_context_budget.py` → PASS（≥8 tests）
+  - [ ] 测试文件：`tests/fund/agent/test_context_budget.py` 新建（≥10 tests，含 overflow）
+  - [ ] `uv run pytest tests/fund/agent/test_context_budget.py` → PASS
 
   **QA Scenarios**:
 
@@ -1055,17 +1247,18 @@ Wave FINAL (After ALL tasks — 4 PARALLEL):
       3. capped = ToolResultBudgetCapper.cap_results_for_budget(results, budget)
       4. assert 部分结果被截断，标记 [CONTEXT_BUDGET_TRUNCATED]
     Expected Result: 小结果优先完整，大结果按比例截断
-    Evidence: .sisyphus/evidence/task-7l-capping.txt
+    Evidence: .sisyphus/evidence/task-7m-capping.txt
 
-  Scenario: 硬上限应急压缩
+  Scenario: WorkingMemory 单轮溢出截断
     Tool: Bash (pytest)
     Steps:
-      1. 填充 messages 到超过 hard_limit
-      2. 触发 _compact_messages()
-      3. assert 压缩后 messages 数减少
-      4. assert system message 和最新 user message 保留
-    Expected Result: 中间轮次被压缩为 summary
-    Evidence: .sisyphus/evidence/task-7l-emergency.txt
+      1. max_context = 8000, forced_count = 3
+      2. overflow_threshold = 8000 // max(2, 4) = 2000
+      3. 单轮 assistant_text 估算 5000 tokens（> 2000）
+      4. 截断到 ~2000 tokens，追加 "<truncated>"
+      5. assert 截断后估算 <= 2000 + len("<truncated>")
+    Expected Result: 超大单轮被截断但不丢失 user_text
+    Evidence: .sisyphus/evidence/task-7m-overflow.txt
   ```
 
   **Commit**: YES
@@ -1307,12 +1500,14 @@ Wave FINAL (After ALL tasks — 4 PARALLEL):
 
 ## Commit Strategy
 
-- **7A-7E** (Wave 1): 5 个独立提交，可同时 push
-- **7F-7H** (Wave 2): 3 个独立提交
-- **7I-7K** (Wave 3): 顺序提交（7I → 7J/7K 并行）
-- **7L-7N** (Wave 4): 3 个独立提交
-- **7O** (Wave 5): 1 个提交
+- **7X** (Wave 1): `feat(phase7): ToolResult envelope + ToolExecutionContext infrastructure`
+- **7A-7F** (Wave 1): 6 个独立提交，可同时 push
+- **7G-7I** (Wave 2): 3 个独立提交
+- **7J-7L** (Wave 3): 顺序提交（7J → 7K/7L）
+- **7M-7O** (Wave 4): 3 个独立提交
+- **7P** (Wave 5): 1 个提交
 - 每个提交含 pre-commit 测试命令
+- **Dayu 差距修复总代码增量**：~195 行（7 项），1 项 fetch_more 推迟到 Phase 8
 
 ---
 
@@ -1321,8 +1516,10 @@ Wave FINAL (After ALL tasks — 4 PARALLEL):
 ### Verification Commands
 
 ```bash
-# Phase 7 核心测试
-uv run pytest tests/fund/cli/test_cli_interactive.py \
+# Phase 7 核心测试（含 7X 基础设施 + Dayu 差距修复）
+uv run pytest tests/fund/agent/test_tool_result.py \
+  tests/fund/agent/test_tool_context.py \
+  tests/fund/cli/test_cli_interactive.py \
   tests/fund/service/test_chat_service.py \
   tests/fund/host/test_minimal_host_session.py \
   tests/fund/host/test_episode_summary.py \
@@ -1351,14 +1548,21 @@ uv run pytest tests/fund/agent/test_stream_events.py \
 
 ### Final Checklist
 
-- [ ] 所有 16 个 Slice 实现完成
-- [ ] 所有 "Must Have" 实现并验证
+- [ ] 所有 17 个 Slice（7X + 7A-7P）实现完成
+- [ ] 所有 "Must Have" 实现并验证（含 7 项 Dayu 差距修复）
 - [ ] 所有 "Must NOT Have" 未违反
-- [ ] 全量回归通过（≥200 tests）
+- [ ] 全量回归通过（≥220 tests，含 7X 新增测试）
+- [ ] ToolResult 信封：`project_for_llm()` 正确隐藏内部字段
+- [ ] ToolExecutionContext：每次工具调用 trace 含 run_id/iteration_id
+- [ ] SceneModelSpec：ask 用 flash 模型，interactive 用 thinking 模型
+- [ ] allowed_tools：ask 工具集 < interactive 工具集
+- [ ] ChatTurnContract：Service→Host 通过单一 dataclass 传递参数
+- [ ] PinnedState patch：Episode Summary 生成后 pinned_state 被正确更新
+- [ ] WorkingMemory overflow：超大单轮被截断但不崩溃
 - [ ] ask 命令行为不变
 - [ ] interactive --fund-code 011649 端到端通过
 - [ ] 投资建议检测每轮生效
-- [ ] Episode Summary 异步触发并落盘
+- [ ] Episode Summary 异步触发并落盘（含 pinned_state_patch）
 - [ ] 上下文预算裁减生效
 - [ ] 会话恢复 --label 可用
 - [ ] F1-F4 全部 APPROVE

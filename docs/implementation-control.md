@@ -2075,25 +2075,26 @@ done
 | Gate | 条件 | 状态 |
 |------|------|------|
 | Gate 1 | Phase 7 scope/write set/verification/stop conditions 写入本文件 | ✅ 本文档记录 |
-| Gate 2 | 16 项裁决策通过 | ✅ 已裁决 |
+| Gate 2 | 17 项裁决策通过 | ✅ 已裁决 |
 
 ### Phase 7 Slice 列表
 
 | Slice | 内容 | 状态 |
 |-------|------|------|
 | **7A** | Session 数据模型 + 持久化（filesystem JSON） | 待启动 |
+| **7X** | ToolResult 统一信封 + ToolExecutionContext | 待启动 |
 | **7B** | FundReadingService.resolve_by_fund_code() | 无 |
 | **7C** | 统一 INVESTMENT_ADVICE_KEYWORDS | 无 |
 | **7D** | DeepSeekLlmClient token usage 追踪 | 无 |
 | **7E** | PromptComposer 升级（fragment assembly + contribution injection） | 无 |
 | **7F** | Scene Config + Fragment 模板 + Prompt Contributions | 依赖 7E |
 | **7G** | Service 层 chat_turn use case | 依赖 7A, 7B, 7F |
-| **7H** | Host 多轮会话托管 | 依赖 7A |
+| **7H** | Host 多轮会话托管 | 依赖 7A, 7X |
 | **7I** | CLI interactive 子命令（prompt_toolkit + rich） | 依赖 7B, 7F |
-| **7J** | Integration wire-up（chat_turn → Host → CLI） | 依赖 7G, 7H, 7I |
+| **7J** | Integration wire-up（chat_turn → Host → CLI） | 依赖 7G, 7H, 7I, 7X |
 | **7K** | 会话恢复 + --label 支持 | 依赖 7A, 7I |
 | **7L** | Episode Summary（异步 LLM） | 依赖 7D, 7J |
-| **7M** | 上下文预算治理（Context Budget） | 依赖 7D, 7L |
+| **7M** | 上下文预算治理（Context Budget） | 依赖 7D, 7L, 7X |
 | **7N** | 扩展命令 + 多文档切换 | 依赖 7J |
 | **7O** | Rich Markdown 渲染 | 依赖 7J |
 | **7P** | 端到端验证 + 全量回归 | 依赖 7M, 7N, 7O |
@@ -2110,6 +2111,9 @@ done
 8. 投资建议检测每轮生效
 9. ask 命令行为不变（回归）
 10. 全量测试通过（≥200 tests）
+11. ToolResult 统一信封格式正确，agent 层所有工具返回走 envelope
+12. ToolExecutionContext 正确注入到每轮 tool call context
+13. WorkingMemory overflow 触发 Episode Summary 而非静默丢弃
 
 ### Allowed Write Set
 
@@ -2122,6 +2126,8 @@ done
 | `fund_agent/service/chat_service.py` | **新增** — chat_turn use case | 7G |
 | `fund_agent/service/prompt_composer.py` | 升级 — fragment 装配 + contribution 注入 | 7E |
 | `fund_agent/service/prompts/interactive/` | **新增** — prompt fragment 模板 | 7F |
+| `fund_agent/agent/tool_result.py` | **新增** — ToolResult 统一信封 | 7X |
+| `fund_agent/agent/tool_context.py` | **新增** — ToolExecutionContext | 7X |
 | `fund_agent/agent/context_budget.py` | **新增** — 上下文预算治理 | 7M |
 | `fund_agent/service/extraction.py` | 升级 — resolve_by_fund_code + INVESTMENT_ADVICE_KEYWORDS | 7B, 7C |
 | `fund_agent/service/audit_pipeline.py` | 升级 — 统一 INVESTMENT_ADVICE_KEYWORDS | 7C |
