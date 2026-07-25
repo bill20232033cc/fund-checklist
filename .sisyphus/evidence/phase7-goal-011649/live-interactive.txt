@@ -1,0 +1,25 @@
+# Real LLM interactive Verification (2026-07-26)
+
+## Command
+printf '\n这只基金2025年管理费率是多少\nexit\n' | \
+FUND_CHECKLIST_RUN_LIVE_DEEPSEEK=1 uv run fund-checklist interactive \
+  --fund-code 011649 --work-dir .fund_e2e_011649 --no-stream
+
+## Result: SUCCESS
+
+## Output (key facts)
+- 管理费率: 1.2% (前一日基金资产净值)
+- 托管费率: 0.2%
+- A类基金份额不收取销售服务费
+- C类基金份额销售服务费: 0.4%
+- 2025年管理费: 10,270,084.70 元
+- 2024年管理费: 14,418,503.69 元
+
+## Fixes Applied
+1. ChatService 新增 tool_service 参数（不再用空 tool service）
+2. chat_turn 新增 routing context 预取（确定性 agent 先检索，命中关键词直返）
+3. CLI interactive 从 work_dir 加载真实 document store
+
+## Model
+- DEEPSEEK_MODEL: deepseek-v4-flash (default)
+- Routing context 直返路径（不走 LLM tool loop）
