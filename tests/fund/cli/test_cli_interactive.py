@@ -2,10 +2,11 @@
 
 覆盖:
 - interactive 参数解析：--fund-code 必填
-- REPL 命令解析：/help /clear exit quit
+- REPL 命令解析：/help /clear /stats /save /export /model /verbose /document exit quit
 - ChatTurnContract 集成：字段、默认值、传递
 - 投资建议拦截
 - 空白输入
+- Rich Markdown 渲染
 """
 
 import argparse
@@ -474,3 +475,193 @@ def _parse_repl_input(text: str) -> tuple[str | None, str | None]:
     """模块级 helper，供 TestSessionRecovery 使用。"""
     from fund_agent.cli.main import _parse_repl_input as _parse
     return _parse(text)
+
+
+# ── 7N: 扩展 REPL 命令 ──────────────────────────────────────────────
+
+
+class TestExtendedReplCommands:
+    """7N 扩展命令解析测试：/stats /save /export /model /verbose /document。"""
+
+    def _parse(self, text: str) -> tuple[str | None, str | None]:
+        from fund_agent.cli.main import _parse_repl_input
+        return _parse_repl_input(text)
+
+    def test_stats_command(self):
+        """/stats 命令正确解析。"""
+        cmd, arg = self._parse("/stats")
+        assert cmd == "stats"
+
+    def test_save_command(self):
+        """/save 命令正确解析。"""
+        cmd, arg = self._parse("/save")
+        assert cmd == "save"
+
+    def test_export_command(self):
+        """/export 命令正确解析，支持可选格式参数。"""
+        cmd, arg = self._parse("/export")
+        assert cmd == "export"
+        assert arg is None
+
+        cmd, arg = self._parse("/export markdown")
+        assert cmd == "export"
+        assert arg == "markdown"
+
+    def test_model_command_show(self):
+        """/model 无参数时显示当前模型。"""
+        cmd, arg = self._parse("/model")
+        assert cmd == "model"
+        assert arg is None
+
+    def test_model_command_switch(self):
+        """/model 带参数时切换模型。"""
+        cmd, arg = self._parse("/model deepseek-v4-pro")
+        assert cmd == "model"
+        assert arg == "deepseek-v4-pro"
+
+    def test_verbose_command_toggle(self):
+        """/verbose 命令切换详细模式。"""
+        cmd, arg = self._parse("/verbose")
+        assert cmd == "verbose"
+
+    def test_document_command_switch(self):
+        """/document 命令切换文档。"""
+        cmd, arg = self._parse("/document doc-011649-2024")
+        assert cmd == "document"
+        assert arg == "doc-011649-2024"
+
+    def test_document_command_list(self):
+        """/document 无参数时列出可用文档。"""
+        cmd, arg = self._parse("/document")
+        assert cmd == "document"
+        assert arg is None
+
+    def test_unknown_slash_still_passes_through(self):
+        """未知斜杠命令仍当普通文本。"""
+        cmd, arg = self._parse("/unknown-cmd")
+        assert cmd is None
+
+
+class TestHelpOutputIncludesNewCommands:
+    """帮助信息包含 7N 新增命令。"""
+
+    def test_help_mentions_stats(self):
+        """帮助输出提及 /stats 命令。"""
+        import io
+        from fund_agent.cli.main import _print_help
+
+        stdout = io.StringIO()
+        _print_help(stdout)
+        output = stdout.getvalue()
+        assert "/stats" in output
+
+    def test_help_mentions_save_and_export(self):
+        """帮助输出提及 /save 和 /export 命令。"""
+        import io
+        from fund_agent.cli.main import _print_help
+
+        stdout = io.StringIO()
+        _print_help(stdout)
+        output = stdout.getvalue()
+        assert "/save" in output
+        assert "/export" in output
+
+    def test_help_mentions_model_and_verbose(self):
+        """帮助输出提及 /model 和 /verbose 命令。"""
+        import io
+        from fund_agent.cli.main import _print_help
+
+        stdout = io.StringIO()
+        _print_help(stdout)
+        output = stdout.getvalue()
+        assert "/model" in output
+        assert "/verbose" in output
+
+    def test_help_mentions_document(self):
+        """帮助输出提及 /document 命令。"""
+        import io
+        from fund_agent.cli.main import _print_help
+
+        stdout = io.StringIO()
+        _print_help(stdout)
+        output = stdout.getvalue()
+        assert "/document" in output
+
+
+# ── 7O: Rich Markdown 渲染 ──────────────────────────────────────────
+
+
+class TestRichMarkdownRenderer:
+    """7O Rich Markdown 渲染测试。"""
+
+    def test_render_plain_text_passthrough(self):
+        """纯文本无 markdown 标记时原样输出。"""
+        from fund_agent.cli.main import render_markdown
+
+        result = render_markdown("这是普通文本，没有格式。")
+        assert "普通文本" in result
+
+    def test_render_bold_text(self):
+        """加粗 markdown 正确渲染。"""
+        from fund_agent.cli.main import render_markdown
+
+        result = render_markdown("这是 **重要** 内容。")
+        # rich 渲染后会包含标记
+        assert "重要" in result
+
+    def test_render_code_block(self):
+        """代码块使用语法高亮。"""
+        from fund_agent.cli.main import render_markdown
+
+        md = "```python\nprint('hello')\n```"
+        result = render_markdown(md)
+        # 应该包含代码内容
+        assert "print" in result
+        assert "hello" in result
+
+    def test_render_table(self):
+        """Markdown 表格渲染。"""
+        from fund_agent.cli.main import render_markdown
+
+        md = "| 年份 | 收益率 |\n|------|--------|\n| 2024 | 12.5% |\n| 2023 | 8.3% |"
+        result = render_markdown(md)
+        assert "2024" in result
+        assert "12.5" in result
+
+    def test_render_inline_code(self):
+        """行内代码渲染。"""
+        from fund_agent.cli.main import render_markdown
+
+        result = render_markdown("使用 `fund.check()` 方法。")
+        assert "fund.check" in result
+
+    def test_render_empty_string(self):
+        """空字符串渲染不报错。"""
+        from fund_agent.cli.main import render_markdown
+
+        result = render_markdown("")
+        assert result is not None  # 不抛异常即可
+
+    def test_render_bullet_list(self):
+        """无序列表渲染。"""
+        from fund_agent.cli.main import render_markdown
+
+        md = "- 基金经理：张三\n- 成立时间：2020年\n- 规模：50亿"
+        result = render_markdown(md)
+        assert "张三" in result
+        assert "50亿" in result
+
+    def test_render_heading(self):
+        """标题渲染。"""
+        from fund_agent.cli.main import render_markdown
+
+        result = render_markdown("## 基金概况\n\n这是一只混合型基金。")
+        assert "基金概况" in result
+
+    def test_verbose_mode_disables_rich(self):
+        """verbose=False 时 render_markdown 可能走简化路径。"""
+        from fund_agent.cli.main import render_markdown
+
+        result = render_markdown("**测试**", use_rich=False)
+        # 无 rich 时返回原始文本或简化渲染
+        assert "测试" in result

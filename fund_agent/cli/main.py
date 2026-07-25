@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from dataclasses import asdict
@@ -1085,6 +1086,9 @@ def _run_interactive_command(
 
     print(f"\n已选择 {selected_year} 年年报。输入问题开始对话，/help 查看命令，exit 退出。", file=stdout)
 
+    verbose = getattr(args, "enable_tool_trace", False)
+    current_model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro-thinking")
+
     while True:
         try:
             user_input = input("> ").strip()
@@ -1121,6 +1125,69 @@ def _run_interactive_command(
             session_store.save(session)
             print(f"会话标签已更新为 '{new_label}'", file=stdout)
             continue
+        if command == "stats":
+            turns_count = len(session.turns)
+            rounds = turns_count // 2
+            summaries = len(session.episode_summaries)
+            print(f"会话统计:", file=stdout)
+            print(f"  标签: {session.label or '无'}", file=stdout)
+            print(f"  状态: {session.status}", file=stdout)
+            print(f"  轮数: {rounds}", file=stdout)
+            print(f"  摘要数: {summaries}", file=stdout)
+            print(f"  创建时间: {session.created_at[:19] if session.created_at else '未知'}", file=stdout)
+            print(f"  当前模型: {current_model}", file=stdout)
+            print(f"  详细模式: {'开启' if verbose else '关闭'}", file=stdout)
+            continue
+        if command == "save":
+            session_store.save(session)
+            print("会话已保存。", file=stdout)
+            continue
+        if command == "export":
+            fmt = (text or "json").strip().lower()
+            if fmt not in ("json", "markdown", "md"):
+                print("用法: /export [json|markdown]", file=stdout)
+                continue
+            if fmt in ("markdown", "md"):
+                _export_session_markdown(session, stdout)
+            else:
+                _export_session_json(session, stdout)
+            continue
+        if command == "model":
+            if text:
+                current_model = text.strip()
+                print(f"模型已切换为: {current_model}", file=stdout)
+            else:
+                print(f"当前模型: {current_model}", file=stdout)
+            continue
+        if command == "verbose":
+            verbose = not verbose
+            state = "开启" if verbose else "关闭"
+            print(f"详细模式已{state}", file=stdout)
+            continue
+        if command == "document":
+            available = session.pinned_state.available_document_ids
+            if text:
+                new_doc = text.strip()
+                if new_doc not in available:
+                    print(f"未知文档ID: {new_doc}", file=stdout)
+                    print(f"可用文档: {', '.join(available) if available else '无'}", file=stdout)
+                    continue
+                ps = PinnedState(
+                    fund_code=session.pinned_state.fund_code,
+                    available_document_ids=session.pinned_state.available_document_ids,
+                    active_document_id=new_doc,
+                    active_year=session.pinned_state.active_year,
+                )
+                session = session.with_pinned_state(ps)
+                session_store.save(session)
+                print(f"已切换到文档: {new_doc}", file=stdout)
+            else:
+                active = session.pinned_state.active_document_id
+                print(f"可用文档:", file=stdout)
+                for doc_id in available:
+                    marker = " ← 当前" if doc_id == active else ""
+                    print(f"  {doc_id}{marker}", file=stdout)
+            continue
 
         if text is None:
             continue
@@ -1140,6 +1207,7 @@ def _run_interactive_command(
                     scene="interactive",
                     session_id=session.session_id,
                     user_text=text,
+                    model_name=current_model,
                 ),
             )
         except Exception as exc:
@@ -1149,8 +1217,12 @@ def _run_interactive_command(
         if result.investment_advice_detected:
             print("[投资建议检测] 回答已拦截。", file=stdout)
 
-        print(result.answer, file=stdout)
-        print(file=stdout)
+        # 使用 rich Markdown 渲染输出
+        rendered = render_markdown(result.answer, use_rich=True)
+        print(rendered, file=stdout)
+
+        if verbose and result.tool_trace:
+            print(f"\n[工具调用: {', '.join(result.tool_trace)}]", file=stdout)
 
     return SUCCESS_EXIT_CODE
 
@@ -1179,14 +1251,15 @@ def _parse_repl_input(text: str) -> tuple[str | None, str | None]:
         cmd = parts[0].lower()
         arg = parts[1] if len(parts) > 1 else None
 
-        if cmd == "help":
-            return "help", None
-        if cmd == "clear":
-            return "clear", None
-        if cmd == "exit" or cmd == "quit":
-            return "exit", None
-        if cmd == "label":
-            return "label", arg
+        known_commands = {
+            "help", "clear", "exit", "quit", "label",
+            "stats", "save", "export", "model", "verbose", "document",
+        }
+        if cmd in known_commands:
+            # 统一 exit/quit 为 exit
+            if cmd in ("exit", "quit"):
+                return "exit", None
+            return cmd, arg
         # 未知命令当普通文本
         return None, stripped
 
@@ -1197,11 +1270,17 @@ def _parse_repl_input(text: str) -> tuple[str | None, str | None]:
 def _print_help(stdout: TextIO) -> None:
     """输出帮助信息。"""
     print("可用命令:", file=stdout)
-    print("  /help      显示帮助", file=stdout)
-    print("  /clear     清屏", file=stdout)
-    print("  /label     设置会话标签（/label <名称>）", file=stdout)
-    print("  exit, quit 退出对话", file=stdout)
-    print("  其他输入    作为问题发送给 LLM", file=stdout)
+    print("  /help       显示帮助", file=stdout)
+    print("  /clear      清屏", file=stdout)
+    print("  /label      设置会话标签（/label <名称>）", file=stdout)
+    print("  /stats      显示会话统计信息", file=stdout)
+    print("  /save       手动保存当前会话", file=stdout)
+    print("  /export     导出会话（/export [json|markdown]）", file=stdout)
+    print("  /model      查看或切换模型（/model [模型名]）", file=stdout)
+    print("  /verbose    切换详细模式（显示工具调用详情）", file=stdout)
+    print("  /document   切换或列出可用年报文档（/document [文档ID]）", file=stdout)
+    print("  exit, quit  退出对话", file=stdout)
+    print("  其他输入     作为问题发送给 LLM", file=stdout)
 
 
 def _write_classified_failure(failure: ToolFailure, stderr: TextIO) -> None:
@@ -1209,6 +1288,77 @@ def _write_classified_failure(failure: ToolFailure, stderr: TextIO) -> None:
 
     print(f"failure_code={failure.code.value}", file=stderr)
     print(f"message={failure.message}", file=stderr)
+
+
+def render_markdown(text: str, *, use_rich: bool = True) -> str:
+    """将 Markdown 文本渲染为终端可显示的字符串。
+
+    参数:
+        text: Markdown 格式文本。
+        use_rich: True 时使用 rich 库渲染；False 时返回原文。
+
+    返回:
+        渲染后的字符串（含 ANSI 转义序列）。
+    """
+    if not text:
+        return ""
+    if not use_rich:
+        return text
+    try:
+        from rich.console import Console
+        from rich.markdown import Markdown
+
+        console = Console(force_terminal=True, color_system="auto")
+        md = Markdown(text, code_theme="monokai")
+        with console.capture() as capture:
+            console.print(md)
+        return capture.get()
+    except ImportError:
+        return text
+
+
+def _export_session_json(session: object, stdout: TextIO) -> None:
+    """导出会话为 JSON 格式。
+
+    参数:
+        session: Session 对象。
+        stdout: 输出流。
+    """
+    from dataclasses import asdict as _asdict
+
+    turns_data = []
+    for t in getattr(session, "turns", ()):
+        turns_data.append({
+            "role": t.role,
+            "content": t.content,
+            "timestamp": getattr(t, "timestamp", None),
+        })
+    data = {
+        "session_id": getattr(session, "session_id", ""),
+        "label": getattr(session, "label", None),
+        "turns": turns_data,
+    }
+    print(json.dumps(data, ensure_ascii=False, indent=2), file=stdout)
+
+
+def _export_session_markdown(session: object, stdout: TextIO) -> None:
+    """导出会话为 Markdown 格式。
+
+    参数:
+        session: Session 对象。
+        stdout: 输出流。
+    """
+    label = getattr(session, "label", "未命名") or "未命名"
+    sid = getattr(session, "session_id", "")
+    print(f"# 会话: {label}", file=stdout)
+    print(f"session_id: {sid}", file=stdout)
+    print(file=stdout)
+    for t in getattr(session, "turns", ()):
+        role_label = "用户" if t.role == "user" else "助手"
+        print(f"## {role_label}", file=stdout)
+        print(file=stdout)
+        print(t.content, file=stdout)
+        print(file=stdout)
 
 
 if __name__ == "__main__":
