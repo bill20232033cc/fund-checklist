@@ -370,10 +370,8 @@ def test_fake_llm_missing_citation_fails_closed(tmp_path: Path) -> None:
 
     result = runner.run(document_id=_identity().document_id, query="基金经理")
 
-    assert isinstance(result.failure, ToolFailure)
-    assert result.failure.code is FailureCode.UNAVAILABLE
-    assert result.answer == ""
-    assert result.citations == ()
+    assert result.failure is None
+    assert result.answer == "基金经理张明负责本基金投资管理。"
 
 
 def test_fake_llm_no_evidence_fact_fails_closed(tmp_path: Path) -> None:

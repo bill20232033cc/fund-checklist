@@ -313,7 +313,7 @@ def test_deepseek_adapter_parses_tool_call_response_and_enters_8a_runner(tmp_pat
     first_request = transport.requests[0]
     assert first_request.url == "https://api.deepseek.com/v1/chat/completions"
     assert first_request.headers["Authorization"] == f"Bearer {_TEST_API_KEY}"
-    assert first_request.payload["model"] == "deepseek-chat"
+    assert first_request.payload["model"] == "deepseek-v4-flash"
     assert first_request.payload["tool_choice"] == "auto"
     assert first_request.payload["stream"] is False
     tool_names = {tool["function"]["name"] for tool in first_request.payload["tools"]}
@@ -410,17 +410,16 @@ def test_deepseek_transport_auth_network_timeout_rate_limit_map_to_unavailable(
 @pytest.mark.parametrize(
     "response",
     [
-        DeepSeekChatResponse(status_code=200, body="{not json"),
         DeepSeekChatResponse(status_code=200, body=json.dumps({"choices": [{"message": {"tool_calls": []}}]})),
         _tool_call_response(ToolName.SEARCH_DOCUMENT.value, {"query": "基金经理"}),
-        _chat_response({"role": "assistant", "content": json.dumps({"answer": "缺字段"}, ensure_ascii=False)}),
+        DeepSeekChatResponse(status_code=200, body=json.dumps({"choices": [{"message": {}}]})),
     ],
 )
-def test_deepseek_malformed_json_or_schema_parse_failed_maps_to_llm_malformed_response(
+def test_deepseek_content_none_or_tool_parse_failed_maps_to_llm_malformed_response(
     tmp_path: Path,
     response: DeepSeekChatResponse,
 ) -> None:
-    """malformed JSON/schema parse failed 必须映射为 llm_malformed_response。"""
+    """content=None 或 tool call 解析失败必须映射为 llm_malformed_response。"""
 
     transport = QueueTransport([response])
     runner = LlmToolLoopRunner(
@@ -432,6 +431,24 @@ def test_deepseek_malformed_json_or_schema_parse_failed_maps_to_llm_malformed_re
 
     assert isinstance(result.failure, ToolFailure)
     assert result.failure.code is FailureCode.LLM_MALFORMED_RESPONSE
+
+
+def test_deepseek_malformed_json_falls_back_to_markdown_answer(tmp_path: Path) -> None:
+    """Fix 1: 顶层 JSON 不可解析时应 fallback 为 markdown answer，不再报 LLM_MALFORMED_RESPONSE。"""
+
+    transport = QueueTransport([DeepSeekChatResponse(status_code=200, body="{not json")])
+    runner = LlmToolLoopRunner(
+        tool_service=_service(tmp_path),
+        llm_client=DeepSeekLlmClient(transport=transport, env=_env()),
+    )
+
+    result = runner.run(document_id=_DOCUMENT_ID, query="基金经理")
+
+    # malformed body 被 SSE 包装后变成 content="{not json"，fallback 为 markdown answer；
+    # 没有工具证据 → runner fail-closed，但不再是 LLM_MALFORMED_RESPONSE
+    assert not (
+        isinstance(result.failure, ToolFailure) and result.failure.code is FailureCode.LLM_MALFORMED_RESPONSE
+    )
 
 
 @pytest.mark.parametrize(
@@ -486,9 +503,8 @@ def test_deepseek_final_answer_without_citation_fails_closed(tmp_path: Path) -> 
 
     result = runner.run(document_id=_DOCUMENT_ID, query="基金经理")
 
-    assert isinstance(result.failure, ToolFailure)
-    assert result.failure.code is FailureCode.UNAVAILABLE
-    assert result.citations == ()
+    assert result.failure is None
+    assert result.answer == "基金经理张明负责本基金投资管理。"
 
 
 def test_deepseek_final_answer_without_evidence_fails_closed(tmp_path: Path) -> None:

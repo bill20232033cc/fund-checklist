@@ -31,7 +31,7 @@ from fund_agent.service import (
     infer_fund_type,
 )
 
-REAL_SMOKE_PDF = Path("基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf")
+REAL_SMOKE_PDF = Path("基金年报/004393_安信企业价值优选混合_2024_annual_report.pdf")
 REAL_SMOKE_FUND_CODE = "004393"
 REAL_SMOKE_FUND_NAME = "安信企业价值优选混合型证券投资基金"
 REAL_SMOKE_YEAR = 2024
