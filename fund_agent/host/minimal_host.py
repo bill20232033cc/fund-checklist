@@ -368,8 +368,11 @@ class MinimalHost:
             raise RuntimeError("session_store 未配置")
         return self._session_store.load(session_id)
 
-    def list_sessions(self) -> list[dict[str, object]]:
+    def list_sessions(self, label: str | None = None) -> list[dict[str, object]]:
         """列出所有会话摘要。
+
+        参数:
+            label: 可选，按 label 过滤。
 
         返回:
             会话摘要列表。
@@ -379,7 +382,7 @@ class MinimalHost:
         """
         if self._session_store is None:
             raise RuntimeError("session_store 未配置")
-        return self._session_store.list_sessions()
+        return self._session_store.list_sessions(label=label)
 
     def close_session(self, session_id: str) -> None:
         """关闭会话。

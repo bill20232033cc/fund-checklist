@@ -1038,22 +1038,26 @@ def _run_interactive_command(
         print(f"年份 {selected_year} 无对应年报。", file=stderr)
         return CLASSIFIED_FAILURE_EXIT_CODE
 
-    # 3. 创建/恢复 session
+    # 3. 创建/恢复 session（通过 MinimalHost 管理生命周期）
+    from fund_agent.host.minimal_host import MinimalHost
     from fund_agent.host.session_store import SessionStore
-    from fund_agent.service.session_models import PinnedState
+    from fund_agent.service.session_models import PinnedState, Session
 
     sessions_dir = work_dir / "sessions"
     session_store = SessionStore(sessions_dir)
+    host = MinimalHost(session_store=session_store)
 
     label = getattr(args, "label", None)
     if label:
         try:
-            session = session_store.load(label)
-            print(f"[恢复会话 {label}]", file=stdout)
+            session = host.get_session(label)
+            turn_count = len(session.turns) // 2  # user+assistant 成对
+            print(f"[恢复会话 '{label}'] 已有 {turn_count} 轮对话，创建于 {session.created_at[:10]}", file=stdout)
         except FileNotFoundError:
-            session = session_store.create(fund_code=fund_code, label=label)
+            session = host.create_session(fund_code=fund_code, label=label)
+            print(f"[新建会话 '{label}']", file=stdout)
     else:
-        session = session_store.create(fund_code=fund_code)
+        session = host.create_session(fund_code=fund_code)
 
     ps = PinnedState(
         fund_code=fund_code,
@@ -1066,6 +1070,7 @@ def _run_interactive_command(
 
     # 4. REPL 循环
     from fund_agent.service.chat_service import ChatService, ChatTurnRequest
+    from fund_agent.service.chat_contract import ChatTurnContract
     from fund_agent.service.prompt_composer import PromptComposer
     from fund_agent.service.scene_config import INTERACTIVE_SCENE_CONFIG
     from fund_agent.service.investment_guard import contains_investment_advice
@@ -1098,6 +1103,24 @@ def _run_interactive_command(
         if command == "clear":
             print("\033[2J\033[H", file=stdout, end="")  # ANSI 清屏
             continue
+        if command == "label":
+            new_label = text.strip() if text else None
+            if not new_label:
+                print("用法: /label <名称>", file=stdout)
+                continue
+            session = Session(
+                session_id=session.session_id,
+                label=new_label,
+                status=session.status,
+                pinned_state=session.pinned_state,
+                turns=session.turns,
+                episode_summaries=session.episode_summaries,
+                created_at=session.created_at,
+            )
+            session_store.set_label(session.session_id, new_label)
+            session_store.save(session)
+            print(f"会话标签已更新为 '{new_label}'", file=stdout)
+            continue
 
         if text is None:
             continue
@@ -1106,10 +1129,15 @@ def _run_interactive_command(
         if contains_investment_advice(text):
             print("提示：您的输入包含投资建议关键词，请注意。", file=stdout)
 
-        # 调用 chat_turn
+        # 调用 chat_turn（通过 ChatTurnContract 传递 model/runtime 覆盖）
         try:
             result = chat_service.chat_turn(
                 ChatTurnRequest(
+                    session_id=session.session_id,
+                    user_text=text,
+                ),
+                contract=ChatTurnContract(
+                    scene="interactive",
                     session_id=session.session_id,
                     user_text=text,
                 ),
@@ -1157,6 +1185,8 @@ def _parse_repl_input(text: str) -> tuple[str | None, str | None]:
             return "clear", None
         if cmd == "exit" or cmd == "quit":
             return "exit", None
+        if cmd == "label":
+            return "label", arg
         # 未知命令当普通文本
         return None, stripped
 
@@ -1169,6 +1199,7 @@ def _print_help(stdout: TextIO) -> None:
     print("可用命令:", file=stdout)
     print("  /help      显示帮助", file=stdout)
     print("  /clear     清屏", file=stdout)
+    print("  /label     设置会话标签（/label <名称>）", file=stdout)
     print("  exit, quit 退出对话", file=stdout)
     print("  其他输入    作为问题发送给 LLM", file=stdout)
 

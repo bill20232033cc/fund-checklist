@@ -151,3 +151,69 @@ class Session:
             created_at=self.created_at,
             updated_at=datetime.now(timezone.utc).isoformat(),
         )
+
+    def add_episode_summary(self, episode: EpisodeSummary) -> Session:
+        """追加 EpisodeSummary，返回新 Session。"""
+        return Session(
+            session_id=self.session_id,
+            label=self.label,
+            status=self.status,
+            pinned_state=self.pinned_state,
+            turns=self.turns,
+            episode_summaries=self.episode_summaries + (episode,),
+            created_at=self.created_at,
+            updated_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    def apply_pinned_state_patch(self, patch: dict) -> Session:
+        """应用 PinnedState patch，返回新 Session。
+
+        patch 三态语义：
+        - key 不存在或值为 None → 不修改
+        - 值为空字符串 → 显式清空
+        - 值为非空 → 覆盖
+
+        参数:
+            patch: {"current_goal": str | None, "confirmed_facts": str | None,
+                     "open_questions": str | None}
+        """
+        constraints = dict(self.pinned_state.user_constraints)
+
+        new_goal: str | None = self.pinned_state.user_constraints.get("current_goal")
+        new_facts: str | None = self.pinned_state.user_constraints.get("confirmed_facts")
+        new_questions: str | None = self.pinned_state.user_constraints.get("open_questions")
+
+        if "current_goal" in patch:
+            val = patch["current_goal"]
+            if val is not None:
+                new_goal = val if val != "" else None  # None
+        if "confirmed_facts" in patch:
+            val = patch["confirmed_facts"]
+            if val is not None:
+                new_facts = val if val != "" else None  # None
+        if "open_questions" in patch:
+            val = patch["open_questions"]
+            if val is not None:
+                new_questions = val if val != "" else None  # None
+
+        if new_goal is not None:
+            constraints["current_goal"] = new_goal
+        elif "current_goal" in constraints:
+            del constraints["current_goal"]
+        if new_facts is not None:
+            constraints["confirmed_facts"] = new_facts
+        elif "confirmed_facts" in constraints:
+            del constraints["confirmed_facts"]
+        if new_questions is not None:
+            constraints["open_questions"] = new_questions
+        elif "open_questions" in constraints:
+            del constraints["open_questions"]
+
+        new_ps = PinnedState(
+            fund_code=self.pinned_state.fund_code,
+            available_document_ids=self.pinned_state.available_document_ids,
+            active_document_id=self.pinned_state.active_document_id,
+            active_year=self.pinned_state.active_year,
+            user_constraints=constraints,
+        )
+        return self.with_pinned_state(new_ps)

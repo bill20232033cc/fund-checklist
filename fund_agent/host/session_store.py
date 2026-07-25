@@ -85,8 +85,12 @@ class SessionStore:
             if temporary.exists():
                 temporary.unlink(missing_ok=True)
 
-    def list_sessions(self) -> list[dict[str, object]]:
-        """列出所有会话摘要（不加载完整 turns）。"""
+    def list_sessions(self, label: str | None = None) -> list[dict[str, object]]:
+        """列出所有会话摘要（不加载完整 turns）。
+
+        参数:
+            label: 可选，按 label 过滤；None 时返回全部。
+        """
         if not self._root.exists():
             return []
         result: list[dict[str, object]] = []
@@ -95,14 +99,19 @@ class SessionStore:
                 continue
             try:
                 data = json.loads(json_file.read_text(encoding="utf-8"))
-                result.append({
+                entry = {
                     "session_id": data.get("session_id", ""),
                     "label": data.get("label"),
                     "status": data.get("status", "UNKNOWN"),
                     "fund_code": data.get("pinned_state", {}).get("fund_code", ""),
                     "turn_count": len(data.get("turns", [])),
                     "created_at": data.get("created_at", ""),
-                })
+                }
+                if label is not None:
+                    entry_label = data.get("label")
+                    if entry_label != label:
+                        continue
+                result.append(entry)
             except (json.JSONDecodeError, OSError):
                 continue
         return result
@@ -113,6 +122,23 @@ class SessionStore:
         if json_path.exists():
             json_path.unlink()
         self._remove_label_mapping(session_id)
+
+    def set_label(self, session_id: str, label: str) -> None:
+        """为已存在的会话设置或更新标签。
+
+        参数:
+            session_id: 会话 ID。
+            label: 新标签名。
+        """
+        # 先移除旧 label 映射（如果存在且不同）
+        labels = self._read_labels()
+        old_label = labels.get("by_id", {}).get(session_id)
+        if old_label and old_label != label:
+            labels.get("by_label", {}).pop(old_label, None)
+            labels.get("by_id", {}).pop(session_id, None)
+            self._write_labels(labels)
+        # 写入新映射
+        self._add_label_mapping(session_id, label)
 
     # ── internal ────────────────────────────────────────────────
 

@@ -209,3 +209,58 @@ class TestSessionStore:
         content_after = json_path.read_text(encoding="utf-8")
         data = json.loads(content_after)
         assert data["session_id"] == session.session_id
+
+    # ── 7K: label 过滤 + set_label ────────────────────────────
+
+    def test_list_sessions_filter_by_label(self, store: SessionStore):
+        """list_sessions(label=...) 按 label 过滤。"""
+        store.create(fund_code="011649", label="session-a")
+        store.create(fund_code="000001", label="session-b")
+        store.create(fund_code="000002")  # 无 label
+
+        all_sessions = store.list_sessions()
+        assert len(all_sessions) == 3
+
+        filtered = store.list_sessions(label="session-a")
+        assert len(filtered) == 1
+        assert filtered[0]["label"] == "session-a"
+
+        no_match = store.list_sessions(label="nonexistent")
+        assert len(no_match) == 0
+
+    def test_list_sessions_filter_by_label_case_sensitive(self, store: SessionStore):
+        """label 过滤大小写敏感。"""
+        store.create(fund_code="011649", label="MySession")
+        store.create(fund_code="000001", label="mysession")
+
+        assert len(store.list_sessions(label="MySession")) == 1
+        assert len(store.list_sessions(label="mysession")) == 1
+
+    def test_set_label_new(self, store: SessionStore):
+        """为已有 session 设置新 label。"""
+        session = store.create(fund_code="011649")
+        assert session.label is None
+
+        store.set_label(session.session_id, "new-label")
+        # 通过 label 能加载到
+        loaded = store.load("new-label")
+        assert loaded.session_id == session.session_id
+
+    def test_set_label_update(self, store: SessionStore):
+        """更新已有 label：旧 label 映射移除。"""
+        session = store.create(fund_code="011649", label="old-label")
+        store.set_label(session.session_id, "new-label")
+
+        loaded = store.load("new-label")
+        assert loaded.session_id == session.session_id
+
+        # 旧 label 不可用
+        with pytest.raises(FileNotFoundError):
+            store.load("old-label")
+
+    def test_set_label_same_value(self, store: SessionStore):
+        """设置相同的 label 不报错。"""
+        session = store.create(fund_code="011649", label="mylabel")
+        store.set_label(session.session_id, "mylabel")
+        loaded = store.load("mylabel")
+        assert loaded.session_id == session.session_id
