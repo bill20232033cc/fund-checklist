@@ -175,9 +175,9 @@ fund-checklist ask "前十大持仓是什么？" --document-id <id> --enable-too
 
 ### 2.1 目标
 
-候选目标：若 Phase 5 实施完成，再考虑实现 `fund-checklist interactive` 多轮对话模式，支持会话恢复和上下文记忆。当前文档不代表已批准实施。
+已裁决目标（2026-07-25）：实现 `fund-checklist interactive` 多轮对话模式，支持会话恢复和上下文记忆。
 
-### 2.2 设计候选（非已生效裁决）
+### 2.2 设计裁决（已生效）
 
 #### 2.2.1 会话模型
 
@@ -185,11 +185,21 @@ fund-checklist ask "前十大持仓是什么？" --document-id <id> --enable-too
 @dataclass
 class Session:
     session_id: str
-    fund_code: Optional[str]  # 绑定的基金代码
-    document_id: Optional[str]  # 绑定的文档
     created_at: datetime
     last_active_at: datetime
     turns: list[Turn]
+    pinned_state: PinnedState
+    episode_summaries: list[EpisodeSummary]
+    compacted_turn_count: int
+    label: Optional[str]
+
+@dataclass
+class PinnedState:
+    fund_code: Optional[str]
+    available_document_ids: list[str]
+    active_document_id: Optional[str]
+    active_year: Optional[int]
+    user_constraints: dict[str, Any]
 
 @dataclass
 class Turn:
@@ -198,16 +208,24 @@ class Turn:
     citations: tuple[Citation, ...]
     tool_trace: tuple[ToolTraceEntry, ...]
     timestamp: datetime
+
+@dataclass
+class EpisodeSummary:
+    title: str
+    goal: str
+    confirmed_facts: list[str]
+    open_questions: list[str]
+    next_step: str
 ```
 
-**候选口径**：
+**裁决口径**：
 - 会话持久化使用 filesystem JSON（与现有 catalog 一致）
 - 会话目录：`{work_dir}/sessions/{session_id}.json`
 - 不引入 SQLite，不新增外部依赖
 
 ##### 2.2.1.1 并发与数据安全声明
 
-**候选口径**：
+**裁决口径**：
 - **原子写入**：先写临时文件 → `os.replace()` 原子重命名（POSIX 保证），避免写了一半 JSON 崩溃导致整个 session 文件损坏
 - **并发限制**：不保证多进程并发安全。interactive 模式同一 label 同时只允许一个实例运行
 - **Citation 时效**：Pinned State 中记录 `active_document_id`。当用户在 interactive 中切换到新文档时，旧 citations 仍在 Turn 中保留但不作为新回答的引用源。LLM 需要基于新文档的 tool result 重新生成 citations
@@ -234,8 +252,8 @@ class Turn:
 └─────────────────────────────────────┘
 ```
 
-**候选口径**：
-- Pinned State 包含：`document_id`、`fund_code`、`fund_name`、用户约束
+**裁决口径**：
+- Pinned State 包含：`fund_code`、`available_document_ids`、`active_document_id`、`active_year`、用户约束
 - Recent Turns 强制保留最近 3 轮，超出部分按 token budget 截断
 - 不实现 episode summary（Phase 7 可选）
 
@@ -245,7 +263,7 @@ class Turn:
 fund-checklist interactive [--document-id <id>]
 ```
 
-**候选口径**：
+**裁决口径**：
 - 进入交互式 REPL 模式
 - 支持 `--document-id` 预绑定文档
 - 支持 `exit` / `quit` 退出
@@ -259,7 +277,7 @@ fund-checklist interactive --label my-session
 # 如果不存在，创建新会话
 ```
 
-**候选口径**：
+**裁决口径**：
 - 会话标签映射到 `{work_dir}/sessions/{label}.json`
 - 恢复时加载历史 turns，重建 Pinned State
 - 不实现 pending turn lease（简化版）

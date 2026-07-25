@@ -2082,10 +2082,10 @@ done
 | Slice | 内容 | 状态 |
 |-------|------|------|
 | **7A** | Session 数据模型 + 持久化（filesystem JSON） | 待启动 |
-| **7B** | FundReadingService.resolve_by_fund_code() | 依赖 7A |
-| **7C** | 统一 INVESTMENT_ADVICE_KEYWORDS | 依赖 7A |
-| **7D** | DeepSeekLlmClient token usage 追踪 | 依赖 7A |
-| **7E** | PromptComposer 升级（fragment assembly + contribution injection） | 依赖 7A |
+| **7B** | FundReadingService.resolve_by_fund_code() | 无 |
+| **7C** | 统一 INVESTMENT_ADVICE_KEYWORDS | 无 |
+| **7D** | DeepSeekLlmClient token usage 追踪 | 无 |
+| **7E** | PromptComposer 升级（fragment assembly + contribution injection） | 无 |
 | **7F** | Scene Config + Fragment 模板 + Prompt Contributions | 依赖 7E |
 | **7G** | Service 层 chat_turn use case | 依赖 7A, 7B, 7F |
 | **7H** | Host 多轮会话托管 | 依赖 7A |

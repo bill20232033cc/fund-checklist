@@ -325,7 +325,7 @@ Wave FINAL (After ALL tasks — 4 PARALLEL):
   **Parallelization**:
   - **Can Run In Parallel**: YES
   - **Parallel Group**: Wave 1 (with 7A, 7C, 7D, 7E)
-  - **Blocks**: 7F, 7H
+  - **Blocks**: 7G, 7I
 
   **References**:
   - `fund_agent/cli/main.py:_collect_matching_docs()` — 现有 CLI 层 fund_code 解析逻辑
@@ -775,7 +775,7 @@ Wave FINAL (After ALL tasks — 4 PARALLEL):
   **Parallelization**:
   - **Can Run In Parallel**: YES
   - **Parallel Group**: Wave 2 (with 7F, 7G)
-  - **Blocks**: 7I, 7J
+  - **Blocks**: 7J
   - **Blocked By**: 7B, 7E
 
   **References**:
@@ -940,7 +940,7 @@ Wave FINAL (After ALL tasks — 4 PARALLEL):
 - [ ] 7L. Episode Summary（异步 LLM 压缩）
 
   **What to do**:
-  - 实现触发条件：`total_turns >= 10 OR total_tokens >= max_context * 0.6`
+  - 实现触发条件：`total_turns >= 10 OR total_tokens >= model_context_window * 0.6`（`model_context_window` 为模型上下文窗口大小，0.6 表示达到模型上下文窗口的 60%）
   - 实现异步生成：`threading.Thread` 后台调用 LLM
   - LLM 调用：复用 `DeepSeekLlmClient.generate_text()`，传入结构化 prompt
     - 输入：PinnedState + 待压缩 Turn 列表（最老的 N 轮）
@@ -951,7 +951,7 @@ Wave FINAL (After ALL tasks — 4 PARALLEL):
   - 测试：触发条件 / 压缩结果落盘 / 不阻塞主线程
 
   **Must NOT do**:
-  - 不压缩最近 4 轮（compaction_tail_preserve_turns=4）
+  - 不压缩最近 3 轮（compaction_tail_preserve_turns=3）
   - 不同步压缩（不阻塞用户输入）
   - 单次压缩不超过 1 轮（避免 LLM 调用风暴）
 
@@ -1351,7 +1351,7 @@ uv run pytest tests/fund/agent/test_stream_events.py \
 
 ### Final Checklist
 
-- [ ] 所有 15 个 Slice 实现完成
+- [ ] 所有 16 个 Slice 实现完成
 - [ ] 所有 "Must Have" 实现并验证
 - [ ] 所有 "Must NOT Have" 未违反
 - [ ] 全量回归通过（≥200 tests）
