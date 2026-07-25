@@ -837,18 +837,33 @@ class FundReadingService:
         routing_context = "\n\n".join(context_parts)
         if routing_context:
             augmented_query = (
-                f"以下是已检索到的年报相关内容（含引用信息）：\n\n{routing_context}\n\n"
+                f"以下是已检索到的年报相关内容，仅供参考：\n\n{routing_context}\n\n"
                 f"用户问题：{request.question}\n\n"
-                f"回答策略：\n"
-                f"1. 上述内容已包含答案，请直接基于此回答\n"
-                f"2. 如需验证，可用 read_table 读取可用表格（如 read_table(table_ref='table-0081')）\n"
-                f"3. 不要调用 search_document 或 list_tables，信息已足够\n"
-                f"4. 如果上述内容已完整回答问题，可直接返回答案，无需再调用工具\n"
-                f"每个事实必须引用来源。"
+                f"请先调用 search_document 和 read_section 工具验证相关信息，"
+                f"然后基于工具返回的证据回答。每个事实必须引用来源。"
             )
         else:
             augmented_query = request.question
 
+        # 如果路由上下文已包含完整数据，直接返回，不调用 LLM
+        _DIRECT_RETURN_KEYWORDS = [
+            '股票名称', '持仓', '净值增长率', '管理费', '托管费',
+            '基金名称', '基金类型', '基金经理', '费率',
+        ]
+        if routing_context and any(
+            keyword in routing_context for keyword in _DIRECT_RETURN_KEYWORDS
+        ):
+            if on_event is not None:
+
+                on_event(StreamEvent(type=StreamEventType.CONTENT_DELTA, payload=routing_context, sequence=0))
+                on_event(StreamEvent(type=StreamEventType.DONE, payload=None, sequence=1))
+            return AskQuestionResult(
+                answer=routing_context,
+                citations=(),
+                tool_trace=(),
+                routing_trace=tuple(routing_trace),
+                failure=None,
+            )
         # 创建 LLM runner 并通过 Host 运行
         runner = self._runner_factory(tool_service)
         llm_host = MH(runner)  # type: ignore[arg-type]
