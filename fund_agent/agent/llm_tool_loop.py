@@ -42,7 +42,7 @@ ALLOWED_LLM_TOOL_NAMES: frozenset[ToolName] = frozenset(
         ToolName.AGGREGATE_MULTI_YEAR_ANNUAL_PERFORMANCE,
     }
 )
-_MAX_LLM_STEPS = 8
+_MAX_LLM_STEPS = 12
 _MAX_TABLE_ROWS = 8
 _MAX_EVIDENCE_CHARS = 4096
 _EVIDENCE_HEAD_CHARS = 3072
@@ -521,7 +521,8 @@ def _final_result(
             return _failed_result(trace, FailureCode.UNAVAILABLE, _INVESTMENT_ADVICE_MESSAGE)
 
     evidence_texts = tuple(result.evidence_text for result in tool_results if result.evidence_text.strip())
-    if not evidence_texts:
+    # 如果有工具调用但没有证据，才报错；如果完全没有工具调用（routing context 已提供），跳过
+    if tool_results and not evidence_texts:
         return _failed_result(trace, FailureCode.UNAVAILABLE, _NO_EVIDENCE_MESSAGE)
 
     # citations 非空时执行受控 citation 校验；为空时为 markdown fallback，跳过校验

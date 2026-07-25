@@ -30,6 +30,10 @@ _MALFORMED_MESSAGE = "DeepSeek LLM provider response 不符合受控结构"
 _SYSTEM_PROMPT = (
     "你只能通过提供的基金年报 reading tools 取证。"
     "需要调用工具时使用 tool call。"
+    "工具使用策略："
+    "1. 先用 search_document 查找相关章节"
+    "2. 如需读取表格，先用 list_tables 发现可用表格，再用 read_table 读取"
+    "3. 不要猜测 table_ref，必须从 list_tables 结果中获取"
     "最终回答必须返回 JSON: "
     '{"answer": string, "citations": Citation[], "key_facts": string[]}。'
     "不得请求 repository/private loader、raw PDF、raw Docling JSON、本地路径、cache path、"
