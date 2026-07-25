@@ -111,6 +111,7 @@ class MinimalHost:
     参数:
         agent: 已装配好工具服务的最小 Agent。
         timeout: run 超时时间（秒）；默认 300 秒。
+        session_store: 可选 SessionStore，启用多轮会话管理。
 
     返回:
         托管 Agent loop 的 Host，记录事件并支持 timeout。
@@ -121,14 +122,18 @@ class MinimalHost:
 
     def __init__(
         self,
-        agent: MinimalFundDocumentAgent,
+        agent: Any = None,
         *,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        session_store: Any = None,
     ) -> None:
         """初始化 Host。"""
 
         self._agent = agent
         self._timeout = timeout
+        self._session_store = session_store
+
+    # ── Agent run ────────────────────────────────────────────────
 
     def run(self, *, document_id: str, query: str) -> HostRunResult:
         """调用 Agent loop 并返回扩展结果。
@@ -324,6 +329,75 @@ class MinimalHost:
                 payload={"code": "unavailable", "message": agent_error},
                 sequence=seq,
             )
+
+    # ── Session 管理 ─────────────────────────────────────────────
+
+    def create_session(
+        self, *, fund_code: str, label: str | None = None
+    ) -> Any:
+        """创建多轮会话。
+
+        参数:
+            fund_code: 基金代码。
+            label: 可选用户标签。
+
+        返回:
+            Session 对象。
+
+        异常:
+            RuntimeError: session_store 未配置。
+        """
+        if self._session_store is None:
+            raise RuntimeError("session_store 未配置，无法创建会话")
+        return self._session_store.create(fund_code=fund_code, label=label)
+
+    def get_session(self, session_id: str) -> Any:
+        """按 session_id 加载会话。
+
+        参数:
+            session_id: 会话 ID 或 label。
+
+        返回:
+            Session 对象。
+
+        异常:
+            FileNotFoundError: 会话不存在。
+            RuntimeError: session_store 未配置。
+        """
+        if self._session_store is None:
+            raise RuntimeError("session_store 未配置")
+        return self._session_store.load(session_id)
+
+    def list_sessions(self) -> list[dict[str, object]]:
+        """列出所有会话摘要。
+
+        返回:
+            会话摘要列表。
+
+        异常:
+            RuntimeError: session_store 未配置。
+        """
+        if self._session_store is None:
+            raise RuntimeError("session_store 未配置")
+        return self._session_store.list_sessions()
+
+    def close_session(self, session_id: str) -> None:
+        """关闭会话。
+
+        参数:
+            session_id: 会话 ID。
+
+        异常:
+            RuntimeError: session_store 未配置。
+        """
+        if self._session_store is None:
+            raise RuntimeError("session_store 未配置")
+        try:
+            session = self._session_store.load(session_id)
+            session = session.close()
+            self._session_store.save(session)
+        except FileNotFoundError:
+            pass
 
 
 _TOOL_NAME_MAP: dict[str, HostRunEventType] = {
