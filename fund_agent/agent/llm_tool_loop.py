@@ -54,11 +54,8 @@ _MISSING_CITATION_MESSAGE = "LLM 最终回答缺少受控 citation"
 _UNSUPPORTED_FACT_MESSAGE = "LLM 最终回答包含未由工具结果支持的关键事实"
 _STEP_LIMIT_MESSAGE = "LLM 工具调用超过限制"
 _UNAVAILABLE_MESSAGE = "LLM 工具循环暂不可用"
-_INVESTMENT_ADVICE_KEYWORDS: frozenset[str] = frozenset(
-    {
-        "买入", "卖出", "建议加仓", "建议减仓", "推荐买入", "推荐卖出", "强烈建议",
-    }
-)
+from fund_agent.service.investment_guard import INVESTMENT_ADVICE_KEYWORDS as _INVESTMENT_ADVICE_KEYWORDS
+
 _INVESTMENT_ADVICE_MESSAGE = "LLM 最终回答包含投资建议关键词"
 
 

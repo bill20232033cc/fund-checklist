@@ -832,12 +832,7 @@ class ArtifactStore:
 # ProgrammaticAuditor（第一层：程序审计）
 # ============================================================
 
-# 禁止内容关键词
-_INVESTMENT_ADVICE_KEYWORDS = (
-    "买入", "卖出", "推荐买入", "推荐卖出", "建议买入", "建议卖出",
-    "强烈推荐", "强烈买入", "强烈卖出", "增持", "减持",
-    "目标价", "预期收益", "预计涨幅", "预期回报",
-)
+from .investment_guard import contains_investment_advice, INVESTMENT_ADVICE_KEYWORDS as _INVESTMENT_ADVICE_KEYWORDS
 
 # 必须字段检查（基于 ChapterContract.required_output_items）
 _REQUIRED_FIELD_PATTERNS = {

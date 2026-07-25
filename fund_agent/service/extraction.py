@@ -134,11 +134,8 @@ _TABLE_BLOCK_HEADER = "相关表格:"
 _FEE_RATES_QUERY = "费用"
 _FEE_RATE_PERIOD_YEAR = "year"
 
-_INVESTMENT_ADVICE_KEYWORDS: frozenset[str] = frozenset(
-    {
-        "买入", "卖出", "建议加仓", "建议减仓", "推荐买入", "推荐卖出", "强烈建议",
-    }
-)
+from .investment_guard import INVESTMENT_ADVICE_KEYWORDS, contains_investment_advice
+
 _INVESTMENT_ADVICE_MESSAGE = "routing context 包含投资建议关键词，拒绝回答"
 _PERFORMANCE_RETURNS_QUERY = "净值增长率"
 _PERFORMANCE_RETURN_PERIOD_PAST_1_YEAR = "past_1_year"
