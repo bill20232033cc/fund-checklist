@@ -28,11 +28,24 @@ _VARIABLE_PATTERN = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
 
 
 @dataclass(frozen=True)
+class Fragment:
+    """Prompt fragment 描述符。
+
+    参数:
+        order: 排序优先级（升序装配）。
+        path: 相对于 template_dir 的 .md 模板路径。
+    """
+
+    order: int
+    path: str
+
+
+@dataclass(frozen=True)
 class ComposedPrompt:
     """PromptComposer 输出。
 
     参数:
-        template_name: 模板文件名。
+        template_name: 模板文件名或 scene 标识。
         template_version: 模板版本号（从文件头注释提取）。
         system_message: 渲染后的 system prompt 文本。
         missing_variables: 未提供的变量列表（用于调试）。
@@ -96,6 +109,61 @@ class PromptComposer:
             template_version=version,
             system_message=result,
             missing_variables=tuple(missing),
+        )
+
+    def compose_from_scene(
+        self,
+        scene_config: Any,
+        contributions: dict[str, str],
+    ) -> ComposedPrompt:
+        """按 scene config 的 fragments 装配 system_prompt，并注入 contributions。
+
+        参数:
+            scene_config: 含 scene (str)、fragments (list of {order, path})、
+                          context_slots (tuple of str) 的对象。
+            contributions: {slot_name: rendered_text} 映射。
+
+        返回:
+            ComposedPrompt。
+
+        异常:
+            PromptRenderError: fragments 为空或 fragment 文件不存在。
+        """
+        fragments = getattr(scene_config, "fragments", [])
+        if not fragments:
+            raise PromptRenderError(f"scene {getattr(scene_config, 'scene', '?')} 没有 fragments")
+
+        sorted_fragments = sorted(fragments, key=lambda f: f.order)
+
+        assembled_parts: list[str] = []
+        version = "unknown"
+        for frag in sorted_fragments:
+            template_path = self.template_dir / frag.path
+            if not template_path.exists():
+                raise PromptRenderError(f"fragment 模板不存在: {template_path}")
+
+            raw = template_path.read_text(encoding="utf-8")
+            version_match = _VERSION_COMMENT.search(raw)
+            if version_match and version == "unknown":
+                version = version_match.group(1).strip()
+
+            text = _VERSION_COMMENT.sub("", raw, count=1).strip()
+            assembled_parts.append(text)
+
+        system_message = "\n\n".join(assembled_parts)
+
+        # 注入 contributions（按 context_slots 声明顺序）
+        context_slots = tuple(getattr(scene_config, "context_slots", ()))
+        for slot in context_slots:
+            contribution = contributions.get(slot)
+            if contribution:
+                system_message += "\n\n" + contribution.strip()
+
+        scene_name = getattr(scene_config, "scene", "?")
+        return ComposedPrompt(
+            template_name=f"scene:{scene_name}",
+            template_version=version,
+            system_message=system_message,
         )
 
 

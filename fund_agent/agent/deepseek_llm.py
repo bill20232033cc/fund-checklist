@@ -224,14 +224,20 @@ class DeepSeekLlmClient:
         env: Mapping[str, str] | None = None,
         timeout_seconds: int = DEFAULT_DEEPSEEK_TIMEOUT_SECONDS,
         options: ExecutionOptions | None = None,
+        system_prompt: str | None = None,
     ) -> None:
-        """保存 transport、环境变量来源、超时设置和执行选项。"""
+        """保存 transport、环境变量来源、超时设置和执行选项。
+
+        参数:
+            system_prompt: 可选自定义 system prompt；None 时使用默认 _SYSTEM_PROMPT。
+        """
 
         self._transport = transport or UrlLibDeepSeekTransport()
         self._env = env
         self._timeout_seconds = timeout_seconds
         self._options = options or ExecutionOptions()
         self._cumulative_usage = TokenUsage()
+        self._system_prompt = system_prompt  # None = 使用默认
 
     @property
     def cumulative_usage(self) -> TokenUsage:
@@ -273,6 +279,7 @@ class DeepSeekLlmClient:
                 tool_results=tool_results,
                 model=env.get(DEEPSEEK_MODEL_ENV, DEFAULT_DEEPSEEK_MODEL).strip() or DEFAULT_DEEPSEEK_MODEL,
                 stream=use_stream,
+                system_prompt=self._system_prompt,
             ),
             timeout_seconds=self._timeout_seconds,
         )
@@ -351,6 +358,7 @@ class DeepSeekLlmClient:
                 tool_results=tool_results,
                 model=env.get(DEEPSEEK_MODEL_ENV, DEFAULT_DEEPSEEK_MODEL).strip() or DEFAULT_DEEPSEEK_MODEL,
                 stream=True,
+                system_prompt=self._system_prompt,
             ),
             timeout_seconds=self._timeout_seconds,
         )
@@ -462,13 +470,14 @@ def _request_payload(
     tool_results: tuple[ToolResult, ...],
     model: str,
     stream: bool = False,
+    system_prompt: str | None = None,
 ) -> dict[str, Any]:
     """构造不含 raw/private payload 的 OpenAI-compatible chat completions payload。"""
 
     return {
         "model": model,
         "messages": [
-            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt or _SYSTEM_PROMPT},
             {
                 "role": "user",
                 "content": json.dumps(
