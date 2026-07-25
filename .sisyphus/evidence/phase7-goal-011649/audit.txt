@@ -1,0 +1,32 @@
+# Three-layer Audit Results (2026-07-26)
+
+## Fund: 011649 (易方达逆向投资混合A)
+## Audit Directory: .fund_e2e_011649/audit_artifacts/
+
+## Chapter Audit Scores
+
+### Chapter 0 (投资要点概览)
+- Score: 93.0 (programmatic: 100.0, LLM: 90.0)
+- Recommendation: PASS
+- 1 P2 violation (数字编造: 基金规模7.58亿无来源支撑)
+
+### All 8 Chapters Audited
+chapter_0_audit.json, chapter_0_repair.json, chapter_0_state.json
+chapter_1_audit.json, chapter_1_repair.json, chapter_1_state.json
+chapter_2_audit.json, chapter_2_repair.json, chapter_2_state.json
+chapter_3_audit.json, chapter_3_state.json
+chapter_4_audit.json, chapter_4_state.json
+chapter_5_audit.json, chapter_5_repair.json, chapter_5_state.json
+chapter_6_audit.json, chapter_6_repair.json, chapter_6_state.json
+chapter_7_audit.json, chapter_7_repair.json, chapter_7_state.json
+
+## Three-layer Pipeline
+1. Programmatic audit (data consistency, citation verification)
+2. LLM audit (qualitative analysis quality)
+3. Repair pass (automated fixes where possible)
+
+## Verification
+- All 8 chapters (0-7) have audit artifacts
+- Audit scores recorded in *_audit.json files
+- Repair attempts recorded in *_repair.json files
+- State snapshots in *_state.json files

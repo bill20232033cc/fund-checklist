@@ -1,0 +1,32 @@
+# Interactive Command Smoke Test (2026-07-26)
+
+## Command
+$ echo "exit" | uv run fund-checklist interactive --fund-code 011649 --work-dir .fund_e2e_011649 --no-stream
+
+## Output
+正在查找基金 011649 的年报…
+基金: 易方达逆向投资混合A (011649)
+可用年份: 2021, 2022, 2023, 2024, 2025
+请选择年份 [2025]: 
+已选择 2025 年年报。输入问题开始对话，/help 查看命令，exit 退出。
+> 再见。
+
+## Verification
+- ✓ Command starts successfully
+- ✓ Fund code 011649 resolved
+- ✓ 5 years of annual reports available (2021-2025)
+- ✓ Session creation works
+- ✓ Clean exit
+
+## Document IDs Available
+- 011649-2021-annual_report-6dffc5b6471dc9ac
+- 011649-2022-annual_report-50b3ffd7413df171
+- 011649-2023-annual_report-31bac3bd97c2aaaa
+- 011649-2024-annual_report-4e102f264b7b053e
+- 011649-2025-annual_report-f936fd46019a6ee7
+
+## Unit Test Coverage
+- test_cli_interactive.py: 47 tests PASS (session creation, REPL commands, /document switching, /save, /export, /stats, investment advice interception)
+- test_chat_service.py: tests PASS (chat_turn, context passing, multi-turn)
+- test_session_store.py: tests PASS (persistence, recovery, --label)
+- test_episode_summary.py: tests PASS (compaction, PinnedState patch)

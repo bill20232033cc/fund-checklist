@@ -1,0 +1,30 @@
+# Investment Advice Interception (2026-07-26)
+
+## Test Results
+14 tests PASSED in tests/fund/service/test_investment_guard.py
+
+## Keyword Coverage
+- Buy/sell keywords: ✓
+- Recommend keywords: ✓
+- Position keywords: ✓
+- Target/return keywords: ✓
+- All keywords individually trigger: ✓
+
+## Detection Tests
+- "建议买入该基金" → DETECTED ✓
+- "推荐卖出" → DETECTED ✓
+- "目标价50元" → DETECTED ✓
+- "加仓" → DETECTED ✓
+- Normal analysis text → NOT triggered ✓
+- Empty text → NOT triggered ✓
+- Partial substring in longer word → NOT triggered ✓
+
+## CLI Integration
+test_cli_interactive.py includes investment advice interception tests:
+- REPL input "建议买入该基金" is intercepted before reaching LLM
+- User receives warning message instead of LLM response
+
+## Verification
+- INVESTMENT_ADVICE_KEYWORDS is a frozenset (immutable)
+- Unified constant used across service and audit layers
+- Catches: 买入/卖出/推荐/加仓/减仓/目标价/预期收益 etc.

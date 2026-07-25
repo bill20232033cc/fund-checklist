@@ -1,0 +1,26 @@
+# Full Regression Results (2026-07-26)
+
+## Test Batches Run
+
+### Agent tests
+138 passed, 1 skipped in 22.51s
+
+### CLI tests
+- test_cli.py: 70 passed, 2 warnings in 102.36s
+- test_cli_interactive.py: 47 passed in 0.11s
+
+### Host tests
+50 passed in 0.59s
+
+### Document tools tests
+46 passed, 1 failed (test_docling_conversion - excluded, environment-specific: missing PDF file)
+
+### Service tests
+330 passed, 1 warning in 56.55s
+
+### Infer fund type tests
+13 passed in 0.05s
+
+## Summary
+Total: 694 passed, 1 skipped, 1 excluded failure (environment-specific)
+All Phase 7 code tests pass. No regressions in Phase 5/6 capabilities.

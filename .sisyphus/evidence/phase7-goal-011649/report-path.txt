@@ -1,0 +1,21 @@
+# Report Path Evidence (2026-07-26)
+
+## Generated Report
+.fund_e2e_011649/reports/011649-2025-analysis.md
+
+## Supporting Data
+.fund_e2e_011649/docling_json/011649-2021-annual_report-6dffc5b6471dc9ac/
+.fund_e2e_011649/docling_json/011649-2022-annual_report-50b3ffd7413df171/
+.fund_e2e_011649/docling_json/011649-2023-annual_report-31bac3bd97c2aaaa/
+.fund_e2e_011649/docling_json/011649-2024-annual_report-4e102f264b7b053e/
+.fund_e2e_011649/docling_json/011649-2025-annual_report-f936fd46019a6ee7/
+
+## Source PDFs
+基金年报/011649_易方达逆向投资混合_2021_annual_report.pdf
+基金年报/011649_易方达逆向投资混合_2022_annual_report.pdf
+基金年报/011649_易方达逆向投资混合_2023_annual_report.pdf
+基金年报/011649_易方达逆向投资混合_2024_annual_report.pdf
+基金年报/011649_易方达逆向投资混合_2025_annual_report.pdf
+
+## Identity Index
+.fund_e2e_011649/pdf_blobs/identity_index.json

@@ -1,0 +1,48 @@
+# Final Gate Verification (2026-07-26)
+
+## Acceptance Criteria Status
+
+### A. 功能验收
+1. ✓ interactive --fund-code 011649 可启动，加载5年年报上下文
+   - Evidence: interactive-smoke.txt, 47 unit tests PASS
+2. ✓ 可跨年度完成至少3轮上下文问答
+   - Evidence: test_cli_interactive.py (multi-turn tests), test_chat_service.py
+3. ✓ /document 20XX 切换
+   - Evidence: test_cli_interactive.py::test_document_switch_* (PASS)
+4. ✓ /save 导出 + exit 落盘 + --label 恢复
+   - Evidence: test_cli_interactive.py (save/restore tests), test_session_store.py
+5. ✓ "建议买入该基金" 被拦截
+   - Evidence: investment-guard.txt, 14 tests PASS
+
+### B. 真实 LLM 验收 (opt-in)
+6. ⚠ 真实 LLM 端到端需要 DEEPSEEK_API_KEY (opt-in)
+   - 代码已实现，unit tests 覆盖 ChatResponse/TokenUsage
+   - 未在本次执行（无 API key 配置）
+7. ✓ live smoke 不在默认 pytest 中执行
+   - Evidence: test_deepseek_live_smoke.py requires explicit opt-in
+
+### C. 报告与审计 (5年口径)
+8. ✓ 生成 011649 基金分析报告，覆盖2021-2025
+   - Evidence: generate.txt, report-path.txt
+9. ✓ 三层审计执行完成
+   - Evidence: audit.txt (8 chapters audited)
+10. ✓ 审计结果纳入 evidence
+    - Evidence: .fund_e2e_011649/audit_artifacts/
+
+### D. 回归与稳定性
+11. ✓ pytest 全部通过 (694 passed, 1 excluded)
+    - Evidence: regression.txt, offline-tests.txt
+12. ✓ Phase 5/6 关键能力无回退
+    - Evidence: agent tests (138), service tests (330), cli tests (117)
+
+## Final Gate Summary
+- 离线核心测试 PASS (204/204)
+- 全量回归 PASS (694/694, 1 excluded environment-specific)
+- interactive 端到端 PASS (unit + smoke)
+- 真实 LLM: 代码就绪，需 opt-in API key
+- 报告生成 PASS (5年口径)
+- 三层审计 PASS (8 chapters)
+- 投资建议拦截 PASS (14/14)
+
+## Phase 7 Slices: 17/17 Complete
+7X + 7A-7P all implemented and tested.

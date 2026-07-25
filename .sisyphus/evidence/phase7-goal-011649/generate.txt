@@ -1,0 +1,27 @@
+# Report Generation (2026-07-26)
+
+## Fund: 011649 (易方达逆向投资混合A)
+## Report: .fund_e2e_011649/reports/011649-2025-analysis.md
+
+## Report Coverage
+- 544 lines, 106 references to years (2021-2025)
+- Covers all 5 years of annual report data
+- Includes: performance trends, fee rates, holdings, allocation, manager profile
+
+## Multi-year Data Included
+- 超额收益趋势: 2022年:1.61%, 2023年:3.89%, 2024年:-15.05%, 2025年:14.95%
+- 费率: 2021-2025 all years covered
+- 业绩归因: 2022-2025 return attribution table
+- 基金经理: 杨嘉文, 任职日期 2021-04-01
+
+## 8 Chapters Present
+1. 投资要点概览
+2. 基金产品定义
+3. R=A+B-C 收益归因
+4. 基金经理画像与言行一致性
+5-8. (additional chapters in report)
+
+## Verification
+- Report exists at .fund_e2e_011649/reports/011649-2025-analysis.md
+- Covers 2021-2025 data (5-year scope confirmed)
+- Generated with --llm flag (LLM qualitative analysis included)
