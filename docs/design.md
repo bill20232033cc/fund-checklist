@@ -1,6 +1,6 @@
 # fund-checklist 设计真源
 
-更新时间：2026-07-12
+更新时间：2026-07-25
 文档状态：设计真源，覆盖基金分析助手完整链路；不得作为实现完成证据。
 适用范围：基金分析助手，覆盖年报导入 → 结构化抽取 → 多年度追踪 → 信号评分 → 报告生成 → 审计管道。
 关联文档：AGENTS.md（执行规则）、docs/implementation-control.md（当前执行面板）
@@ -10,7 +10,7 @@
 ### 0.1 当前代码事实
 
 - 本仓库已实现 `fund_agent/` 完整分层（fund / service / host / agent / cli），`tests/` 覆盖 document_tools / service / agent / cli，`docs/design.md` 与 `docs/implementation-control.md` 为真源文档。
-- CLI 已实现 9 个子命令：`read` / `multi-year` / `import` / `holdings` / `allocation` / `fees` / `audit` / `deep-audit` / `generate`。
+- CLI 已实现 10 个子命令：`read` / `multi-year` / `import` / `holdings` / `allocation` / `fees` / `audit` / `deep-audit` / `generate` / `ask`。
 - 已实现能力：本地 PDF 导入、Docling 转换、7 个 reading tools、Service 层 profile routing + disclosure target contract、结构化字段抽取（费率/业绩/持仓/资产配置）、多年度聚合、确定性信号评分（基金类型感知：主动基金 6 指标；被动基金 3 指标 100 分制）、8 章分析报告生成、三层审计管道。
 - 当前样本材料位于 `基金年报/`，包含多只基金多个年度的 PDF；已通过受控 import 管理。
 - `docs/fund-analysis-template-draft.md` 存在，按 `AGENTS.md` 规则，在报告生成、字段抽取或投资判断路径中使用。
@@ -1400,21 +1400,23 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ### Phase 5：LLM 自主工具调用 + 流式输出
 
-> 裁决时间：2026-07-24 | 计划文件：`.sisyphus/plans/phase5-implementation.md`
+> 裁决时间：2026-07-24 | 状态：✅ 已完成
+> 计划文件：`.sisyphus/plans/phase5-implementation.md`
 > 流式输出已从原 Phase 7 前置并入 Phase 5。
 
-- **Slice 19A**：StreamEvent 数据模型 + LlmToolLoopRunner production readiness（重试/截断/幻觉检测/tool schema 一致）。待启动。
-- **Slice 19B**：DeepSeekLlmClient `stream=True` + SSE 解析。依赖 19A。
-- **Slice 19C**：MinimalHost `run_agent_stream()` 方法。依赖 19A, 19B。
-- **Slice 19D**：Service 层 `ask_question`（含 profile routing）。依赖 19A。
-- **Slice 19E**：CLI `ask` 子命令（流式默认）。依赖 19C, 19D。
+- **Slice 19A**：StreamEvent 数据模型 + LlmToolLoopRunner production readiness（重试/截断/幻觉检测/tool schema 一致）。✅ 已完成。
+- **Slice 19B**：DeepSeekLlmClient `stream=True` + SSE 解析。✅ 已完成。
+- **Slice 19C**：MinimalHost `run_agent_stream()` 方法。✅ 已完成。
+- **Slice 19D**：Service 层 `ask_question`（含 profile routing）。✅ 已完成。
+- **Slice 19E**：CLI `ask` 子命令（流式默认）。✅ 已完成。
 - **Slice 19F**：端到端 smoke + read 回归快照 + 全量回归。依赖 19E。
 
 新增文件：`fund_agent/agent/stream_events.py`、`tests/fund/agent/test_stream_events.py`、`tests/fund/agent/test_llm_production_readiness.py`、`tests/fund/service/test_ask_question.py`
 
 ### Phase 6：模板框架适配 + 基金类型感知
 
-> 启动时间：2026-07-22 | 详见 `docs/implementation-control.md` Phase 6 节
+> 启动时间：2026-07-22 | 状态：✅ 已完成
+> 详见 `docs/implementation-control.md` Phase 6 节
 
 - **Slice 6A**：净值增长率列匹配修复。✅ 已完成。
 - **Slice 6B**：基金经理/规模数据接入报告。✅ 已完成。
@@ -1422,11 +1424,50 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - **Slice 6D**：评分框架 fund_type 感知（主动 6 指标 135→100 / 被动 3 指标 100 分制 / 债券 5 指标）。✅ 已完成。
 - **Slice 6E**：端到端验证 + DS Review。✅ 已完成。
 
+
+
+### Phase 7：多轮对话 + 会话记忆 + 上下文治理 + Prompt 路由
+
+> 裁决时间：2026-07-25 | 状态：🔵 待启动
+> 计划文件：`.sisyphus/plans/phase7-interactive.md`
+
+**裁决汇总**：16 项裁决，详见计划文件。
+
+**核心能力**：
+- Session 数据模型 + filesystem JSON 持久化
+- 三层记忆模型（Pinned State + Recent Turns + Episode Summary）
+- Scene Manifest + Fragments + Context Slots（对齐 Dayu Prompt 路由）
+- 上下文预算治理（Context Budget）
+- CLI `interactive` 子命令（prompt_toolkit + rich）
+- 会话恢复（--label）
+
+**Slice 列表**：
+- **7A**：Session 数据模型 + 持久化
+- **7B**：上下文截断（Context Budget）
+- **7C**：Scene Manifest 数据模型
+- **7D**：PromptComposer 升级（Fragments + Context Slots）
+- **7E**：Service 层 chat_turn use case
+- **7F**：Host 多轮会话托管
+- **7G**：CLI interactive 子命令（prompt_toolkit + rich）
+- **7H**：会话恢复（--label）
+- **7I**：Episode Summary（异步 LLM）
+- **7J**：扩展命令集
+- **7K**：多文档切换
+- **7L-7P**：集成测试 + 端到端验证
+
+**新增文件**：
+- `fund_agent/host/session_store.py` — Session JSON 持久化
+- `fund_agent/service/session_models.py` — Session/Turn/PinnedState 数据模型
+- `fund_agent/service/scene_manifest.py` — Scene Manifest 数据模型
+- `fund_agent/service/prompt_composer.py` — 升级：fragment 装配 + contribution 注入
+- `fund_agent/service/prompts/interactive/` — prompt fragment 模板
+- `fund_agent/agent/context_budget.py` — 上下文预算治理
+- `tests/fund/cli/test_cli_interactive.py` — interactive 测试
 ### 技术债
 
 - **P1-3**：提取 compute_signal_judgment / compute_risk_checklist 共享评分 helper。
-- **extraction.py 二次拆分**：当前 5727 行。signal_scoring.py（439 行）已完成一次拆分；残留 7 个评分/风险函数（约 450 行）待迁移。
-  - 排期：Phase 5（19A-19F）完成后执行，不在 Phase 5 之前做（理由：Phase 5 只新增 ask_question 方法，不改现有代码；并行做会产生 merge 冲突）。
+- **extraction.py 二次拆分**：当前 5931 行。signal_scoring.py（439 行）已完成一次拆分；残留 7 个评分/风险函数（约 450 行）待迁移。
+  - 排期：Phase 7 完成后执行（理由：Phase 7 新增 Session/Scene/ContextBudget，会产生新的 import 依赖；并行做会产生 merge 冲突）。
   - 执行顺序：(1) 移 infer_fund_type + _next_tier_up/down + _compute_threshold_events 到 signal_scoring.py（消除循环依赖）(2) 移 compute_signal_judgment + 3 个 _compute_*_signal 到 signal_scoring.py (3) 新建 risk_assessment.py，移 STRESS_THRESHOLDS + compute_risk_checklist + compute_stress_test + _compute_ch6_stress_test (4) 更新 5 个文件的 import（extraction.py、audit_pipeline.py、__init__.py、chapter_generator.py、3 个测试文件）
   - 预期收益：extraction.py 减少约 450 行（5727→5280），评分逻辑完全独立可测试。
 **Slice 16C**：Ch0 升级/降级阈值事件 + 一句话产品定义。从 Ch7 信号反推 Ch0 封面。✅ 已完成。含 tier-delta 阈值事件算法 + 确定性产品定义。

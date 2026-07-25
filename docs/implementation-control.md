@@ -1,9 +1,9 @@
 # fund-checklist implementation-control
 
-更新时间：2026-07-12
+更新时间：2026-07-25
 当前阶段：`FUND_ANALYSIS_ASSISTANT`
 当前角色：control / CIC-lite controller
-当前目标：Slice 16B Ch6 压力测试表 — ACCEPTED（2026-07-13）。
+当前目标：Phase 7 多轮对话 + 会话记忆 — 已裁决（2026-07-25）。
 关联文档：AGENTS.md（执行规则）、docs/design.md（设计决策）
 
 ## 已完成研究报告
@@ -2061,3 +2061,95 @@ done
 - 信号评分：黄金基金指标权重调整
 
 **优先级**：Phase 6 完成批量测试后实施
+
+
+## Phase 7：多轮对话 + 会话记忆 + 上下文治理 + Prompt 路由
+
+> 裁决时间：2026-07-25
+> 前置条件：Phase 5 ✅（2026-07-24 完成）、Phase 6 ✅（2026-07-22 完成）
+> 设计来源：`docs/agent-evolution-design.md` §2 + dayu-agent 场景研究
+> 计划文件：`.sisyphus/plans/phase7-interactive.md`
+
+### Phase 7 裁决 Gate
+
+| Gate | 条件 | 状态 |
+|------|------|------|
+| Gate 1 | Phase 7 scope/write set/verification/stop conditions 写入本文件 | ✅ 本文档记录 |
+| Gate 2 | 16 项裁决策通过 | ✅ 已裁决 |
+
+### Phase 7 Slice 列表
+
+| Slice | 内容 | 状态 |
+|-------|------|------|
+| **7A** | Session 数据模型 + 持久化（filesystem JSON） | 待启动 |
+| **7B** | 上下文截断（Context Budget） | 依赖 7A |
+| **7C** | Scene Manifest 数据模型 | 依赖 7A |
+| **7D** | PromptComposer 升级（Fragments + Context Slots） | 依赖 7C |
+| **7E** | Service 层 chat_turn use case | 依赖 7A, 7B |
+| **7F** | Host 多轮会话托管 | 依赖 7E |
+| **7G** | CLI interactive 子命令（prompt_toolkit + rich） | 依赖 7F |
+| **7H** | 会话恢复（--label） | 依赖 7G |
+| **7I** | Episode Summary（异步 LLM） | 依赖 7F |
+| **7J** | 扩展命令集 | 依赖 7G |
+| **7K** | 多文档切换 | 依赖 7G |
+| **7L** | 集成测试 | 依赖 7A-7K |
+| **7M** | 端到端验证（011649 基金） | 依赖 7L |
+| **7N** | DS Review | 依赖 7M |
+| **7O** | 全量回归 | 依赖 7N |
+| **7P** | 最终审计（F1-F4） | 依赖 7O |
+
+### Phase 7 总体验收标准
+
+1. `interactive --fund-code 011649` 端到端通过
+2. 多轮对话 3 轮以上上下文正确传递
+3. 会话持久化（filesystem JSON）正确
+4. 会话恢复（--label）正确
+5. Episode Summary 异步触发并落盘
+6. 上下文预算裁减生效
+7. Scene Manifest + Fragments + Context Slots 正确装配
+8. 投资建议检测每轮生效
+9. ask 命令行为不变（回归）
+10. 全量测试通过（≥200 tests）
+
+### Allowed Write Set
+
+| 文件 | 变更类型 | 所属 Slice |
+|------|---------|-----------|
+| `fund_agent/host/session_store.py` | **新增** — Session JSON 持久化 | 7A |
+| `fund_agent/service/session_models.py` | **新增** — Session/Turn/PinnedState 数据模型 | 7A |
+| `fund_agent/agent/context_budget.py` | **新增** — 上下文预算治理 | 7B |
+| `fund_agent/service/scene_manifest.py` | **新增** — Scene Manifest 数据模型 | 7C |
+| `fund_agent/service/prompt_composer.py` | 升级 — fragment 装配 + contribution 注入 | 7D |
+| `fund_agent/service/prompts/interactive/` | **新增** — prompt fragment 模板 | 7C, 7D |
+| `fund_agent/service/extraction.py` | 升级 — chat_turn use case | 7E |
+| `fund_agent/host/minimal_host.py` | 升级 — 多轮会话托管 | 7F |
+| `fund_agent/cli/main.py` | 升级 — interactive 子命令 | 7G |
+| `tests/fund/cli/test_cli_interactive.py` | **新增** — interactive 测试 | 7G |
+| `tests/fund/service/test_chat_service.py` | **新增** — chat_turn 测试 | 7E |
+| `tests/fund/host/test_session_store.py` | **新增** — session 持久化测试 | 7A |
+| `tests/fund/agent/test_context_budget.py` | **新增** — 上下文预算测试 | 7B |
+| `tests/fund/service/test_scene_manifest.py` | **新增** — Scene Manifest 测试 | 7C |
+| `tests/fund/service/test_prompt_composer_upgrade.py` | **新增** — PromptComposer 升级测试 | 7D |
+| `docs/design.md` | 更新 — Phase 7 设计 | — |
+| `docs/implementation-control.md` | 更新 — Phase 7 执行面板 | — |
+
+### Stop Conditions
+
+- `interactive` 破坏 `ask` 子命令现有行为 → 停止
+- 会话持久化导致数据损坏 → 停止
+- 上下文截断导致 LLM 回答质量下降 → 停止
+- Scene Manifest 装配失败 → 停止
+
+### 验证命令
+
+```bash
+# Phase 7 核心测试
+uv run pytest tests/fund/cli/test_cli_interactive.py   tests/fund/service/test_chat_service.py   tests/fund/host/test_session_store.py   tests/fund/agent/test_context_budget.py   tests/fund/service/test_scene_manifest.py   tests/fund/service/test_prompt_composer_upgrade.py   -v --tb=short
+
+# Phase 5 ask 回归
+uv run pytest tests/fund/agent/test_stream_events.py   tests/fund/agent/test_llm_production_readiness.py   tests/fund/agent/test_llm_tool_loop.py   tests/fund/cli/test_cli.py -k ask   -v --tb=short
+
+# 全量回归
+uv run pytest tests/fund/ -v --tb=short
+```
+

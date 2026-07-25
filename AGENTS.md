@@ -1,6 +1,6 @@
 # Repository Agent Rules
 
-更新时间：2026-07-12
+更新时间：2026-07-25
 
 ## 语言与沟通
 
@@ -36,18 +36,29 @@ PDF
  -> 三层审计管道 (程序+LLM+复核，4 类 22 项)
 ```
 
-已实现的 CLI 入口详见当前阶段节。
+已实现的 CLI 入口：`read` / `multi-year` / `import` / `holdings` / `allocation` / `fees` / `audit` / `deep-audit` / `generate` / `ask`。
+Phase 7 将新增：`interactive`。
 
 验收约束（适用于所有阶段）：
 - 不接受仅 Service / ToolService 层测试；任何阶段的验收必须包含 Host / Agent loop 或 CLI 端到端 smoke。
 
 当前已知能力差距（来自 dayu-agent 对标研究，2026-07-11），以下能力当前不存在，Agent 不得假装具备：
-- **多轮对话**：无 interactive mode，无会话记忆
-- **上下文治理**：无 budget/truncation/compaction
+- **多轮对话**：无 interactive mode，无会话记忆（Phase 7 将解决）
+- **上下文治理**：无 budget/truncation/compaction（Phase 7 将解决）
 - **联网搜索**：无法获取实时市场数据
 
-Phase 5 已裁决（2026-07-24）并正在实施的能力：
+Phase 5 已完成（2026-07-24）：
 - **LLM 自主工具调用**：`ask` 子命令走 LLM 自主决策工具调用路径（Slice 19A-19F）
+- **Streaming**：StreamEvent 模型 + DeepSeek stream=True + CLI 流式输出（Slice 19A-19C, 19E）
+
+Phase 6 已完成（2026-07-22）：
+- **模板框架适配**：preferred_lens 接入 generate 流程
+- **基金类型感知**：评分框架 fund_type 感知（主动 6 指标 135→100 / 被动 3 指标 100 分制 / 债券 5 指标）
+
+Phase 7 已裁决（2026-07-25）并正在实施：
+- **多轮对话**：`interactive` 子命令，支持会话持久化和上下文记忆
+- **上下文治理**：Context Budget，支持长对话不超限
+- **Prompt 路由**：Scene Manifest + Fragments + Context Slots，对齐 Dayu
 - **Streaming**：StreamEvent 模型 + DeepSeek stream=True + CLI 流式输出（Slice 19A-19C, 19E）
 
 LLM provider 已支持 DeepSeek 与 Mimo（OpenAI-compatible adapter）；暂不需要接入 Gemini/OpenAI/Anthropic 等其他 provider。
@@ -67,7 +78,8 @@ LLM provider 已支持 DeepSeek 与 Mimo（OpenAI-compatible adapter）；暂不
 - 真实 LLM 接入必须位于已实现的 fake/injected LLM tool-loop contract 之后；不得让 LLM provider、prompt 或 adapter 直接读取 raw PDF、raw Docling JSON、本地路径、cache path、repository/private loader、`local_import_id` 或 secret。
 - 当前 LLM provider 支持 DeepSeek 与 Mimo（OpenAI-compatible adapter）；暂不需要接入 Gemini/OpenAI/Anthropic 等其他 provider。
 - live provider smoke 必须显式 opt-in；默认 pytest 不得联网、不得读取真实 API key、不得记录 raw provider response 或新增 artifact。
-- 新增 LLM 驱动的 CLI 用户入口必须另开裁决。`ask` 子命令已裁决通过（Phase 5，2026-07-24），streaming 已并入 Phase 5。`interactive` 模式尚未裁决。
+- `ask` 子命令已裁决通过（Phase 5，2026-07-24），streaming 已并入 Phase 5。
+- `interactive` 模式已裁决通过（Phase 7，2026-07-25）。
 
 ## 身份与失败分类
 
@@ -184,10 +196,13 @@ implement -> tests -> diff review
 ```bash
 uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.py tests/fund/cli/test_cli.py
 ```
-- Phase 5 新增验证命令（Slice 19A-19F 实施期间）：
+- Phase 5 验证命令：
 ```bash
-# StreamEvent + production readiness
 uv run pytest tests/fund/agent/test_stream_events.py tests/fund/agent/test_llm_production_readiness.py tests/fund/agent/test_llm_tool_loop.py -v --tb=short
+```
+- Phase 7 验证命令：
+```bash
+uv run pytest tests/fund/cli/test_cli_interactive.py   tests/fund/service/test_chat_service.py   tests/fund/host/test_session_store.py   tests/fund/agent/test_context_budget.py   tests/fund/service/test_scene_manifest.py   tests/fund/service/test_prompt_composer_upgrade.py   -v --tb=short
 ```
 
 ## 代码与文档同步
