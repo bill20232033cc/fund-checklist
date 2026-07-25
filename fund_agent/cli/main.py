@@ -107,6 +107,8 @@ def run_cli(
             return _run_generate_command(args, stdout=stdout, stderr=stderr)
         if args.command == "ask":
             return _run_ask_command(args, stdout=stdout, stderr=stderr)
+        if args.command == "interactive":
+            return _run_interactive_command(args, stdout=stdout, stderr=stderr)
     except DocumentToolError as exc:
         _write_classified_failure(ToolFailure(code=exc.code, message=exc.message), stderr)
         return CLASSIFIED_FAILURE_EXIT_CODE
@@ -201,6 +203,13 @@ def build_parser() -> argparse.ArgumentParser:
     ask_parser.add_argument("--work-dir", default=Path(DEFAULT_WORK_DIR), type=Path)
     ask_parser.add_argument("--no-stream", action="store_true", default=False, help="禁用流式输出，等待完成后输出 JSON")
     ask_parser.add_argument("--enable-tool-trace", action="store_true", default=False, help="流式模式下同步输出 tool call/result")
+
+    interactive_parser = subparsers.add_parser("interactive")
+    interactive_parser.add_argument("--fund-code", required=True, help="基金代码（如 011649）")
+    interactive_parser.add_argument("--work-dir", default=Path(DEFAULT_WORK_DIR), type=Path)
+    interactive_parser.add_argument("--label", default=None, help="会话标签（用于恢复）")
+    interactive_parser.add_argument("--no-stream", action="store_true", default=False, help="禁用流式输出")
+    interactive_parser.add_argument("--enable-tool-trace", action="store_true", default=False, help="显示工具调用详情")
     return parser
 
 
@@ -989,6 +998,179 @@ def _write_success_output(result: object, stdout: TextIO) -> None:
     for entry in getattr(result, "tool_trace"):
         failure_code = entry.failure_code.value if entry.failure_code else ""
         print(f"- {entry.tool_name.value} {entry.result_kind} {failure_code}".rstrip(), file=stdout)
+
+
+def _run_interactive_command(
+    args: argparse.Namespace, *, stdout: TextIO, stderr: TextIO
+) -> int:
+    """执行 interactive 多轮对话。
+
+    参数:
+        args: argparse 解析出的 interactive 参数。
+        stdout: 输出流。
+        stderr: 错误输出流。
+
+    返回:
+        0 正常退出，1 异常退出。
+    """
+    work_dir = Path(args.work_dir)
+    fund_code = args.fund_code
+
+    # 1. 解析基金代码 → 可用年份
+    print(f"正在查找基金 {fund_code} 的年报…", file=stdout)
+    service = FundReadingService()
+    resolution = service.resolve_by_fund_code(fund_code, work_dir)
+
+    if resolution is None:
+        print(f"未找到基金 {fund_code} 的已导入年报。请先导入年报。", file=stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+    print(f"基金: {resolution.fund_name} ({fund_code})", file=stdout)
+    print(f"可用年份: {', '.join(str(y) for y in resolution.available_years)}", file=stdout)
+
+    # 2. 选择年份
+    default_year = resolution.available_years[-1]
+    year_str = input(f"请选择年份 [{default_year}]: ").strip()
+    selected_year = int(year_str) if year_str.isdigit() else default_year
+
+    selected_doc = next((d for d in resolution.documents if d.year == selected_year), None)
+    if selected_doc is None:
+        print(f"年份 {selected_year} 无对应年报。", file=stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+    # 3. 创建/恢复 session
+    from fund_agent.host.session_store import SessionStore
+    from fund_agent.service.session_models import PinnedState
+
+    sessions_dir = work_dir / "sessions"
+    session_store = SessionStore(sessions_dir)
+
+    label = getattr(args, "label", None)
+    if label:
+        try:
+            session = session_store.load(label)
+            print(f"[恢复会话 {label}]", file=stdout)
+        except FileNotFoundError:
+            session = session_store.create(fund_code=fund_code, label=label)
+    else:
+        session = session_store.create(fund_code=fund_code)
+
+    ps = PinnedState(
+        fund_code=fund_code,
+        available_document_ids=tuple(d.document_id for d in resolution.documents),
+        active_document_id=selected_doc.document_id,
+        active_year=selected_year,
+    )
+    session = session.with_pinned_state(ps)
+    session_store.save(session)
+
+    # 4. REPL 循环
+    from fund_agent.service.chat_service import ChatService, ChatTurnRequest
+    from fund_agent.service.prompt_composer import PromptComposer
+    from fund_agent.service.scene_config import INTERACTIVE_SCENE_CONFIG
+    from fund_agent.service.investment_guard import contains_investment_advice
+
+    template_dir = Path(__file__).parent.parent / "service" / "prompts"
+    prompt_composer = PromptComposer(template_dir=template_dir)
+    chat_service = ChatService(
+        session_store=session_store,
+        prompt_composer=prompt_composer,
+        scene_config=INTERACTIVE_SCENE_CONFIG,
+    )
+
+    print(f"\n已选择 {selected_year} 年年报。输入问题开始对话，/help 查看命令，exit 退出。", file=stdout)
+
+    while True:
+        try:
+            user_input = input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n再见。", file=stdout)
+            break
+
+        command, text = _parse_repl_input(user_input)
+
+        if command == "exit":
+            print("再见。", file=stdout)
+            break
+        if command == "help":
+            _print_help(stdout)
+            continue
+        if command == "clear":
+            print("\033[2J\033[H", file=stdout, end="")  # ANSI 清屏
+            continue
+
+        if text is None:
+            continue
+
+        # 投资建议预检（用户输入）
+        if contains_investment_advice(text):
+            print("提示：您的输入包含投资建议关键词，请注意。", file=stdout)
+
+        # 调用 chat_turn
+        try:
+            result = chat_service.chat_turn(
+                ChatTurnRequest(
+                    session_id=session.session_id,
+                    user_text=text,
+                ),
+            )
+        except Exception as exc:
+            print(f"处理失败: {exc}", file=stderr)
+            continue
+
+        if result.investment_advice_detected:
+            print("[投资建议检测] 回答已拦截。", file=stdout)
+
+        print(result.answer, file=stdout)
+        print(file=stdout)
+
+    return SUCCESS_EXIT_CODE
+
+
+def _parse_repl_input(text: str) -> tuple[str | None, str | None]:
+    """解析 REPL 用户输入。
+
+    参数:
+        text: 用户输入的原始文本。
+
+    返回:
+        (command, text) 元组；command 为 None 表示普通文本，
+        text 为 None 表示空白输入。
+    """
+    stripped = text.strip()
+    if not stripped:
+        return None, None
+
+    # 内置退出命令
+    if stripped.lower() in ("exit", "quit"):
+        return "exit", None
+
+    # 斜杠命令
+    if stripped.startswith("/"):
+        parts = stripped[1:].split(maxsplit=1)
+        cmd = parts[0].lower()
+        arg = parts[1] if len(parts) > 1 else None
+
+        if cmd == "help":
+            return "help", None
+        if cmd == "clear":
+            return "clear", None
+        if cmd == "exit" or cmd == "quit":
+            return "exit", None
+        # 未知命令当普通文本
+        return None, stripped
+
+    # 普通对话文本
+    return None, stripped
+
+
+def _print_help(stdout: TextIO) -> None:
+    """输出帮助信息。"""
+    print("可用命令:", file=stdout)
+    print("  /help      显示帮助", file=stdout)
+    print("  /clear     清屏", file=stdout)
+    print("  exit, quit 退出对话", file=stdout)
+    print("  其他输入    作为问题发送给 LLM", file=stdout)
 
 
 def _write_classified_failure(failure: ToolFailure, stderr: TextIO) -> None:
