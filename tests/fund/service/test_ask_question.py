@@ -285,17 +285,18 @@ def test_ask_question_investment_advice_blocked(
 
     from fund_agent.service.extraction import FundReadingService
 
+    # 使用不触发 routing context 直返的问题，确保走 LLM 路径
     svc = FundReadingService(
         runner_factory=_make_runner_factory(
-            answer="强烈建议买入该基金，管理费较低。",
-            key_facts=("管理费",),
-            search_query="管理费",
+            answer="强烈建议买入该基金，基金经理张明管理能力突出。",
+            key_facts=("张明",),
+            search_query="基金经理",
         ),
     )
 
     result = svc.ask_question(AskQuestionRequest(
         document_id=_DOCUMENT_ID,
-        question="管理费",
+        question="基金经理是谁？",
         work_dir=tmp_path,
     ))
 

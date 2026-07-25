@@ -128,6 +128,13 @@ _SECTION_TITLE_PREFIX = "来源章节:"
 _TABLE_BLOCK_HEADER = "相关表格:"
 _FEE_RATES_QUERY = "费用"
 _FEE_RATE_PERIOD_YEAR = "year"
+
+_INVESTMENT_ADVICE_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "买入", "卖出", "建议加仓", "建议减仓", "推荐买入", "推荐卖出", "强烈建议",
+    }
+)
+_INVESTMENT_ADVICE_MESSAGE = "routing context 包含投资建议关键词，拒绝回答"
 _PERFORMANCE_RETURNS_QUERY = "净值增长率"
 _PERFORMANCE_RETURN_PERIOD_PAST_1_YEAR = "past_1_year"
 _PERFORMANCE_RETURN_PERIOD_TEXT = "过去一年"
@@ -842,6 +849,15 @@ class FundReadingService:
 
         # 如果路由上下文已包含完整数据，直接返回，不调用 LLM
         if routing_context and any(keyword in routing_context for keyword in ['股票名称', '持仓', '净值增长率', '管理费', '托管费']):
+            # 投资建议关键词检测：routing context 也必须过安全校验
+            if any(kw in routing_context for kw in _INVESTMENT_ADVICE_KEYWORDS):
+                return AskQuestionResult(
+                    answer="",
+                    citations=(),
+                    tool_trace=(),
+                    routing_trace=tuple(routing_trace),
+                    failure=ToolFailure(code="investment_advice_blocked", message=_INVESTMENT_ADVICE_MESSAGE),
+                )
             # 从路由上下文提取答案
             answer = routing_context
             # 从 routing_trace 提取 citations
