@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
 
-from fund_agent.agent import ChatResponse, FakeLlmClient, FinalAnswer, LlmToolLoopRunner, ToolCall, ToolResult
+from fund_agent.agent import ChatResponse, FakeLlmClient, FinalAnswer, LlmToolLoopRunner, TokenUsage, ToolCall, ToolResult
 from fund_agent.fund.document_tools.constants import FailureCode, LocatorKind, ReportType, SourceKind, ToolName
 from fund_agent.fund.document_tools.docling_store import DoclingDocumentStore
 from fund_agent.fund.document_tools.models import Citation, Locator, ReportIdentity, SearchResult, TableSummary, ToolFailure
@@ -856,3 +856,101 @@ def test_dedup_preserves_tool_results_in_order(tmp_path: Path) -> None:
     # final answer 应该成功（citations 来自缓存的 read_section result）
     assert len(result.citations) >= 1
     assert result.citations[0].locator.section_ref is not None
+
+
+class TestForceAnswerDegradation:
+    """max_steps 耗尽时 force_answer 降级策略测试。"""
+
+    def test_max_steps_exhausted_returns_evidence_not_error(self, tmp_path: Path) -> None:
+        """max_steps=1 且 LLM 一直调用工具不给 FinalAnswer → 用已收集证据拼成回答。"""
+        service = _service(tmp_path)
+        identity = _identity()
+
+        # LLM 一直调用 search_document，不给 FinalAnswer；max_steps=2 → 执行 2 步就耗尽
+        # 用 max_steps=2 因为 force_answer 需要至少 1 个成功的 tool_result
+        def always_search(doc: str, q: str, tr: tuple) -> ChatResponse:
+            return ChatResponse(
+                step=ToolCall(tool_name=ToolName.SEARCH_DOCUMENT, document_id=doc, query="基金经理"),
+                usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+            )
+
+        class AlwaysSearchLlm:
+            def next_step(self, **kwargs):
+                return always_search(kwargs["document_id"], kwargs["query"], kwargs["tool_results"])
+
+        runner = LlmToolLoopRunner(
+            tool_service=service,
+            llm_client=AlwaysSearchLlm(),
+            max_steps=2,
+        )
+        result = runner.run(document_id=identity.document_id, query="基金经理")
+
+        # 应该成功返回证据，不报错
+        assert result.failure is None
+        assert result.answer != ""
+        assert len(result.tool_trace) > 0
+
+    def test_max_steps_exhausted_no_evidence_returns_error(self, tmp_path: Path) -> None:
+        """max_steps 耗尽且无任何 tool_results → 返回 unavailable 错误。"""
+        service = _service(tmp_path)
+        identity = _identity()
+
+        # LLM 一直返回未知工具，每次都 fail
+        def always_unknown(doc: str, q: str, tr: tuple) -> ChatResponse:
+            return ChatResponse(
+                step=ToolCall(tool_name="unknown_tool", document_id=doc, query="test"),
+                usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+            )
+
+        class AlwaysUnknownLlm:
+            def next_step(self, **kwargs):
+                return always_unknown(kwargs["document_id"], kwargs["query"], kwargs["tool_results"])
+
+        runner = LlmToolLoopRunner(
+            tool_service=service,
+            llm_client=AlwaysUnknownLlm(),
+            max_steps=1,
+        )
+        result = runner.run(document_id=identity.document_id, query="test")
+
+        # 无证据 → 仍然报错
+        assert result.failure is not None
+        assert result.failure.code == FailureCode.UNAVAILABLE
+
+    def test_force_answer_aggregates_citations(self, tmp_path: Path) -> None:
+        """force_answer 应聚合所有 tool_results 的 citations。"""
+        service = _service(tmp_path)
+        identity = _identity()
+
+        call_count = 0
+
+        def search_then_read(doc: str, q: str, tr: tuple) -> ChatResponse:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return ChatResponse(
+                    step=ToolCall(tool_name=ToolName.SEARCH_DOCUMENT, document_id=doc, query="基金经理"),
+                    usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+                )
+            # 第二次调用 read_section
+            return ChatResponse(
+                step=ToolCall(tool_name=ToolName.READ_SECTION, document_id=doc, section_ref="section-0000"),
+                usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+            )
+
+        class SearchThenReadLlm:
+            def next_step(self, **kwargs):
+                return search_then_read(kwargs["document_id"], kwargs["query"], kwargs["tool_results"])
+
+        runner = LlmToolLoopRunner(
+            tool_service=service,
+            llm_client=SearchThenReadLlm(),
+            max_steps=3,
+        )
+        result = runner.run(document_id=identity.document_id, query="基金经理")
+
+        # 应该成功返回证据
+        assert result.failure is None
+        assert result.answer != ""
+        # citations 应该来自 tool_results
+        assert len(result.citations) > 0

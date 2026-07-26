@@ -100,3 +100,32 @@ class TestProjectForLlm:
         llm_view = project_for_llm(result)
         assert llm_view["x"] == 1
         assert llm_view["truncation"] is None
+
+
+class TestProjectForLlmBudget:
+    """project_for_llm budget 参数测试。"""
+
+    def test_budget_injected_on_success(self):
+        """budget 非 None 时注入 tool_calls_remaining。"""
+        result = ToolResult.success(value={"data": "test"})
+        llm_view = project_for_llm(result, budget=5)
+        assert llm_view["tool_calls_remaining"] == 5
+
+    def test_budget_injected_on_error(self):
+        """错误结果也注入 budget。"""
+        result = ToolResult.error(code="unavailable", message="暂不可用")
+        llm_view = project_for_llm(result, budget=3)
+        assert llm_view["tool_calls_remaining"] == 3
+        assert llm_view["error"] == "unavailable"
+
+    def test_budget_none_not_injected(self):
+        """budget=None 时不出现 tool_calls_remaining。"""
+        result = ToolResult.success(value="test")
+        llm_view = project_for_llm(result)
+        assert "tool_calls_remaining" not in llm_view
+
+    def test_budget_zero(self):
+        """budget=0 时注入 0。"""
+        result = ToolResult.success(value="test")
+        llm_view = project_for_llm(result, budget=0)
+        assert llm_view["tool_calls_remaining"] == 0

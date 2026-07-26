@@ -76,6 +76,7 @@ class AgentRunResult:
     citations: tuple[Citation, ...]
     tool_trace: tuple[ToolTraceEntry, ...]
     failure: ToolFailure | None = None
+    token_usage: object | None = None  # TokenUsage | None，避免循环导入
 
 
 class MinimalFundDocumentAgent:

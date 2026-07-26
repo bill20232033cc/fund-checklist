@@ -70,12 +70,13 @@ class ToolResult:
         )
 
 
-def project_for_llm(result: ToolResult) -> dict:
+def project_for_llm(result: ToolResult, *, budget: int | None = None) -> dict:
     """生成 ToolResult 的 LLM-facing 投影。
 
     - ok=True + value 是 dict → {**value, "truncation": ...}
     - ok=True + value 是 str → {"content": value, "truncation": ...}
     - ok=False → {"error": code, "message": message}
+    - budget 非 None → 追加 {"tool_calls_remaining": budget}
 
     内部字段 (ok / error_code / error_message) 不暴露给 LLM。
     """
@@ -84,6 +85,10 @@ def project_for_llm(result: ToolResult) -> dict:
         truncation = result.truncation
         if isinstance(value, dict):
             projected: dict = {**value, "truncation": truncation}
-            return projected
-        return {"content": value, "truncation": truncation}
-    return {"error": result.error_code, "message": result.error_message}
+        else:
+            projected = {"content": value, "truncation": truncation}
+    else:
+        projected = {"error": result.error_code, "message": result.error_message}
+    if budget is not None:
+        projected["tool_calls_remaining"] = budget
+    return projected

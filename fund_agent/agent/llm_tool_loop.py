@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from typing import Protocol, TypeAlias
 
 from fund_agent.agent.tool_loop import (
@@ -24,6 +24,8 @@ from fund_agent.fund.document_tools.models import (
     ToolFailure,
 )
 from fund_agent.agent.stream_events import StreamEvent, StreamEventType
+from fund_agent.agent.context_budget import ContextBudgetState
+from fund_agent.agent.tool_result import ToolResult as ToolResultEnvelope, project_for_llm
 from fund_agent.fund.document_tools.service import FundDocumentToolService
 
 ControlledToolOutput: TypeAlias = (
@@ -290,6 +292,7 @@ class LlmToolLoopRunner:
         llm_client: LlmClientProtocol,
         max_steps: int = _MAX_LLM_STEPS,
         aggregate_handler: Callable[..., AggregateMultiYearAnnualPerformanceResult] | None = None,
+        budget: ContextBudgetState | None = None,
     ) -> None:
         """初始化受控 LLM tool loop runner。"""
 
@@ -297,6 +300,7 @@ class LlmToolLoopRunner:
         self._llm_client = llm_client
         self._max_steps = max_steps
         self._aggregate_handler = aggregate_handler
+        self._budget = budget
 
     def run(self, *, document_id: str, query: str) -> AgentRunResult:
         """运行 injected LLM 工具调用循环。
@@ -315,6 +319,8 @@ class LlmToolLoopRunner:
         trace: list[ToolTraceEntry] = []
         tool_results: list[ToolResult] = []
         seen_calls: dict[tuple, ToolResult] = {}
+        total_usage = TokenUsage()
+        budget = self._budget
         for _ in range(self._max_steps):
             try:
                 chat_response = self._llm_client.next_step(
@@ -323,13 +329,18 @@ class LlmToolLoopRunner:
                     tool_results=tuple(tool_results),
                 )
             except LlmClientFailure as exc:
-                return _failed_result(tuple(trace), exc.code, exc.safe_message)
+                return _failed_result(tuple(trace), exc.code, exc.safe_message, token_usage=total_usage)
             except Exception:
-                return _failed_result(tuple(trace), FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE)
+                return _failed_result(tuple(trace), FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE, token_usage=total_usage)
+
+            if chat_response.usage is not None:
+                total_usage += chat_response.usage
+                if budget is not None:
+                    budget = budget.consume(chat_response.usage.total_tokens)
 
             step = chat_response.step
             if isinstance(step, FinalAnswer):
-                return _final_result(step, tuple(tool_results), tuple(trace))
+                return _final_result(step, tuple(tool_results), tuple(trace), token_usage=total_usage)
             if isinstance(step, ToolCall):
                 call_key = _dedup_key(step)
                 if call_key in seen_calls:
@@ -337,13 +348,13 @@ class LlmToolLoopRunner:
                     continue
                 tool_result = self._invoke_tool_call(step, expected_document_id=document_id, trace=trace)
                 if isinstance(tool_result, ToolFailure):
-                    return _failed_result(tuple(trace), tool_result.code, tool_result.message)
+                    return _failed_result(tuple(trace), tool_result.code, tool_result.message, token_usage=total_usage)
                 tool_results.append(tool_result)
                 seen_calls[call_key] = tool_result
                 continue
-            return _failed_result(tuple(trace), FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE)
+            return _failed_result(tuple(trace), FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE, token_usage=total_usage)
 
-        return _failed_result(tuple(trace), FailureCode.UNAVAILABLE, _STEP_LIMIT_MESSAGE)
+        return _force_answer_from_evidence(tuple(trace), tuple(tool_results), token_usage=total_usage)
 
     def run_stream(self, *, document_id: str, query: str) -> Iterator[StreamEvent]:
         """运行 LLM 工具调用循环并产出 StreamEvent 流。
@@ -365,6 +376,8 @@ class LlmToolLoopRunner:
         trace: list[ToolTraceEntry] = []
         tool_results: list[ToolResult] = []
         seen_calls: dict[tuple, ToolResult] = {}
+        total_usage = TokenUsage()
+        budget = self._budget
         for _ in range(self._max_steps):
             try:
                 chat_response = self._llm_client.next_step(
@@ -387,9 +400,14 @@ class LlmToolLoopRunner:
                 )
                 return
 
+            if chat_response.usage is not None:
+                total_usage += chat_response.usage
+                if budget is not None:
+                    budget = budget.consume(chat_response.usage.total_tokens)
+
             step = chat_response.step
             if isinstance(step, FinalAnswer):
-                final = _final_result(step, tuple(tool_results), tuple(trace))
+                final = _final_result(step, tuple(tool_results), tuple(trace), token_usage=total_usage)
                 if final.failure is not None:
                     yield StreamEvent(
                         type=StreamEventType.ERROR,
@@ -465,11 +483,63 @@ class LlmToolLoopRunner:
             )
             return
 
-        yield StreamEvent(
-            type=StreamEventType.ERROR,
-            payload={"code": FailureCode.UNAVAILABLE.value, "message": _STEP_LIMIT_MESSAGE},
-            sequence=seq,
-        )
+        # max_steps 耗尽：用已收集证据拼成回答（降级）
+        force_result = _force_answer_from_evidence(tuple(trace), tuple(tool_results), token_usage=total_usage)
+        if force_result.failure:
+            yield StreamEvent(
+                type=StreamEventType.ERROR,
+                payload={"code": force_result.failure.code.value, "message": force_result.failure.message},
+                sequence=seq,
+            )
+        else:
+            for delta in force_result.answer:
+                seq += 1
+                yield StreamEvent(
+                    type=StreamEventType.CONTENT_DELTA,
+                    payload={"delta": delta},
+                    sequence=seq,
+                )
+            seq += 1
+            yield StreamEvent(
+                type=StreamEventType.METADATA,
+                payload={
+                    "citations": [asdict(c) for c in force_result.citations],
+                    "tool_trace": [asdict(t) for t in force_result.tool_trace],
+                },
+                sequence=seq,
+            )
+            seq += 1
+            yield StreamEvent(
+                type=StreamEventType.DONE,
+                payload={},
+                sequence=seq,
+            )
+
+    @staticmethod
+    def wrap_results_for_llm(
+        results: tuple[ToolResult, ...],
+        *,
+        budget: int | None = None,
+    ) -> list[dict]:
+        """将 runner ToolResult 列表转换为新信封格式的 LLM 投影。
+
+        每个结果经 ToolResultEnvelope.success() 包裹后通过 project_for_llm() 投射，
+        附加可选的 budget 信息。
+
+        参数:
+            results: runner 收集的旧 ToolResult 列表。
+            budget: 可选的剩余调用预算。
+
+        返回:
+            LLM-facing 信封投影 dict 列表。
+        """
+        projected: list[dict] = []
+        for r in results:
+            envelope = ToolResultEnvelope.success(
+                value={"tool_name": r.tool_name.value, "evidence": r.evidence_text},
+            )
+            projected.append(project_for_llm(envelope, budget=budget))
+        return projected
 
     def _invoke_tool_call(
         self,
@@ -566,6 +636,8 @@ def _final_result(
     final_answer: FinalAnswer,
     tool_results: tuple[ToolResult, ...],
     trace: tuple[ToolTraceEntry, ...],
+    *,
+    token_usage: TokenUsage | None = None,
 ) -> AgentRunResult:
     """校验最终回答证据与 citation 后构造 AgentRunResult。"""
 
@@ -574,14 +646,14 @@ def _final_result(
     answer_text = final_answer.answer
     for keyword in _INVESTMENT_ADVICE_KEYWORDS:
         if keyword in answer_text:
-            return _failed_result(trace, FailureCode.UNAVAILABLE, _INVESTMENT_ADVICE_MESSAGE)
+            return _failed_result(trace, FailureCode.UNAVAILABLE, _INVESTMENT_ADVICE_MESSAGE, token_usage=token_usage)
 
     evidence_texts = tuple(result.evidence_text for result in tool_results if result.evidence_text.strip())
     if not evidence_texts:
-        return _failed_result(trace, FailureCode.UNAVAILABLE, _NO_EVIDENCE_MESSAGE)
+        return _failed_result(trace, FailureCode.UNAVAILABLE, _NO_EVIDENCE_MESSAGE, token_usage=token_usage)
 
     if not final_answer.citations:
-        return _failed_result(trace, FailureCode.UNAVAILABLE, _MISSING_CITATION_MESSAGE)
+        return _failed_result(trace, FailureCode.UNAVAILABLE, _MISSING_CITATION_MESSAGE, token_usage=token_usage)
 
     citation_evidence = tuple(
         (_citation_key(citation), result.evidence_text)
@@ -594,7 +666,7 @@ def _final_result(
     if not controlled_citation_keys or any(
         _citation_key(citation) not in controlled_citation_keys for citation in final_answer.citations
     ):
-        return _failed_result(trace, FailureCode.UNAVAILABLE, _MISSING_CITATION_MESSAGE)
+        return _failed_result(trace, FailureCode.UNAVAILABLE, _MISSING_CITATION_MESSAGE, token_usage=token_usage)
 
     if final_answer.key_facts:
         for key_fact in final_answer.key_facts:
@@ -602,13 +674,14 @@ def _final_result(
             if not fact or fact not in final_answer.answer or not any(
                 key in final_citation_keys and fact in evidence for key, evidence in citation_evidence
             ):
-                return _failed_result(trace, FailureCode.UNAVAILABLE, _UNSUPPORTED_FACT_MESSAGE)
+                return _failed_result(trace, FailureCode.UNAVAILABLE, _UNSUPPORTED_FACT_MESSAGE, token_usage=token_usage)
 
     return AgentRunResult(
         answer=final_answer.answer,
         citations=tuple(_public_citation(citation) for citation in final_answer.citations),
         tool_trace=trace,
         failure=None,
+        token_usage=token_usage,
     )
 
 
@@ -788,6 +861,8 @@ def _failed_result(
     trace: tuple[ToolTraceEntry, ...],
     code: FailureCode,
     message: str,
+    *,
+    token_usage: TokenUsage | None = None,
 ) -> AgentRunResult:
     """构造 fail-closed 的 AgentRunResult。"""
 
@@ -796,8 +871,46 @@ def _failed_result(
         citations=(),
         tool_trace=trace,
         failure=ToolFailure(code=code, message=message),
+        token_usage=token_usage,
     )
 
+
+
+
+def _force_answer_from_evidence(
+    trace: tuple[ToolTraceEntry, ...],
+    tool_results: tuple[ToolResult, ...],
+    *,
+    token_usage: TokenUsage | None = None,
+) -> AgentRunResult:
+    """max_steps 耗尽时，用已收集的 tool_results 拼成回答（降级策略）。
+
+    不报错，返回已收集的证据文本作为回答。
+    citation 从所有 tool_results 中聚合（用 _citation_key 去重）。
+    """
+    evidence_parts: list[str] = []
+    seen_keys: set[tuple] = set()
+    unique_citations: list[Citation] = []
+    for result in tool_results:
+        if result.evidence_text.strip():
+            evidence_parts.append(result.evidence_text)
+        for citation in result.citations:
+            key = _citation_key(citation)
+            if key not in seen_keys:
+                seen_keys.add(key)
+                unique_citations.append(citation)
+
+    if not evidence_parts:
+        return _failed_result(trace, FailureCode.UNAVAILABLE, _STEP_LIMIT_MESSAGE, token_usage=token_usage)
+
+    answer = "\n\n".join(evidence_parts)
+    return AgentRunResult(
+        answer=answer,
+        citations=tuple(unique_citations),
+        tool_trace=trace,
+        failure=None,
+        token_usage=token_usage,
+    )
 
 def _citation_key(citation: Citation) -> tuple[str, str, str | None, str | None, int | None]:
     """构造 citation 身份键，避免 final answer 伪造 citation。"""
