@@ -351,6 +351,8 @@ class LlmToolLoopRunner:
                     return _failed_result(tuple(trace), tool_result.code, tool_result.message, token_usage=total_usage)
                 tool_results.append(tool_result)
                 seen_calls[call_key] = tool_result
+                if budget is not None:
+                    tool_results = _cap_tool_results(tool_results, budget)
                 continue
             return _failed_result(tuple(trace), FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE, token_usage=total_usage)
 
@@ -463,6 +465,8 @@ class LlmToolLoopRunner:
                     return
                 tool_results.append(tool_result)
                 seen_calls[call_key] = tool_result
+                if budget is not None:
+                    tool_results = _cap_tool_results(tool_results, budget)
                 yield StreamEvent(
                     type=StreamEventType.TOOL_EVENT,
                     payload={
@@ -875,6 +879,36 @@ def _failed_result(
     )
 
 
+
+
+def _cap_tool_results(
+    tool_results: list[ToolResult],
+    budget: ContextBudgetState,
+) -> list[ToolResult]:
+    """当预算超过硬限制时按比例截断工具结果的 evidence_text。"""
+    if not budget.is_above_hard_limit() or not tool_results:
+        return tool_results
+
+    total_chars = sum(len(r.evidence_text) for r in tool_results)
+    remaining = budget.remaining_budget
+    if remaining <= 0 or total_chars <= 0:
+        return []
+
+    result: list[ToolResult] = []
+    for r in tool_results:
+        allocated = max(0, int(len(r.evidence_text) * remaining / total_chars))
+        if allocated >= len(r.evidence_text):
+            result.append(r)
+        elif allocated > 0:
+            result.append(
+                ToolResult(
+                    tool_name=r.tool_name,
+                    result=r.result,
+                    citations=(),
+                    evidence_text=r.evidence_text[:allocated],
+                )
+            )
+    return result
 
 
 def _force_answer_from_evidence(
