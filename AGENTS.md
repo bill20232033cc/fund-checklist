@@ -36,15 +36,14 @@ PDF
  -> 三层审计管道 (程序+LLM+复核，4 类 22 项)
 ```
 
-已实现的 CLI 入口：`read` / `multi-year` / `import` / `holdings` / `download` / `allocation` / `fees` / `audit` / `deep-audit` / `generate` / `ask`。
-Phase 7 将新增：`interactive`。
+已实现的 CLI 入口：`read` / `multi-year` / `import` / `holdings` / `download` / `allocation` / `fees` / `audit` / `deep-audit` / `generate` / `ask` / `interactive`。
 
 验收约束（适用于所有阶段）：
 - 不接受仅 Service / ToolService 层测试；任何阶段的验收必须包含 Host / Agent loop 或 CLI 端到端 smoke。
 
-当前已知能力差距（来自 dayu-agent 对标研究，2026-07-11），以下能力当前不存在，Agent 不得假装具备：
-- **多轮对话**：无 interactive mode，无会话记忆（Phase 7 将解决）
-- **上下文治理**：无 budget/truncation/compaction（Phase 7 将解决）
+当前已知能力差距（来自 dayu-agent 对标研究，2026-07-11）：
+- **多轮对话**：✅ Phase 7 已完成（`interactive` 子命令，会话持久化 + 上下文记忆）
+- **上下文治理**：✅ Phase 7 已完成（Context Budget 基础 + Episode Summary），ContextBudget 未接入 runner（Phase 7.1 待完成）
 - **联网搜索**：无法获取实时市场数据
 
 Phase 5 已完成（2026-07-24）：
@@ -55,15 +54,20 @@ Phase 6 已完成（2026-07-22）：
 - **模板框架适配**：preferred_lens 接入 generate 流程
 - **基金类型感知**：评分框架 fund_type 感知（主动 6 指标 135→100 / 被动 3 指标 100 分制 / 债券 5 指标）
 
-Phase 7 已裁决（2026-07-25），待启动：
-- **多轮对话**：`interactive` 子命令，支持会话持久化和上下文记忆
-- **上下文治理**：Context Budget，支持长对话不超限
+Phase 7 已完成（2026-07-26）：
+- **多轮对话**：`interactive` 子命令，支持会话持久化、上下文记忆、会话恢复（--label）
+- **上下文治理**：Context Budget 基础 + Episode Summary 异步压缩
 - **Prompt 路由**：Scene Config + Fragments + Context Slots，对齐 Dayu
-- **7X**：ToolResult 统一信封 + ToolExecutionContext（agent 层工具返回标准化）
+- **7X**：ToolResult 统一信封 + ToolExecutionContext
+- **LLM 工具调用链路**：routing context 直返 + prompt search→read→cite 策略 + tool call 去重 + extra 字段解析
+- 真实 LLM 验证通过（deepseek-v4-flash，ask + interactive）
 
 LLM provider 已支持 DeepSeek 与 Mimo（OpenAI-compatible adapter）；暂不需要接入 Gemini/OpenAI/Anthropic 等其他 provider。
 
-这些差距将在后续 phase 中按优先级解决，不影响当前已实现功能的使用。
+Phase 7.1 已裁决（2026-07-26），待启动。集成补完 + Dayu 场景借鉴：
+- **集成补完**：ToolResult 信封接入 runner、ContextBudget 接入 runner、force_answer 降级、tool_calls_remaining 信号注入
+- **Dayu 场景借鉴**（除 wechat）：regenerate（整章重建）、repair（局部修复）、fix（占位符补强）、decision（研究决策综合）、conversation_compaction（会话摘要压缩）
+- 详见 `docs/implementation-control.md` Phase 7.1 节
 
 ## 硬边界
 

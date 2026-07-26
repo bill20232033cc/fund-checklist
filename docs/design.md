@@ -1428,8 +1428,9 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 ### Phase 7：多轮对话 + 会话记忆 + 上下文治理 + Prompt 路由
 
-> 裁决时间：2026-07-25 | 状态：🔵 待启动
+> 裁决时间：2026-07-25 | 完成时间：2026-07-26 | 状态：✅ 已完成
 > 计划文件：`.sisyphus/plans/phase7-interactive.md`
+> 补完计划：`.sisyphus/plans/phase7-completion.md`（Phase 7.1 承接）
 
 **裁决汇总**：17 项裁决，详见计划文件。
 
@@ -1477,7 +1478,7 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 
 - **P1-3**：提取 compute_signal_judgment / compute_risk_checklist 共享评分 helper。
 - **extraction.py 二次拆分**：当前 5931 行。signal_scoring.py（439 行）已完成一次拆分；残留 7 个评分/风险函数（约 450 行）待迁移。
-  - 排期：Phase 7 完成后执行（理由：Phase 7 新增 Session/Scene/ContextBudget，会产生新的 import 依赖；并行做会产生 merge 冲突）。
+  - 排期：Phase 7.1 后执行（理由：Phase 7.1 可能新增 import 依赖）。
   - 执行顺序：(1) 移 infer_fund_type + _next_tier_up/down + _compute_threshold_events 到 signal_scoring.py（消除循环依赖）(2) 移 compute_signal_judgment + 3 个 _compute_*_signal 到 signal_scoring.py (3) 新建 risk_assessment.py，移 STRESS_THRESHOLDS + compute_risk_checklist + compute_stress_test + _compute_ch6_stress_test (4) 更新 5 个文件的 import（extraction.py、audit_pipeline.py、__init__.py、chapter_generator.py、3 个测试文件）
   - 预期收益：extraction.py 减少约 450 行（5931→5480），评分逻辑完全独立可测试。
 **Slice 16C**：Ch0 升级/降级阈值事件 + 一句话产品定义。从 Ch7 信号反推 Ch0 封面。✅ 已完成。含 tier-delta 阈值事件算法 + 确定性产品定义。

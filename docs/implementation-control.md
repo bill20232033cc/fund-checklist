@@ -3,7 +3,7 @@
 更新时间：2026-07-25
 当前阶段：`FUND_ANALYSIS_ASSISTANT`
 当前角色：control / CIC-lite controller
-当前目标：Phase 7 多轮对话 + 会话记忆 — 已裁决（2026-07-25）。
+当前目标：Phase 7.1 集成补完 + Dayu 场景借鉴 — 已裁决（2026-07-26）。Phase 7 已完成。
 关联文档：AGENTS.md（执行规则）、docs/design.md（设计决策）
 
 ## 已完成研究报告
@@ -2065,10 +2065,11 @@ done
 
 ## Phase 7：多轮对话 + 会话记忆 + 上下文治理 + Prompt 路由
 
-> 裁决时间：2026-07-25
+> 裁决时间：2026-07-25 | 完成时间：2026-07-26
 > 前置条件：Phase 5 ✅（2026-07-24 完成）、Phase 6 ✅（2026-07-22 完成）
 > 设计来源：`docs/agent-evolution-design.md` §2 + dayu-agent 场景研究
 > 计划文件：`.sisyphus/plans/phase7-interactive.md`
+> 补完计划：`.sisyphus/plans/phase7-completion.md`（10 项集成缺口，Phase 7.1 承接）
 
 ### Phase 7 裁决 Gate
 
@@ -2081,23 +2082,23 @@ done
 
 | Slice | 内容 | 状态 |
 |-------|------|------|
-| **7A** | Session 数据模型 + 持久化（filesystem JSON） | 待启动 |
-| **7X** | ToolResult 统一信封 + ToolExecutionContext | 待启动 |
-| **7B** | FundReadingService.resolve_by_fund_code() | 无 |
-| **7C** | 统一 INVESTMENT_ADVICE_KEYWORDS | 无 |
-| **7D** | DeepSeekLlmClient token usage 追踪 | 无 |
-| **7E** | PromptComposer 升级（fragment assembly + contribution injection） | 无 |
-| **7F** | Scene Config + Fragment 模板 + Prompt Contributions | 依赖 7E |
-| **7G** | Service 层 chat_turn use case | 依赖 7A, 7B, 7F |
-| **7H** | Host 多轮会话托管 | 依赖 7A, 7X |
-| **7I** | CLI interactive 子命令（prompt_toolkit + rich） | 依赖 7B, 7F |
-| **7J** | Integration wire-up（chat_turn → Host → CLI） | 依赖 7G, 7H, 7I, 7X |
-| **7K** | 会话恢复 + --label 支持 | 依赖 7A, 7I |
-| **7L** | Episode Summary（异步 LLM） | 依赖 7D, 7J |
-| **7M** | 上下文预算治理（Context Budget） | 依赖 7D, 7L, 7X |
-| **7N** | 扩展命令 + 多文档切换 | 依赖 7J |
-| **7O** | Rich Markdown 渲染 | 依赖 7J |
-| **7P** | 端到端验证 + 全量回归 | 依赖 7M, 7N, 7O |
+| **7A** | Session 数据模型 + 持久化（filesystem JSON） | ✅ 已完成 |
+| **7X** | ToolResult 统一信封 + ToolExecutionContext | ✅ 已完成 |
+| **7B** | FundReadingService.resolve_by_fund_code() | ✅ 已完成 |
+| **7C** | 统一 INVESTMENT_ADVICE_KEYWORDS | ✅ 已完成 |
+| **7D** | DeepSeekLlmClient token usage 追踪 | ✅ 已完成 |
+| **7E** | PromptComposer 升级（fragment assembly + contribution injection） | ✅ 已完成 |
+| **7F** | Scene Config + Fragment 模板 + Prompt Contributions | ✅ 已完成 |
+| **7G** | Service 层 chat_turn use case | ✅ 已完成 |
+| **7H** | Host 多轮会话托管 | ✅ 已完成 |
+| **7I** | CLI interactive 子命令（prompt_toolkit + rich） | ✅ 已完成 |
+| **7J** | Integration wire-up（chat_turn → Host → CLI） | ✅ 已完成 |
+| **7K** | 会话恢复 + --label 支持 | ✅ 已完成 |
+| **7L** | Episode Summary（异步 LLM） | ✅ 已完成 |
+| **7M** | 上下文预算治理（Context Budget） | ✅ 已完成 |
+| **7N** | 扩展命令 + 多文档切换 | ✅ 已完成 |
+| **7O** | Rich Markdown 渲染 | ✅ 已完成 |
+| **7P** | 端到端验证 + 全量回归 | ✅ 已完成 |
 
 ### Phase 7 总体验收标准
 
@@ -2164,3 +2165,122 @@ uv run pytest tests/fund/agent/test_stream_events.py   tests/fund/agent/test_llm
 uv run pytest tests/fund/ -v --tb=short
 ```
 
+### Phase 7 完成证据（2026-07-26）
+
+**Commit 列表**（18 commits pushed to origin/main）：
+- ca70e67 feat(phase7): ToolResult envelope + ToolExecutionContext
+- 1b614d1 feat(phase7): session data model + filesystem JSON persistence
+- 5a747b6 feat(phase7): fund code → documents resolution
+- 86af4df refactor(phase7): extract unified INVESTMENT_ADVICE_KEYWORDS
+- 7a284b4 feat(phase7): add token usage tracking
+- 67c923b feat(phase7): PromptComposer fragment assembly
+- 5ec7a95 feat(phase7): dual scene config + fragments + contributions
+- 57d3954 feat(phase7): Service layer chat_turn
+- aab9548 feat(phase7): Host multi-turn session lifecycle
+- 4b62ef8 feat(phase7): CLI interactive subcommand
+- b87cba5 feat(phase7): Wave 3 integration wire-up
+- 02d4e24 feat(phase7): Wave 3+4 session recovery + context budget + rich rendering
+- 2ca3421 fix(phase7): update test_llm_production_readiness.py for ChatResponse
+- b1d6215 fix(phase7): restore ask routing context direct-return path
+- 22d4ce7 fix(phase7): add routing context to interactive + tool_service wiring
+- 4ffcc78 fix(agent): prompt search→read→cite chain + parse extra + tool dedup
+
+**测试**：201 passed, 1 skipped（全量回归）
+**真实 LLM 验证**：
+- `ask` 单文档：管理费率 1.2% ✅
+- `interactive`：管理费率 1.2%、托管费 0.2% ✅
+- 模型：deepseek-v4-flash（default）
+
+**LLM 工具调用链路修复**：
+- root cause：prompt 缺陷（未指引 read_section）+ _parse_tool_call extra 字段缺失
+- 修复：prompt 4 步策略 + extra 字段提取 + tool call 去重
+- DS review 结论：模型 function calling 正常，问题在 prompt 引导不足
+
+**evidence 目录**：`.sisyphus/evidence/phase7-goal-011649/`
+
+
+## Phase 7.1：集成补完 + Dayu 场景借鉴
+
+> 裁决时间：2026-07-26
+> 前置条件：Phase 7 ✅（2026-07-26 完成）
+> 设计来源：`.sisyphus/plans/phase7-completion.md` + `docs/dayu-scenes-research.md`
+> 裁决文档：AGENTS.md Phase 7.1 节
+
+### Phase 7.1 裁决 Gate
+
+| Gate | 条件 | 状态 |
+|------|------|------|
+| Gate 1 | 10 项集成缺口 + 5 项 Dayu 场景写入本文件 | ✅ 本文档记录 |
+| Gate 2 | 裁决事项通过（force_answer / tool_calls_remaining / 投资建议检测 / SYSTEM_PROMPT） | ✅ 已裁决 |
+
+### 裁决记录
+
+| # | 裁决项 | 结论 | 理由 |
+|---|--------|------|------|
+| 1 | force_answer 降级行为 | **B：用已收集的 tool_results 直返** | max_steps 耗尽时 tool_results 已有数据，直返比再调 LLM 更可靠 |
+| 2 | tool_calls_remaining 注入方式 | **A：注入每个 tool result** | Dayu 方案，LLM 每步可见剩余预算，自主调整策略 |
+| 3 | routing context 投资建议检测 | **不补** | routing context 返回年报原始数据，不是投资建议 |
+| 4 | _SYSTEM_PROMPT 迁移 | **B：保持现状** | ask/interactive 输出格式不同，迁移风险高于收益 |
+
+### Phase 7.1a：集成补完（4 项 P0）
+
+| # | 内容 | 优先级 | 状态 |
+|---|------|--------|------|
+| 1 | ToolResult 信封接入 runner（包裹旧结果） | P0 | 待启动 |
+| 2 | ContextBudget 接入 runner（预算检查 + 工具结果裁剪） | P0 | 待启动 |
+| 3 | force_answer 降级（max_steps 耗尽时 tool_results 直返） | P0 | 待启动 |
+| 4 | tool_calls_remaining 信号注入 tool result | P0 | 待启动 |
+
+### Phase 7.1b：Dayu 场景借鉴（5 项）
+
+来源：`docs/dayu-scenes-research.md`，除 wechat 外全部借鉴。
+
+| # | 场景 | 描述 | 对齐现状 | 优先级 |
+|---|------|------|----------|--------|
+| 1 | **regenerate** | 基于审计反馈整章重建 | 当前 generate 失败只能全部重跑 | P1 |
+| 2 | **repair** | 审计发现小问题时最小必要局部修复 | 当前无局部修复能力 | P1 |
+| 3 | **fix** | 占位符补强（数据缺失时保留结构化占位符） | 当前数据缺失直接跳过 | P2 |
+| 4 | **decision** | 研究决策综合（继续研究/暂缓/放弃） | 当前 Ch7 有信号评分但无决策综合 | P2 |
+| 5 | **conversation_compaction** | 长对话上下文压缩 | Phase 7 已有 Episode Summary 基础 | P2 |
+
+### Phase 7.1 总体验收标准
+
+1. force_answer 降级验证：max_steps 耗尽时不报错，返回已收集的 tool_results
+2. tool_calls_remaining 生效：每个 tool result 包含剩余调用次数
+3. ContextBudget 接入 runner：工具结果超过硬阈值时被裁剪
+4. regenerate 场景：审计失败章节可单独重建
+5. repair 场景：审计小问题可局部修复
+6. 全量回归通过（≥250 tests）
+
+### Allowed Write Set
+
+| 文件 | 变更类型 |
+|------|---------|
+| `fund_agent/agent/llm_tool_loop.py` | 升级 — ToolResult 信封 + ContextBudget + force_answer + tool_calls_remaining |
+| `fund_agent/agent/tool_result.py` | 升级 — project_for_llm 接受 budget 参数 |
+| `fund_agent/service/chat_service.py` | 升级 — compaction 线程安全 |
+| `fund_agent/service/prompt_composer.py` | 升级 — regenerate/repair/fix scene prompt |
+| `fund_agent/service/prompts/scenes/` | **新增** — regenerate/repair/fix/decision scene 模板 |
+| `tests/fund/agent/test_tool_result.py` | 升级 — budget 注入测试 |
+| `tests/fund/agent/test_llm_tool_loop.py` | 升级 — force_answer + dedup + budget 测试 |
+| `tests/fund/service/test_session_models.py` | **新增** — session 模型测试 |
+| `docs/design.md` | 更新 — Phase 7.1 设计 |
+| `docs/implementation-control.md` | 更新 — Phase 7.1 执行面板 |
+| `AGENTS.md` | 更新 — Phase 7.1 状态 |
+
+### Stop Conditions
+
+- force_answer 降级破坏现有 ask 行为 → 停止
+- tool_calls_remaining 注入导致 LLM 输出格式异常 → 停止
+- ContextBudget 裁剪导致有效数据丢失 → 停止
+- regenerate/repair 场景引入新 hallucination → 停止
+
+### 验证命令
+
+```bash
+# Phase 7.1 核心测试
+uv run pytest tests/fund/agent/test_tool_result.py tests/fund/agent/test_llm_tool_loop.py tests/fund/agent/test_context_budget.py -v --tb=short
+
+# 全量回归
+uv run pytest tests/fund/ -v --tb=short
+```
