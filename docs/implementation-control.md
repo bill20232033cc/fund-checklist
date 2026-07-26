@@ -2167,7 +2167,7 @@ uv run pytest tests/fund/ -v --tb=short
 
 ### Phase 7 完成证据（2026-07-26）
 
-**Commit 列表**（18 commits pushed to origin/main）：
+**Commit 列表**（19 commits pushed to origin/main）：
 - ca70e67 feat(phase7): ToolResult envelope + ToolExecutionContext
 - 1b614d1 feat(phase7): session data model + filesystem JSON persistence
 - 5a747b6 feat(phase7): fund code → documents resolution
