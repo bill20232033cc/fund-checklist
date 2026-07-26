@@ -35,6 +35,7 @@ Post-MVP Slice 8A 已实现 fake/injected LLM tool-loop contract：
 - `LlmClientProtocol` 是注入式 client 最小协议；当前不连接 OpenAI、Claude 或其它外部模型 API。
 - `FakeLlmClient` 按测试脚本返回 `ToolCall` 或 `FinalAnswer`，用于验证 LLM 风格工具闭环。
 - `LlmToolLoopRunner` 执行 `ToolCall -> ToolResult -> FinalAnswer`，返回既有 `AgentRunResult`。
+- `run()` 和 `run_stream()` 对重复 (tool_name, arguments) 调用做去重，直接返回缓存 `ToolResult` 而非重新执行，防止 LLM search 后重复 search。
 - 允许工具固定为 `search_document`、`read_section`、`list_tables`、`read_table`、`get_excerpt`。
 - `ToolResult` 只由 `FundDocumentToolService` public tool result 构造，不读取 repository/private loader。
 - `FinalAnswer` 必须有非空 citation，citation 必须来自先前 section/table tool result。
@@ -51,6 +52,8 @@ Post-MVP Slice 8B 当前实现：
 - provider prompt/request 不得包含 raw PDF、raw Docling JSON、本地路径、cache path、repository/private loader、URL secret、parser private payload 或 `local_import_id`。
 - 默认测试不得联网、读取真实 key 或依赖真实 model 值。
 - provider key 缺失、auth、network、timeout、rate limit 映射为 `unavailable`；malformed JSON/schema parse failed 映射为 `llm_malformed_response`。
+- system prompt 明确要求 search→read_section→cite 链路：search 获取 section_ref，再用 read_section 读取完整章节内容，禁止猜测 section_ref 或 table_ref。
+- `_parse_tool_call` 将未知 arguments（如 fund_code、requested_years、annual_report_documents）自动收集到 `ToolCall.extra`，传递给 aggregate 等工具。
 - Slice 8B 不新增 `fund-checklist ask`，不做 streaming、Mimo / MiMo、多 provider matrix、prompt framework、richer QA/eval、自动报告、字段抽取或投资判断。
 
 Post-MVP Slice 8C 当前实现：

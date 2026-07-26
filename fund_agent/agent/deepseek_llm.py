@@ -31,9 +31,10 @@ _SYSTEM_PROMPT = (
     "你只能通过提供的基金年报 reading tools 取证。"
     "需要调用工具时使用 tool call。"
     "工具使用策略："
-    "1. 先用 search_document 查找相关章节"
-    "2. 如需读取表格，先用 list_tables 发现可用表格，再用 read_table 读取"
-    "3. 不要猜测 table_ref，必须从 list_tables 结果中获取"
+    "1. 先用 search_document 查找相关章节，获取 section_ref"
+    "2. 必须用 read_section 读取找到的 section_ref 对应的章节完整内容"
+    "3. 如需读取表格，先用 list_tables 发现可用表格，再用 read_table 读取"
+    "4. 不要猜测 section_ref 或 table_ref，必须从工具返回结果中获取"
     "最终回答必须返回 JSON: "
     '{"answer": string, "citations": Citation[], "key_facts": string[]}。'
     "不得请求 repository/private loader、raw PDF、raw Docling JSON、本地路径、cache path、"
@@ -629,6 +630,11 @@ def _parse_tool_call(tool_calls: Any) -> ToolCall:
         tool_name = function["name"]
         arguments = _parse_arguments(function["arguments"])
         document_id = _required_str(arguments, "document_id")
+        known_keys = {
+            "document_id", "query", "section_ref", "table_ref", "locator",
+            "max_results", "max_chars", "max_rows",
+        }
+        extra = {k: v for k, v in arguments.items() if k not in known_keys}
         return ToolCall(
             tool_name=_tool_name_or_raw(tool_name),
             document_id=document_id,
@@ -639,6 +645,7 @@ def _parse_tool_call(tool_calls: Any) -> ToolCall:
             max_results=_optional_int(arguments, "max_results"),
             max_chars=_optional_int(arguments, "max_chars"),
             max_rows=_optional_int(arguments, "max_rows"),
+            extra=extra if extra else None,
         )
     except (KeyError, IndexError, TypeError, ValueError) as exc:
         raise LlmClientFailure(FailureCode.LLM_MALFORMED_RESPONSE, _MALFORMED_MESSAGE) from exc

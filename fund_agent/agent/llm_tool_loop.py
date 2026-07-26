@@ -314,6 +314,7 @@ class LlmToolLoopRunner:
 
         trace: list[ToolTraceEntry] = []
         tool_results: list[ToolResult] = []
+        seen_calls: dict[tuple, ToolResult] = {}
         for _ in range(self._max_steps):
             try:
                 chat_response = self._llm_client.next_step(
@@ -330,10 +331,15 @@ class LlmToolLoopRunner:
             if isinstance(step, FinalAnswer):
                 return _final_result(step, tuple(tool_results), tuple(trace))
             if isinstance(step, ToolCall):
+                call_key = _dedup_key(step)
+                if call_key in seen_calls:
+                    tool_results.append(seen_calls[call_key])
+                    continue
                 tool_result = self._invoke_tool_call(step, expected_document_id=document_id, trace=trace)
                 if isinstance(tool_result, ToolFailure):
                     return _failed_result(tuple(trace), tool_result.code, tool_result.message)
                 tool_results.append(tool_result)
+                seen_calls[call_key] = tool_result
                 continue
             return _failed_result(tuple(trace), FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE)
 
@@ -358,6 +364,7 @@ class LlmToolLoopRunner:
 
         trace: list[ToolTraceEntry] = []
         tool_results: list[ToolResult] = []
+        seen_calls: dict[tuple, ToolResult] = {}
         for _ in range(self._max_steps):
             try:
                 chat_response = self._llm_client.next_step(
@@ -418,6 +425,10 @@ class LlmToolLoopRunner:
                 return
 
             if isinstance(step, ToolCall):
+                call_key = _dedup_key(step)
+                if call_key in seen_calls:
+                    tool_results.append(seen_calls[call_key])
+                    continue
                 yield StreamEvent(
                     type=StreamEventType.TOOL_EVENT,
                     payload={"phase": "call", "tool_name": str(step.tool_name)},
@@ -433,6 +444,7 @@ class LlmToolLoopRunner:
                     )
                     return
                 tool_results.append(tool_result)
+                seen_calls[call_key] = tool_result
                 yield StreamEvent(
                     type=StreamEventType.TOOL_EVENT,
                     payload={
@@ -687,6 +699,44 @@ def _coerce_tool_name(tool_name: ToolName | str) -> ToolName | None:
         return ToolName(str(tool_name))
     except ValueError:
         return None
+
+
+def _make_hashable(value: object) -> object:
+    """递归转换 value 为 hashable 类型。"""
+    if isinstance(value, dict):
+        return tuple(sorted((k, _make_hashable(v)) for k, v in value.items()))
+    if isinstance(value, (list, tuple)):
+        return tuple(_make_hashable(item) for item in value)
+    return value
+
+
+def _dedup_key(call: ToolCall) -> tuple:
+    """构造 tool call 去重键，用于检测 LLM 重复调用相同工具+参数。"""
+    locator_key = None
+    if call.locator is not None:
+        locator_key = (
+            call.locator.locator_kind.value,
+            call.locator.section_ref,
+            call.locator.table_ref,
+            call.locator.page_no,
+        )
+    extra_key = None
+    if call.extra is not None:
+        extra_key = tuple(sorted(
+            (k, _make_hashable(v)) for k, v in call.extra.items()
+        ))
+    return (
+        str(call.tool_name),
+        call.document_id,
+        call.query,
+        call.section_ref,
+        call.table_ref,
+        call.max_results,
+        call.max_chars,
+        call.max_rows,
+        locator_key,
+        extra_key,
+    )
 
 
 def _trace_arguments(call: ToolCall) -> dict[str, ToolArgumentValue]:

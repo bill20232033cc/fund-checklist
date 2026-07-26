@@ -17,6 +17,8 @@ from fund_agent.agent.deepseek_llm import (
     DeepSeekChatRequest,
     DeepSeekChatResponse,
     DeepSeekTransportUnavailable,
+    _SYSTEM_PROMPT,
+    _parse_tool_call,
     _tool_schemas,
 )
 from fund_agent.agent.llm_tool_loop import (
@@ -505,3 +507,82 @@ def _make_docling_store(document_id: str = "test-doc") -> DoclingDocumentStore:
     }
     json_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     return DoclingDocumentStore(identity=_identity(document_id), json_path=json_path)
+
+
+# ── Fix 1: system prompt search→read→cite chain ────────────────────────
+
+class TestSystemPromptToolStrategy:
+    def test_system_prompt_includes_read_section_step(self):
+        """_SYSTEM_PROMPT 必须包含 read_section 读取指引。"""
+        assert "read_section" in _SYSTEM_PROMPT
+        assert "必须用 read_section 读取" in _SYSTEM_PROMPT
+
+    def test_system_prompt_warns_against_guessing_section_ref(self):
+        """_SYSTEM_PROMPT 必须警告不要猜测 section_ref。"""
+        assert "不要猜测 section_ref" in _SYSTEM_PROMPT
+
+    def test_system_prompt_search_step_mentions_section_ref(self):
+        """search_document 步骤必须提到获取 section_ref。"""
+        assert "获取 section_ref" in _SYSTEM_PROMPT
+
+
+# ── Fix 2: _parse_tool_call extra field ─────────────────────────────────
+
+class TestParseToolCallExtra:
+    def test_extra_unknown_arguments_preserved(self):
+        """未知参数 fund_code / requested_years / annual_report_documents 保留在 extra 中。"""
+        tool_calls = [{
+            "function": {
+                "name": "aggregate_multi_year_annual_performance",
+                "arguments": json.dumps({
+                    "document_id": "test-doc",
+                    "fund_code": "000001",
+                    "requested_years": [2020, 2021, 2022],
+                    "annual_report_documents": [
+                        {"year": 2020, "document_id": "d1"},
+                        {"year": 2021, "document_id": "d2"},
+                    ],
+                    "share_class": "A",
+                }),
+            }
+        }]
+        result = _parse_tool_call(tool_calls)
+        assert result.extra is not None
+        assert result.extra["fund_code"] == "000001"
+        assert result.extra["requested_years"] == [2020, 2021, 2022]
+        assert result.extra["share_class"] == "A"
+        assert len(result.extra["annual_report_documents"]) == 2
+
+    def test_extra_empty_when_no_unknown_arguments(self):
+        """仅已知参数时 extra 为 None。"""
+        tool_calls = [{
+            "function": {
+                "name": "search_document",
+                "arguments": json.dumps({
+                    "document_id": "test-doc",
+                    "query": "基金经理",
+                }),
+            }
+        }]
+        result = _parse_tool_call(tool_calls)
+        assert result.extra is None
+
+    def test_extra_does_not_steal_known_keys(self):
+        """extra 不包含已知参数（document_id/query/section_ref/table_ref/locator/max_*）。"""
+        tool_calls = [{
+            "function": {
+                "name": "read_section",
+                "arguments": json.dumps({
+                    "document_id": "test-doc",
+                    "section_ref": "section-0001",
+                    "max_chars": 2000,
+                }),
+            }
+        }]
+        result = _parse_tool_call(tool_calls)
+        # 已知参数走自己的字段
+        assert result.document_id == "test-doc"
+        assert result.section_ref == "section-0001"
+        assert result.max_chars == 2000
+        # extra 不包含已知 key
+        assert result.extra is None

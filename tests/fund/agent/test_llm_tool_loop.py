@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
 
-from fund_agent.agent import FakeLlmClient, FinalAnswer, LlmToolLoopRunner, ToolCall, ToolResult
+from fund_agent.agent import ChatResponse, FakeLlmClient, FinalAnswer, LlmToolLoopRunner, ToolCall, ToolResult
 from fund_agent.fund.document_tools.constants import FailureCode, LocatorKind, ReportType, SourceKind, ToolName
 from fund_agent.fund.document_tools.docling_store import DoclingDocumentStore
 from fund_agent.fund.document_tools.models import Citation, Locator, ReportIdentity, SearchResult, TableSummary, ToolFailure
@@ -782,3 +782,77 @@ def test_fake_llm_aggregate_multi_year_no_leakage(tmp_path: Path) -> None:
     assert "texts" not in rendered
     assert "tables" not in rendered
     assert _identity().local_import_id not in rendered
+
+
+# ── Fix 3: tool call dedup ─────────────────────────────────────────────
+
+class _DuplicateToolCallClient:
+    """search → read_section → 重复 read_section → final answer。"""
+
+    def __init__(self, document_id: str) -> None:
+        self._document_id = document_id
+        self._step = 0
+        self._section_ref: str | None = None
+
+    def next_step(self, *, document_id, query, tool_results):
+        if self._step == 0:
+            self._step = 1
+            return ChatResponse(step=ToolCall(
+                tool_name=ToolName.SEARCH_DOCUMENT,
+                document_id=self._document_id,
+                query="基金经理",
+            ))
+        if self._step == 1:
+            self._step = 2
+            search_results = tool_results[-1].result
+            self._section_ref = search_results[0].section_ref
+            return ChatResponse(step=ToolCall(
+                tool_name=ToolName.READ_SECTION,
+                document_id=self._document_id,
+                section_ref=self._section_ref,
+            ))
+        if self._step == 2:
+            self._step = 3
+            return ChatResponse(step=ToolCall(
+                tool_name=ToolName.READ_SECTION,
+                document_id=self._document_id,
+                section_ref=self._section_ref,
+            ))
+        section_citation = tool_results[-1].citations[0]
+        return ChatResponse(step=FinalAnswer(
+            answer="基金经理张明负责本基金投资管理。",
+            citations=(section_citation,),
+            key_facts=("张明",),
+        ))
+
+
+def test_duplicate_tool_call_reuses_cached_result(tmp_path: Path) -> None:
+    """重复 (tool_name, arguments) 调用复用缓存结果，不重新执行。"""
+    runner = LlmToolLoopRunner(
+        tool_service=_service(tmp_path),
+        llm_client=_DuplicateToolCallClient(_identity().document_id),
+    )
+
+    result = runner.run(document_id=_identity().document_id, query="基金经理")
+
+    assert result.failure is None
+    assert "张明" in result.answer
+    # trace 记录 search_document + 第一次 read_section（第二次 read_section 去重跳过）
+    assert len(result.tool_trace) == 2
+    trace_names = tuple(entry.tool_name for entry in result.tool_trace)
+    assert trace_names == (ToolName.SEARCH_DOCUMENT, ToolName.READ_SECTION)
+
+
+def test_dedup_preserves_tool_results_in_order(tmp_path: Path) -> None:
+    """去重后 tool_results 保持顺序（缓存结果追加到正确位置）。"""
+    runner = LlmToolLoopRunner(
+        tool_service=_service(tmp_path),
+        llm_client=_DuplicateToolCallClient(_identity().document_id),
+    )
+
+    result = runner.run(document_id=_identity().document_id, query="基金经理")
+
+    assert result.failure is None
+    # final answer 应该成功（citations 来自缓存的 read_section result）
+    assert len(result.citations) >= 1
+    assert result.citations[0].locator.section_ref is not None
