@@ -186,6 +186,22 @@ class ToolResult:
 
 
 @dataclass(frozen=True)
+class ToolResultWithMeta:
+    """携带 remaining_budget 信息的 ToolResult 包装器。
+
+    参数:
+        result: 原始受控工具结果。
+        remaining_budget: 剩余调用预算；缺省为 None。
+
+    返回:
+        不可变包装器。
+    """
+
+    result: ToolResult
+    remaining_budget: int | None = None
+
+
+@dataclass(frozen=True)
 class FinalAnswer:
     """LLM 请求结束工具循环并提交最终回答。
 
@@ -227,6 +243,7 @@ class LlmClientProtocol(Protocol):
         document_id: str,
         query: str,
         tool_results: tuple[ToolResult, ...],
+        remaining_budget: int | None = None,
     ) -> ChatResponse:
         """返回下一步 LLM 行为（含 token usage）。"""
 
@@ -257,10 +274,11 @@ class FakeLlmClient:
         document_id: str,
         query: str,
         tool_results: tuple[ToolResult, ...],
+        remaining_budget: int | None = None,
     ) -> ChatResponse:
         """返回脚本中的下一步，包装为 ChatResponse。"""
 
-        del document_id, query
+        del document_id, query, remaining_budget
         if self._index >= len(self._steps):
             raise RuntimeError("fake llm steps exhausted")
         step = self._steps[self._index]
@@ -321,12 +339,13 @@ class LlmToolLoopRunner:
         seen_calls: dict[tuple, ToolResult] = {}
         total_usage = TokenUsage()
         budget = self._budget
-        for _ in range(self._max_steps):
+        for i in range(self._max_steps):
             try:
                 chat_response = self._llm_client.next_step(
                     document_id=document_id,
                     query=query,
                     tool_results=tuple(tool_results),
+                    remaining_budget=self._max_steps - i,
                 )
             except LlmClientFailure as exc:
                 return _failed_result(tuple(trace), exc.code, exc.safe_message, token_usage=total_usage)
@@ -380,12 +399,13 @@ class LlmToolLoopRunner:
         seen_calls: dict[tuple, ToolResult] = {}
         total_usage = TokenUsage()
         budget = self._budget
-        for _ in range(self._max_steps):
+        for i in range(self._max_steps):
             try:
                 chat_response = self._llm_client.next_step(
                     document_id=document_id,
                     query=query,
                     tool_results=tuple(tool_results),
+                    remaining_budget=self._max_steps - i,
                 )
             except LlmClientFailure as exc:
                 yield StreamEvent(
