@@ -166,28 +166,6 @@ class ChatService:
             self._scene_config, contributions=contributions
         )
 
-        # 3.5 Routing context 预取：用确定性 agent 先检索，命中则直返
-        if self._tool_service is not None and agent_result is None:
-            from fund_agent.agent import MinimalFundDocumentAgent
-            from fund_agent.host import MinimalHost as _MH
-            from fund_agent.service.extraction import _route_plan_for_query
-
-            route_plan = _route_plan_for_query(user_text)
-            context_parts: list[str] = []
-            det_host = _MH(MinimalFundDocumentAgent(self._tool_service))
-            for cq in route_plan.candidate_queries:
-                r = det_host.run(document_id=document_id, query=cq)
-                if r.failure is None and r.answer.strip():
-                    context_parts.append(f"[查询{cq}]\n{r.answer}")
-
-            routing_context = "\n\n".join(context_parts)
-            _DIRECT_KEYWORDS = [
-                '股票名称', '持仓', '净值增长率', '管理费', '托管费',
-                '基金名称', '基金类型', '基金经理', '费率', '前十大',
-            ]
-            if routing_context and any(kw in routing_context for kw in _DIRECT_KEYWORDS):
-                return ChatTurnResponse(answer=routing_context)
-
         # 4. 运行 agent loop（或使用注入结果）
         if agent_result is None:
             if llm_client is None:
