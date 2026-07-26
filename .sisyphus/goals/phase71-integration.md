@@ -86,7 +86,7 @@
 ### C. 回归与稳定性
 
 10. `uv run pytest tests/fund/ -v --tb=short` 全部通过（≥250 tests）。
-11. Phase 5/6/7 关键能力无回退（ask/read/generate/audit/interactive）。
+11. Phase 5/6/7 关键能力无回退（由全量回归 ≥250 tests 保证，含 ask/read/generate/audit/interactive 相关测试）。
 
 ---
 
@@ -98,6 +98,7 @@ uv run pytest tests/fund/agent/test_tool_result.py \
   tests/fund/agent/test_llm_tool_loop.py \
   tests/fund/agent/test_context_budget.py \
   tests/fund/agent/test_llm_production_readiness.py \
+  tests/fund/service/test_session_models.py \
   -v --tb=short
 ```
 
@@ -132,12 +133,9 @@ uv run fund-checklist interactive --fund-code 011649 --work-dir .fund_e2e_011649
 
 满足以下全部，`goal` 才算 PASS：
 
-1. 集成补完 4 项 P0 全部实现且测试通过
-2. force_answer 降级验证通过（不报错）
-3. tool_calls_remaining 信号注入验证通过
-4. 全量回归 PASS（≥250 tests）
-5. Phase 5/6/7 无回退
-6. Dayu 场景至少 regenerate + repair 实现且测试通过（fix/decision/compaction 可推迟）
+1. 集成补完 4 项 P0 全部实现且测试通过（含 force_answer 降级 + tool_calls_remaining 注入）
+2. 全量回归 PASS（≥250 tests，Phase 5/6/7 无回退）
+3. Dayu 场景至少 regenerate + repair 实现且测试通过（fix/decision/compaction 可推迟）
 
 ---
 
