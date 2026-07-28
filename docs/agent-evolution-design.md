@@ -1,6 +1,6 @@
 # fund-checklist Agent 能力演进方案
 
-> 设计时间：2026-07-15 | 最后更新：2026-07-24
+> 设计时间：2026-07-15 | 最后更新：2026-07-28
 > 文档定位：候选研究输入材料 + 已裁决能力记录
 > 设计目标：基于 dayu-agent 能力模式，为 fund-checklist 提供渐进式 Agent 能力候选方向
 > 关联文档：docs/design.md（设计真源）、docs/implementation-control.md（执行面板）、.sisyphus/plans/phase5-implementation.md（Phase 5 正式计划）
@@ -14,14 +14,34 @@
 
 | 能力维度 | fund-checklist | dayu-agent | 差距 |
 |----------|----------------|------------|------|
-| Agent 驱动方式 | 当前用户链路偏确定性；内部已有 `LlmToolLoopRunner`，但尚未成为用户问答入口 | LLM 自主决策 | 待定 |
-| 多轮对话 | 不支持 | interactive + WeChat | 🔴 高 |
-| 会话记忆 | 无 | 单总池 raw turn 回放 + episode summary（Durable Memory 尚未完整实现） | 🔴 高 |
-| 流式输出 | 无 | SSE 流式 | 🟡 中 |
-| 联网搜索 | 仅限本地 PDF | Tavily/Serper/Playwright | 🟡 中 |
-| 上下文治理 | 无 | 软上限压缩 + 硬上限重试 | 🟡 中 |
+| Agent 驱动方式 | `LlmToolLoopRunner` — LLM 自主决策工具调用（Phase 5 已完成） | LLM 自主决策 | ✅ 已对齐 |
+| 多轮对话 | `interactive` CLI 已实现（Phase 7），**但对话历史未注入 LLM context** | interactive + WeChat，历史完整注入 | 🟡 基础已通，核心管道缺失 |
+| 会话记忆 | Session 模型 + PinnedState + Turn + EpisodeSummary + SessionStore 已实现；**memory contribution 未接入 LLM** | 两层记忆（pinned + 统一池）+ `build_messages()` 四段注入 | 🟡 存储已通，注入未通 |
+| 流式输出 | StreamEvent + SSE 解析（Phase 5 已完成） | SSE 流式 | ✅ 已对齐 |
+| 联网搜索 | 仅限本地 PDF | Tavily/Serper/Playwright | 🟡 中（候选） |
+| 上下文治理 | ContextBudgetState 软/硬限制（Phase 7 已完成）；**跨轮预算治理未实现** | 软上限压缩 + 硬上限重试 + 预测性截断 | 🟡 基础已通，跨轮治理缺失 |
+| Prompt 装配 | SceneConfig + Fragments + Context Slots（Phase 7 已完成）；条件块支持有限 | SceneDefinition + PromptAssemblyPlan + 条件块 + PromptContributions | 🟡 基础已通，条件块缺失 |
+| 温度透传 | ✅ 已修复 — SceneConfig → DeepSeekLlmClient(temperature) | 模型级温度配置 | ✅ 已对齐 |
 
-### 0.2 设计约束
+### 0.2 架构定位（2026-07-28 DS Review 确认）
+
+> DS Review 结论：fund-checklist 当前架构是 **fail-closed tool-enforced retrieval pipeline**，不是多轮自主 agent。
+
+**核心特征**：
+- 每次 `runner.run()` 完全独立，LLM 只看到 system + user 两条消息
+- `_final_result` 强制 JSON + citation 三重校验（evidence → citation → key_fact）
+- 适用于 `ask` 命令（单次受控 Q&A），不适用于多轮对话
+
+**两条完全分离的 LLM 路径**：
+
+| 路径 | 入口 | LLM 调用 | 校验 | 使用场景 |
+|------|------|---------|------|---------|
+| tool loop | `chat_service.chat_turn()` | `runner.run() → next_step()` | `_final_result` 三重校验 | ask, interactive, repair, regenerate, fix |
+| generate/audit | `audit_pipeline._generate_chapter_content()` | `llm_client.generate_text()` | 无校验，直接文本生成 | generate 8 章, audit 审计 |
+
+**关键结论**：改 `_final_result` 只影响 tool loop 路径，不影响 generate/audit。
+
+### 0.3 设计约束
 
 1. **架构不变**：保持 `UI -> Service -> Host -> Agent` 四层架构
 2. **边界不破**：`fund_agent/fund` 仍是领域能力包，不是架构层
@@ -30,7 +50,7 @@
 
 ---
 
-### 0.3 Phase 5 前置条件（已满足）
+### 0.4 Phase 5 前置条件（已满足）
 
 > Phase 3.5 已于 2026-07-19 正式关闭，Phase 3.6 已于 2026-07-21 正式关闭。
 > 以下三项前置条件均已满足，Phase 5 可从文档审批路径启动：
@@ -39,7 +59,7 @@
 2. **审计管道数据适配** ✅：data_sources 缺失时 LLM 审计权重 70%→50%（Phase 3.6 验收数据），数据不足场景通过阈值降至 ≥70。
 3. **端到端验证通过** ✅：8/8 章 LLM 分析非空 + 审计产物落盘 + exit code 0（Phase 3.5 验收数据）。
 
-### 0.4 Phase 5 裁决 gate（阻塞项）
+### 0.5 Phase 5 裁决 gate（阻塞项）
 
 > ~~以下裁决 gate 必须全部通过，Phase 5 实施才能启动：~~
 >
@@ -172,10 +192,13 @@ fund-checklist ask "前十大持仓是什么？" --document-id <id> --enable-too
 ## 2. Phase 7：多轮对话 + 会话记忆（原 Phase 6，重编号）
 
 > **2026-07-24 更新**：因 `implementation-control.md` 的 Phase 6（模板框架适配）已占用编号，本节重编号为 Phase 7。
+> **2026-07-27 更新**：Phase 7（interactive CLI + Session 模型 + Scene Config）、Phase 7.1（ContextBudget + ToolResult 信封）、Phase 7.2（交互体验增强 + 修复能力激活）已全部完成。但 **对话历史注入 LLM context 的管道尚未实现**——这是当前最关键差距。详见 §2.5。
 
 ### 2.1 目标
 
 已裁决目标（2026-07-25）：实现 `fund-checklist interactive` 多轮对话模式，支持会话恢复和上下文记忆。
+
+**当前状态**：interactive CLI 可用，Session 持久化可用，但 LLM 每轮只能看到 system prompt + 当前 user message，**无法看到历史对话**。多轮对话退化为一系列独立 Q&A。
 
 ### 2.2 设计裁决（已生效）
 
@@ -230,32 +253,40 @@ class EpisodeSummary:
 - **并发限制**：不保证多进程并发安全。interactive 模式同一 label 同时只允许一个实例运行
 - **Citation 时效**：Pinned State 中记录 `active_document_id`。当用户在 interactive 中切换到新文档时，旧 citations 仍在 Turn 中保留但不作为新回答的引用源。LLM 需要基于新文档的 tool result 重新生成 citations
 
-#### 2.2.2 受 Dayu 启发但大幅简化的记忆模型
+#### 2.2.2 三层记忆模型（已实现）
 
 > **Dayu 实际实现**：Pinned State + 单总池（raw turn 回放 + episode summary）+ Raw Transcript 三层结构。Dayu 的 Durable Memory / Retrieval layer 本身也尚未完整实现（dayu README §0 原文："Memory 当前只实现了单总池 raw turn 回放与 episode summary"）。
 >
-> **本文档简化**：移除 episode summary 和 compaction，仅保留 Pinned State + Recent Turns 两层。Phase 6 首批不实现 episode summary，但需在架构上预留注入点（Pinned State 旁边预留 `summary_block` 字段，触发条件为 recent_turns 超过 10 轮或 token 占比超过 60%）。
+> **fund-checklist 当前实现**：三层记忆模型已全部实现（Session + PinnedState + Turn + EpisodeSummary），但 **memory contribution 未注入 LLM context**。`_build_contributions()` 只构建 `runtime` 和 `fund_context`，不构建 `memory` slot。
 
-简化为：
+当前实现的三层结构：
 
 ```
-┌─────────────────────────────────────┐
-│ Pinned State (钉住状态)              │
-│ - 当前 document_id                   │
-│ - 基金代码、基金名称                  │
-│ - 用户明确约束                        │
-│ - 不计入 token budget                │
-├─────────────────────────────────────┤
-│ Recent Turns (最近 N 轮)             │
-│ - 强制保留最近 3 轮                   │
-│ - 超出部分按 budget 从新到老回放       │
-└─────────────────────────────────────┘
+┌─────────────────────────────────────────┐
+│ Pinned State (钉住状态)                  │
+│ - fund_code, active_document_id, year   │
+│ - available_document_ids                │
+│ - user_constraints                      │
+│ - 不计入 token budget                   │
+├─────────────────────────────────────────┤
+│ Recent Turns (最近 N 轮)                │
+│ - user/assistant 交替                    │
+│ - 含 citations 和 tool_trace             │
+├─────────────────────────────────────────┤
+│ Episode Summaries (压缩摘要)             │
+│ - episode_id, title, goal               │
+│ - confirmed_facts, open_questions       │
+│ - 由 LLM 驱动的异步压缩生成              │
+└─────────────────────────────────────────┘
 ```
 
-**裁决口径**：
-- Pinned State 包含：`fund_code`、`available_document_ids`、`active_document_id`、`active_year`、用户约束
-- Recent Turns 强制保留最近 3 轮，超出部分按 token budget 截断
-- 不实现 episode summary（Phase 7 可选）
+**已裁决口径**：
+- 会话持久化使用 filesystem JSON（`{work_dir}/sessions/{session_id}.json`）
+- 原子写入：临时文件 → `os.replace()`
+- Pinned State 不参与 token 池竞争
+- Episode Summary 由 `compaction.md` 模板驱动的 LLM 异步生成
+
+**关键缺失**：这三层数据**从未被编译成 LLM messages**。Session turns 存储在 JSON 中，但 `_request_payload()` 只构造 system + 当前 user 两条消息。
 
 #### 2.2.3 CLI 入口
 
@@ -281,6 +312,95 @@ fund-checklist interactive --label my-session
 - 会话标签映射到 `{work_dir}/sessions/{label}.json`
 - 恢复时加载历史 turns，重建 Pinned State
 - 不实现 pending turn lease（简化版）
+
+#### 2.2.5 对话历史注入管道（⚠️ 关键缺失）
+
+> **2026-07-27 诊断确认**：这是当前 interactive 模式无法真正"对话"的根本原因。
+
+**现状**：`deepseek_llm.py` 的 `_request_payload()` 构造的消息列表只有 2 条：
+
+```python
+messages = [
+    {"role": "system", "content": system_prompt},      # fragments + contributions 拼成
+    {"role": "user", "content": json.dumps({            # 仅当前轮
+        "document_id": "...",
+        "query": "基金经理是谁",
+        "prior_tool_results": []
+    })}
+]
+```
+
+`session.turns` 中的历史轮次**从未被注入**。LLM 每轮都是"失忆"的——它看不到之前的问答，无法做代词消解、无法维持对话流。
+
+**dayu 的对标方案**：`DefaultConversationMemoryManager.build_messages()` 按四段固定顺序编译消息列表：
+
+```
+1. System Prompt                          → system role
+2. [Conversation Memory] 块               → system role
+   ├── Pinned State（反幻觉锚点）
+   └── Episode Summaries（从新到老按预算填充）
+3. Working Memory（最近 N 轮 user/assistant） → user/assistant roles
+4. 当前 user 消息                          → user role
+```
+
+**修复方案**：
+
+```python
+# chat_service.py: chat_turn() 中收集历史轮次
+history_messages = []
+for turn in session.turns[-12:]:  # 最近 12 条（6 轮）
+    history_messages.append({
+        "role": turn.role,
+        "content": turn.content,
+    })
+
+# deepseek_llm.py: _request_payload() 接受 history_messages
+def _request_payload(*, ..., history_messages=None):
+    messages = [{"role": "system", "content": system_prompt}]
+    if history_messages:
+        messages.extend(history_messages)
+    messages.append({"role": "user", "content": json.dumps({...})})
+    return {"messages": messages, ...}
+```
+
+**涉及文件**：
+- `fund_agent/service/chat_service.py` — 从 `session.turns` 收集历史
+- `fund_agent/agent/deepseek_llm.py` — `_request_payload` 接受 `history_messages`
+- `fund_agent/agent/llm_tool_loop.py` — `LlmToolLoopRunner.run()` 传递 history
+
+#### 2.2.6 跨轮工具结果不可见（⚠️ 关键缺失）
+
+即使注入了 `session.turns` 历史轮次，LLM 仍然**看不到上轮的工具调用结果**。`ToolResult` 仅存在于 `runner.run()` 的局部循环中，run 结束后即销毁。
+
+**影响**：
+- 用户追问"那托管费呢"时，LLM 看不到上轮 `read_table` 的结果，必须重新 `search → read_section → read_table`
+- 重新读取可能得到不同的截断结果，导致引用不一致
+- 浪费工具调用预算（interactive 的 `max_steps=20`）
+
+**dayu 的方案**：工具结果折叠为摘要文本，存入 `assistant` 消息的文本中（不是独立的 `tool` role 消息）。`_build_full_working_turn_view()` 将 `tool_uses` 追加到 `assistant_text`。
+
+**修复方案（分两步）**：
+
+第一步（简单）：注入 history 时，assistant 消息保留原始 answer 文本（含事实信息），不注入 tool results。LLM 可从回答文本中引用之前提到的数据。
+
+第二步（完整）：在 `Turn` 中存储 `tool_results_summary`，注入 history 时作为 assistant 消息的附加块：
+
+```python
+# session_models.py: Turn 增加字段
+@dataclass
+class Turn:
+    role: str
+    content: str
+    tool_results_summary: str = ""  # 新增：工具结果摘要
+    ...
+
+# chat_service.py: 构建 history 时附加工具摘要
+for turn in session.turns[-12:]:
+    content = turn.content
+    if turn.role == "assistant" and turn.tool_results_summary:
+        content += f"\n\n[工具结果]\n{turn.tool_results_summary}"
+    history_messages.append({"role": turn.role, "content": content})
+```
 
 ### 2.3 实施路径
 
@@ -694,13 +814,15 @@ fund_agent/
 ### 7.1 候选探索顺序（仅示意）
 
 ```
-Phase 5 (LLM 自主工具调用 + 流式输出) — ✅ 已裁决，实施中
+Phase 5 (LLM 自主工具调用 + 流式输出) — ✅ 已完成
   ↓
-Phase 6 (模板框架适配 + 基金类型感知) — ✅ 已完成（implementation-control.md）
+Phase 6 (模板框架适配 + 基金类型感知) — ✅ 已完成
   ↓
-Phase 7 (多轮对话 + 会话记忆) — 🔵 候选
+Phase 7 (多轮对话 + 会话记忆) — ✅ 已完成（基础），⚠️ 对话历史注入管道缺失
   ↓
-Phase 8 (上下文治理) — 🔵 候选
+Phase 7.3 (对话历史注入 LLM context) — 🔴 待实施（最高优先级修复）
+  ↓
+Phase 8 (跨轮上下文治理 + Episode Summary 压缩) — 🔵 候选
   ↓
 Phase 9 (联网搜索，可选) — 🔵 候选
 ```
@@ -725,14 +847,75 @@ Phase 9 (联网搜索，可选) — 🔵 候选
 
 ## 8. 总结
 
-本文件用于对照观察 fund-checklist 从"确定性分析助手"向"可交互投资分析 Agent"的候选演进方向，不代表已批准实施：
+本文件记录 fund-checklist 从"确定性分析助手"向"可交互投资分析 Agent"的演进过程：
 
-| Phase | 能力 | 状态 |
-|-------|------|------|
-| **Phase 5** | LLM 自主工具调用 + 流式输出 | ✅ 已裁决，实施中（19A-19F） |
-| **Phase 6** | 模板框架适配 + 基金类型感知 | ✅ 已完成（implementation-control.md） |
-| **Phase 7** | 多轮对话 + 会话记忆 | 🔵 候选，未裁决 |
-| **Phase 8** | 上下文治理 | 🔵 候选，未裁决 |
-| **Phase 9** | 联网搜索 | 🔵 候选，未裁决（可选） |
+| Phase | 能力 | 状态 | 关键缺口 |
+|-------|------|------|---------|
+| **Phase 5** | LLM 自主工具调用 + 流式输出 | ✅ 已完成 | — |
+| **Phase 6** | 模板框架适配 + 基金类型感知 | ✅ 已完成 | — |
+| **Phase 7** | 多轮对话 + 会话记忆 | ✅ 基础完成 | 对话历史未注入 LLM context（§2.2.5） |
+| **Phase 7.1** | ContextBudget + ToolResult 信封 | ✅ 已完成 | — |
+| **Phase 7.2** | 交互体验增强 + 修复能力激活 | ✅ 已完成（含 e2e 测试） | — |
+| **Phase 7.3** | 对话历史注入 LLM context | 🔴 待实施 | `build_messages()` 管道 + 跨轮证据；DS Review 二审修正：方案 B 40-60 行（首选），方案 A 100-130 行 |
+| **Phase 8** | 跨轮上下文治理 + 压缩 | 🔵 候选 | Episode Summary 接入 LLM context |
+| **Phase 9** | 联网搜索 | 🔵 候选 | — |
 
-如果后续进入正式裁决，可按“不破坏现有架构、按候选方向逐步验证”的方式推进；但各方向是否、何时推进，不以本文件为准。
+### 8.1 dayu 对标关键差距（2026-07-27 更新）
+
+从 dayu-agent 架构分析提炼的差距，按优先级排列：
+
+| 优先级 | 差距 | dayu 方案 | fc 现状 | 修复路径 |
+|--------|------|----------|---------|---------|
+| **P0** | 对话历史不注入 LLM | `build_messages()` 四段编译 | `_request_payload` 仅 system + user | §2.2.5 修复方案（DS：同一根因的两个表现） |
+| **P0** | 跨轮工具结果不可见 | 工具结果折叠为 assistant 消息文本 | ToolResult 在 run() 结束后销毁 | §2.2.6 修复方案（DS：根因同上） |
+| **P1** | Memory Contribution 未接入 | `select_prompt_contributions()` 按 slot 筛选 | `_build_contributions` 不构建 memory slot | 接入 `prompt_contributions.py` |
+| **P1** | Pinned State 不注入 LLM | 独立 system 块，不参与 token 池 | Session.pinned_state 存在但不注入 | §2.2.5 memory 块 |
+| **P2** | Prompt 条件块 | `<when_tool>` / `<when_tag>` 按工具快照过滤 | 仅 `<when_missing>` 条件块 | 扩展 `prompt_renderer.py` |
+| **P2** | Host/Executor 层 | Run 注册表 + 取消桥 + 并发许可 | CLI 直调 ChatService | 重构 host 层 |
+| **P3** | PendingTurn 恢复 | resume_lease + CAS 状态机 | 无断连恢复 | 新增 pending_turn_store |
+
+### 8.2 Phase 7.3 修复方案对比（2026-07-28 DS Review 二审）
+
+P0 的两个问题是同一个根因的两个表现：`_request_payload → LlmClientProtocol` 管道上没有历史通道。修了管道，两个问题一起解决。
+
+#### 被低估的 4 个复杂度（DS 二审确认）
+
+| 复杂度 | 影响 | DS 判断 |
+|--------|------|---------|
+| Protocol 级联效应 | `LlmClientProtocol` 被 5 处引用（DeepSeekLlmClient、FakeLlmClient、runner.run/run_stream），签名变更需同步所有实现者 | 真实存在，但原 DS 估计已注明"含协议变更"，Controller 重新包装为"遗漏"不够公允 |
+| 代词消解 / citation 跨轮 | scene.md 有 6 条对话规则，但 LLM 从未看到历史，规则形同虚设 | 成立 |
+| citation 校验场景感知 | `_final_result()` 含 5 层严格校验，对非数据性问题（"继续说"）会误杀 | 成立，**但方案 B 天然规避此问题** |
+| 测试复杂度 | 3 个 e2e test class 全部 xfail，原因正是"LLM 返回'最终回答缺少受控 citation'" | 成立 |
+
+**Controller 遗漏**：方案 B（prompt 层编织）不改动 `runner.run()`，citation 校验逻辑完全不受影响。历史轮次混入 system prompt，LLM 仍只看当前轮的 tool results，`_final_result()` 仍校验当前轮的 evidence → citation。方案 B 反而比方案 A 更安全。
+
+**方案 A：协议层注入（文档原方案）**
+
+改动 `LlmClientProtocol.next_step()` 签名，新增 `history_messages` 参数。
+
+| 文件 | 变更 | 风险 |
+|------|------|------|
+| `chat_service.py` | 从 session.turns 收集历史轮次 | 低风险 |
+| `deepseek_llm.py` | `_request_payload` 接受 history_messages | 低风险 |
+| `llm_tool_loop.py` | `LlmClientProtocol.next_step()` 签名变更 | **breaking change** — 破坏所有实现者（FakeLlmClient、测试注入点） |
+
+- 改动量：100-130 行（DS 逐文件计数：Protocol 签名 5 行 + DeepSeek 适配 35 行 + FakeLlmClient 3 行 + runner 透传 20 行 + chat_service 25 行 + 测试 mock 30 行）
+- 优点：架构干净，历史轮次作为一等公民
+- 缺点：breaking change，需同步更新所有测试 mock；需要在 runner 层面决定何时 strict/relaxed citation 校验
+
+**方案 B：Prompt 层编织（DS 提出的替代方案）**
+
+在 `chat_service` 层将历史轮次直接编织进 system prompt（作为 composed prompt 的附加块），完全不改变 agent 层协议。
+
+| 文件 | 变更 | 风险 |
+|------|------|------|
+| `chat_service.py` | `_build_contributions` 增加 history slot | 低风险 |
+| `prompt_composer.py` | 支持 history contribution 注入 | 低风险 |
+| `llm_tool_loop.py` | 无变更 | 零风险 |
+
+- 改动量：40-60 行
+- 优点：零 breaking change，变更安全；**天然规避 citation 校验问题**（不改动 runner.run()，_final_result() 校验逻辑完全不受影响，历史轮次混入 system prompt 但 LLM 仍只看当前轮的 tool results）
+- 缺点：历史轮次混入 system prompt，架构不如方案 A 干净；token 开销略高（system prompt 更长）
+
+**裁决建议**：**方案 B 为首选**（成功概率中高，40-60 行，零 breaking change，天然规避 citation 校验问题）。方案 A 作为后续架构纯度重构目标（100-130 行，2-3 周）。工期估计 2-3 周（含 prompt 迭代）。
+
