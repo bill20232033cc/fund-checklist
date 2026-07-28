@@ -1,7 +1,7 @@
 # Goal: Phase 7.3 对话历史注入 LLM context（方案 B）
 
 **创建时间**：2026-07-28
-**目标状态**：待启动
+**目标状态**：🔴 待实施
 **版本**：v1
 **关联文档**：
 - `docs/phase7.3-option-b-optimization.md`（方案 B 优化设计 v2，DS 二审有条件通过）
@@ -31,7 +31,7 @@
 - [ ] history token 不超过 `history_max_tokens` 上限（默认 2000）
 - [ ] 空 tool_trace 轮次（LLM 直接回答）不产生空行
 - [ ] 分隔标记引导 LLM 使用 JSON 格式回答
-- [ ] Phase 7 全量回归 ≥769 passed（不回退）
+- [ ] Phase 7 全量回归 ≥880 passed（不回退）
 - [ ] e2e interactive 测试不再全部 xfail（至少 1 个 PASS）
 
 ---
@@ -41,7 +41,7 @@
 ### 包含范围（In Scope）
 
 **Wave 1（数据模型扩展）**：
-- Task 1: `ToolCallSummary` dataclass（`session_models.py`）
+- Task 1: `ToolCallSummary` dataclass + `Turn` 新增 `tool_calls: tuple[ToolCallSummary, ...] = ()` 字段（`session_models.py`）
 - Task 2: `Session.truncate_turns()` 方法（`session_models.py`）
 
 **Wave 2（History 注入核心逻辑）**：
@@ -86,6 +86,7 @@
 8. **history contribution 必须出现在 system prompt 中**：核心功能验收点
 9. **分隔标记必须引导 LLM 使用 JSON 格式**：避免历史纯文本 vs 当前 JSON 冲突
 10. **`history_max_tokens` 必须可配置**：默认 2000，不硬编码
+11. **history contribution 文本不得含 raw PDF/Docling JSON/本地路径**：符合 AGENTS.md 硬边界
 
 ### 代码规范
 11. **禁止把显式参数塞进 `extra_payload`**：公共参数必须显式声明
@@ -172,7 +173,7 @@ uv run pytest tests/fund/cli/ tests/fund/service/ tests/fund/host/ tests/fund/ag
 
 ### 4.3 Final Checklist
 
-- [ ] 全量回归 ≥769 passed（不回退）
+- [ ] 全量回归 ≥880 passed（不回退）
 - [ ] e2e interactive 测试不再全部 xfail
 - [ ] `grep -r "LlmClientProtocol" fund_agent/agent/llm_tool_loop.py` 无签名变更
 - [ ] `grep -r "next_step" fund_agent/agent/llm_tool_loop.py` 无签名变更
@@ -222,6 +223,9 @@ Task 1 → Task 3 → Task 6 → Task 10 → Task 11
 | compaction 后 history 丢失 | 中 | FM5 | `truncate_turns` 确保双层注入可行 |
 | e2e 测试仍 xfail | 中 | DoD 失败 | 可能需要调整 `_final_result` citation 校验逻辑（但不改 agent 层） |
 | `ToolCallSummary` 序列化兼容性 | 低 | SessionStore | 新字段向后兼容，旧 session 无 `tool_calls` 时默认空元组 |
+| 空 tool_trace 轮次产生空行（FM7） | 低 | 格式混乱 | `_format_turn_for_history` 跳过空 tool_calls/citations 行 |
+| 英文内容 token 估算偏低（FM8） | 低 | context 溢出 | `_estimate_token_count` 中英文混合估算 |
+| history 纯文本 vs 当前 JSON 冲突（FM9） | 中 | LLM 格式漂移 | 分隔标记明确引导 JSON 格式 |
 
 ---
 
