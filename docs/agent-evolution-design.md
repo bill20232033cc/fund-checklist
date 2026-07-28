@@ -917,5 +917,16 @@ P0 的两个问题是同一个根因的两个表现：`_request_payload → LlmC
 - 优点：零 breaking change，变更安全；**天然规避 citation 校验问题**（不改动 runner.run()，_final_result() 校验逻辑完全不受影响，历史轮次混入 system prompt 但 LLM 仍只看当前轮的 tool results）
 - 缺点：历史轮次混入 system prompt，架构不如方案 A 干净；token 开销略高（system prompt 更长）
 
-**裁决建议**：**方案 B 为首选**（成功概率中高，40-60 行，零 breaking change，天然规避 citation 校验问题）。方案 A 作为后续架构纯度重构目标（100-130 行，2-3 周）。工期估计 2-3 周（含 prompt 迭代）。
+**裁决建议**：**方案 B 为首选**（成功概率中高，零 breaking change，天然规避 citation 校验问题）。方案 A 作为后续架构纯度重构目标（100-130 行，2-3 周）。
+
+**方案 B 优化设计 v2**（DS 二审有条件通过，详见 `docs/phase7.3-option-b-optimization.md`）：
+
+针对 6 个失败模式（FM1-FM6）+ 3 个遗漏（FM7-FM9）的缓解方案，核心改动：
+- `session_models.py`：新增 `ToolCallSummary` + `Session.truncate_turns()`（~30 行）
+- `chat_service.py`：history 注入 + token 估算 + compaction 截断 + ToolCallSummary 填充（~60 行）
+- `scene_config.py`：context_slots 新增 "history"（1 行）
+- 测试：~30 行
+- **合计 ~121 行**
+
+DS 二审裁决：有条件通过。实施前处理 3 项：① truncate_turns 补充 status/updated_at 字段；② chat_turn() 显式填充 ToolCallSummary；③ ContextBudget 与 history token 交互留 TODO（Phase 8 处理）。
 
