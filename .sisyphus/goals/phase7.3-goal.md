@@ -89,9 +89,9 @@
 11. **history contribution 文本不得含 raw PDF/Docling JSON/本地路径**：符合 AGENTS.md 硬边界
 
 ### 代码规范
-11. **禁止把显式参数塞进 `extra_payload`**：公共参数必须显式声明
-12. **禁止魔法字符串/魔法数字**：source kind、failure code、tool name 应集中定义
-13. **禁止任何 Agent 用"逻辑上完成""应该通过""已按计划完成"替代测试输出**
+12. **禁止把显式参数塞进 `extra_payload`**：公共参数必须显式声明
+13. **禁止魔法字符串/魔法数字**：source kind、failure code、tool name 应集中定义
+14. **禁止任何 Agent 用"逻辑上完成""应该通过""已按计划完成"替代测试输出**
 
 ---
 
@@ -186,7 +186,7 @@ uv run pytest tests/fund/cli/ tests/fund/service/ tests/fund/host/ tests/fund/ag
 ### 5.1 任务分组
 
 **Wave 1（2 个并行）**：
-- Task 1（quick）: `ToolCallSummary` dataclass
+- Task 1（quick）: `ToolCallSummary` dataclass + `Turn` 新增 `tool_calls` 字段
 - Task 2（quick）: `Session.truncate_turns()`
 
 **Wave 2（4 个并行）**：
@@ -234,7 +234,7 @@ Task 1 → Task 3 → Task 6 → Task 10 → Task 11
 ### 任务状态
 
 **Wave 1**：
-- [ ] Task 1: `ToolCallSummary` dataclass
+- [ ] Task 1: `ToolCallSummary` dataclass + `Turn` 新增 `tool_calls` 字段
 - [ ] Task 2: `Session.truncate_turns()`
 
 **Wave 2**：
@@ -261,7 +261,7 @@ Phase 7.3 是 Phase 7.2 的后续阶段：
 - Phase 7（多轮对话 + 会话记忆）→ ✅ 已完成
 - Phase 7.1（集成补完）→ ✅ 已完成
 - Phase 7.2（交互体验增强 + 修复能力激活）→ ✅ 已完成
-- **Phase 7.3（对话历史注入 LLM context）** → 待启动
+- **Phase 7.3（对话历史注入 LLM context）** → 🔴 待实施
 
 Phase 7.2 完成的 repair/regenerate/fix/interactive 能力为 Phase 7.3 提供了测试基础。Phase 7.3 的核心价值是让 `interactive` 模式从"每次独立对话"升级为"真正的多轮对话"。
 
