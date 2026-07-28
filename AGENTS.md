@@ -36,7 +36,7 @@ PDF
  -> 三层审计管道 (程序+LLM+复核，4 类 22 项)
 ```
 
-已实现的 CLI 入口：`read` / `multi-year` / `import` / `holdings` / `download` / `allocation` / `fees` / `audit` / `deep-audit` / `generate` / `ask` / `interactive`。
+已实现的 CLI 入口：`read` / `multi-year` / `import` / `holdings` / `download` / `allocation` / `fees` / `audit` / `deep-audit` / `generate` / `ask` / `interactive` / `repair` / `regenerate` / `fix`。
 
 验收约束（适用于所有阶段）：
 - 不接受仅 Service / ToolService 层测试；任何阶段的验收必须包含 Host / Agent loop 或 CLI 端到端 smoke。
@@ -64,14 +64,18 @@ Phase 7 已完成（2026-07-26）：
 
 LLM provider 已支持 DeepSeek 与 Mimo（OpenAI-compatible adapter）；暂不需要接入 Gemini/OpenAI/Anthropic 等其他 provider。
 
-Phase 7.1 已裁决（2026-07-26），待启动。集成补完 + Dayu 场景借鉴：
-- **集成补完**：ToolResult 信封接入 runner、ContextBudget 接入 runner、force_answer 降级、tool_calls_remaining 信号注入
-- **Dayu 场景借鉴**（除 wechat）：regenerate（整章重建）、repair（局部修复）、fix（占位符补强）、decision（研究决策综合）、conversation_compaction（会话摘要压缩）
+- 对基金文档的存取必须通过统一 Fund documents / tool service 边界。
+Phase 7.1 已裁决（2026-07-26）。集成补完 + Dayu 场景借鉴：
+- **集成补完**：ToolResult 信封接入 runner、ContextBudget 接入 runner、force_answer 降级、tool_calls_remaining 信号注入 ✅ Phase 7.1a 已完成（2026-07-27）
+- **Dayu 场景借鉴**（除 wechat）：regenerate（整章重建）、repair（局部修复）、fix（占位符补强）、decision（研究决策综合）、conversation_compaction（会话摘要压缩） ✅ Phase 7.2 已完成（2026-07-27）
 - 详见 `docs/implementation-control.md` Phase 7.1 节
 
-## 硬边界
-
-- 对基金文档的存取必须通过统一 Fund documents / tool service 边界。
+Phase 7.2 已裁决（2026-07-27），✅ 已完成（2026-07-27）。交互体验增强 + 修复能力激活 + 场景扩展：
+- 推翻 Phase 7 routing context 预取，统一走 LLM 工具调用 ✅
+- 激活已定义但未接线的 SceneConfig（regenerate/repair） ✅
+- 新建 fix 场景（结构化占位符补强） ✅
+- 扩展 alias 覆盖；Rich 输出格式化；多轮对话增强 ✅
+- 详见 `docs/implementation-control.md` Phase 7.2 节
 - 禁止 Service / UI / Host / 展示层 / LLM prompt 直接消费 raw PDF、raw Docling JSON、PDF cache path、本地路径、URL secret 或 parser private payload。
 - Dayu 只能作为架构参考和能力来源；禁止直接引入 `dayu-agent`、`dayu.host`、`dayu.engine` 作为生产 runtime。
 - 复制或改写 Dayu 代码必须先经过 license/compliance gate。
@@ -213,6 +217,16 @@ uv run pytest tests/fund/cli/test_cli_interactive.py   tests/fund/service/test_c
 
 - Python 代码使用类型注解和 dataclass / Protocol 等现代特性。
 - 函数、类、模块必须有中文 docstring，说明参数、返回值、异常。
+
+- Phase 7.2 验证命令：
+```bash
+# Phase 7.2 核心测试
+uv run pytest tests/fund/cli/test_cli.py -k "repair or regenerate or fix" -v --tb=short
+uv run pytest tests/fund/service/test_extraction.py -k "route_plan" -v --tb=short
+uv run pytest tests/fund/service/test_scene_config.py -k "fix" -v --tb=short
+uv run pytest tests/fund/service/test_audit_pipeline.py -k "decision" -v --tb=short
+uv run pytest tests/fund/service/test_chat_service.py -k "compaction" -v --tb=short
+```
 - 复杂逻辑使用简短中文注释说明意图。
 - 修改 `fund_agent/fund/` 时同步更新 `fund_agent/fund/README.md`。
 - 修改 `fund_agent/agent/` 时同步更新 `fund_agent/agent/README.md`。

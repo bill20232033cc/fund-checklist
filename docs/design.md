@@ -1474,6 +1474,48 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - `tests/fund/service/test_chat_service.py` — chat_turn 测试
 - `tests/fund/service/test_scene_config.py` — Scene Config 测试
 - `tests/fund/service/test_prompt_contributions.py` — Prompt Contributions 测试
+### Phase 7.3：对话历史注入 LLM context（方案 B）
+
+> 裁决时间：2026-07-28 | 状态：🔴 待实施
+> 优化设计：`docs/phase7.3-option-b-optimization.md`
+> 演进记录：`docs/agent-evolution-design.md` §8.2
+
+**问题**：`interactive` 模式的对话历史未注入 LLM context。每次 `runner.run()` 完全独立，LLM 只看到 system + user 两条消息，无法引用历史轮次的工具结果或上下文。
+
+**方案**：方案 B — Prompt 层编织。在 `chat_service` 层将历史轮次直接编织进 system prompt，不改变 `LlmClientProtocol` 签名。
+
+**架构变更**：
+
+| 模块 | 变更 | 说明 |
+|------|------|------|
+| `session_models.py` | 新增 `ToolCallSummary` dataclass | 存储工具调用摘要（tool_name、arguments_display、success、failure_code） |
+| `session_models.py` | `Session.truncate_turns(keep_last)` | compaction 后截断旧 turns |
+| `chat_service.py` | `_build_history_contribution()` | 从 session 构建 history contribution，带 token 上限（默认 2000） |
+| `chat_service.py` | `_format_turn_for_history()` | 结构化格式：`[用户提问]`/`[助手回答]`/`[工具调用]`/`[引用文档]` |
+| `chat_service.py` | `_estimate_token_count()` | 中英文混合 token 估算 |
+| `chat_service.py` | `chat_turn()` 填充 `ToolCallSummary` | 从 `AgentRunResult.tool_trace` 提取 |
+| `chat_service.py` | `_run_compaction()` 增加 truncate | compaction 后调用 `truncate_turns()` |
+| `scene_config.py` | `context_slots` 新增 `"history"` | interactive scene 配置 |
+
+**关键设计决策**：
+- `ToolCallSummary.result_summary` 从 `result_kind + failure_code` 推导（B1 方案），不存储 raw tool result
+- History 格式：episode summaries（全局上下文）+ 最近 N 轮 raw turns（细节）
+- 分隔标记引导 LLM 使用 JSON 格式回答
+- `history_max_tokens` 可配置（默认 2000）
+
+**总改动量**：~121 行（session_models ~30 + chat_service ~60 + scene_config ~1 + 测试 ~30）
+
+**失败模式缓解**（9 项，详见优化设计文档）：
+- FM1: Context window 溢出 → token 上限 + 截断
+- FM2: 历史/当前混淆 → 结构化格式 + 分隔标记
+- FM3: 跨轮 tool results 不可见 → B1 方案（result_kind/failure_code 推导）
+- FM4: Scene config slot 缺失 → 新增 history slot
+- FM5: Compaction 交互 → truncate_turns
+- FM6: Temperature → 不改（观察后决定）
+- FM7: 空 tool_trace → 跳过空 tool_calls 行
+- FM8: Token 估算 → 中英文混合估算函数
+- FM9: JSON 指令冲突 → 分隔标记加格式指引
+
 ### 技术债
 
 - **P1-3**：提取 compute_signal_judgment / compute_risk_checklist 共享评分 helper。

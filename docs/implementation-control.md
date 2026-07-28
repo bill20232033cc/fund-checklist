@@ -1,9 +1,9 @@
 # fund-checklist implementation-control
 
-更新时间：2026-07-25
+更新时间：2026-07-28（Phase 7.2 + Phase 7.1a 已完成，Phase 7.3 已裁决）
 当前阶段：`FUND_ANALYSIS_ASSISTANT`
 当前角色：control / CIC-lite controller
-当前目标：Phase 7.1 集成补完 + Dayu 场景借鉴 — 已裁决（2026-07-26）。Phase 7 已完成。
+当前目标：Phase 7.3 对话历史注入 LLM context — 🔴 待实施。Phase 7.2 交互体验增强 + 修复能力激活 + 场景扩展 — ✅ 已完成（2026-07-27）。Phase 7.1a 集成补完 — ✅ 已完成（2026-07-27）。Phase 7 已完成。
 关联文档：AGENTS.md（执行规则）、docs/design.md（设计决策）
 
 ## 已完成研究报告
@@ -2222,15 +2222,15 @@ uv run pytest tests/fund/ -v --tb=short
 | 3 | routing context 投资建议检测 | **不补** | routing context 返回年报原始数据，不是投资建议 |
 | 4 | _SYSTEM_PROMPT 迁移 | **B：保持现状** | ask/interactive 输出格式不同，迁移风险高于收益 |
 
+
 ### Phase 7.1a：集成补完（4 项 P0）
 
 | # | 内容 | 优先级 | 状态 |
 |---|------|--------|------|
-| 1 | ToolResult 信封接入 runner（包裹旧结果） | P0 | 待启动 |
-| 2 | ContextBudget 接入 runner（预算检查 + 工具结果裁剪） | P0 | 待启动 |
-| 3 | force_answer 降级（max_steps 耗尽时 tool_results 直返） | P0 | 待启动 |
-| 4 | tool_calls_remaining 信号注入 tool result | P0 | 待启动 |
-
+| 1 | ToolResult 信封接入 runner（包裹旧结果） | P0 | ✅ 已完成 (74 测试通过) |
+| 2 | ContextBudget 接入 runner（预算检查 + 工具结果裁剪） | P0 | ✅ 已完成 (31 测试通过) |
+| 3 | force_answer 降级（max_steps 耗尽时 tool_results 直返） | P0 | ✅ 已完成 (3 测试通过，commit 98cb6b6) |
+| 4 | tool_calls_remaining 信号注入 tool result | P0 | ✅ 已完成 (29 测试通过) |
 ### Phase 7.1b：Dayu 场景借鉴（5 项）
 
 来源：`docs/dayu-scenes-research.md`，除 wechat 外全部借鉴。
@@ -2284,3 +2284,168 @@ uv run pytest tests/fund/agent/test_tool_result.py tests/fund/agent/test_llm_too
 # 全量回归
 uv run pytest tests/fund/ -v --tb=short
 ```
+
+## Phase 7.2：交互体验增强 + 修复能力激活 + 场景扩展
+
+> 裁决时间：2026-07-27
+> 前置条件：Phase 7 ✅（2026-07-26 完成）、Phase 7.1 ✅（2026-07-26 裁决）
+> 设计来源：`.sisyphus/plans/phase7.2-implementation.md`
+> 裁决文档：AGENTS.md Phase 7.2 节
+
+### Phase 7.2 裁决 Gate
+
+| Gate | 条件 | 状态 |
+|------|------|------|
+| Gate 1 | Phase 7.2 实施计划审核通过 | ✅ DS review NEEDS_FIX（2026-07-27） |
+| Gate 2 | 裁决事项通过（routing context 推翻 / fix CLI 入口 / decision 场景） | ✅ 已裁决 |
+
+### 裁决记录
+
+| # | 裁决项 | 结论 | 理由 |
+|---|--------|------|------|
+| 1 | Routing Context 预取 | **推翻 Phase 7 预取，全量走 LLM** | 代码简化（删 70 行），统一对话体验，对齐 Dayu。延迟增加由 streaming 缓解，精度由 citation 强制校验兜底 |
+| 2 | fix 场景 | **纳入 Phase 7.2** | Dayu 定义清晰：结构化占位符补强。对 fc 多年度数据不完整场景有价值。需新建 SceneConfig + prompt |
+| 3 | decision 场景 | **暂缓** | Ch7 确定性信号评分已覆盖"继续/关注/替换"判断。LLM 版决策风险（隐性投资建议）大于收益，且基金分析 vs 股票分析的决策框架差异大 |
+| 4 | conversation_compaction | **纳入（轻量）** | Phase 7 EpisodeSummary 已有基础，compaction.md prompt 已写但未接线。1 天接线 |
+| 5 | regenerate/repair SceneConfig 激活 | **P0** — 组件已有，仅需接线 | SceneConfig + prompt fragment 已定义，从未被代码引用 |
+
+3. `regenerate --chapter 3` 只重写指定章节，审计反馈注入 prompt
+### Phase 7.2 任务分解
+
+| Task | 内容 | 优先级 | 状态 |
+|------|------|--------|------|
+| 1 | 删除 routing context 预取（~70 行） | P0 | ✅ 已完成 (commit 3ec9d3f) |
+| 2 | 扩展 DISCLOSURE_LOCATOR_CONTRACT_REGISTRY alias 覆盖 | P0 | ✅ 已完成 (34/34 测试通过) |
+| 3 | Rich Table 格式化输出 | P1 | ✅ 已完成 (55/55 测试通过) |
+| 4 | 新建 FIX_SCENE_CONFIG + scenes/fix.md + fix CLI 子命令 | P0 | ✅ 已完成 (9 测试通过 + test_fix_chapter 测试通过) |
+| 5 | CLI `repair --chapter` 子命令（激活 REPAIR_SCENE_CONFIG） | P0 | ✅ 已完成 (7 测试通过) |
+| 6 | CLI `regenerate --chapter` 子命令（激活 REGENERATE_SCENE_CONFIG） | P0 | ✅ 已完成 (8 测试通过) |
+| 7 | 审计分数驱动的修复策略自动选择 | P1 | ✅ 已完成 (9 测试通过) |
+| 8 | `/history` 命令 + interactive 启动提示 + 追问建议 | P1 | ✅ 已完成 (70 测试通过) |
+| 9 | conversation_compaction prompt 接入 | P2 | ✅ 已完成 (25 测试通过) |
+| 10 | Phase 7 回归测试 + Phase 7.2 新增测试 | P0 | ✅ 已完成 (20 个新 smoke 测试通过，227 个测试通过) |
+
+### Phase 7.2 Final Verification
+
+| Gate | Verdict |
+|------|---------|
+| F1 — 计划合规审计 | APPROVE |
+| F2 — 代码质量审查 | APPROVE |
+| F3 — 手动 QA 执行 | APPROVE |
+| F4 — 范围忠实度检查 | APPROVE |
+| **OVERALL** | **APPROVE** |
+4. `fix --chapter 3` 检测并补强占位符
+5. "基金经理是谁" 返回非空回答（LLM 自主搜索）
+6. interactive 表格数据以 Rich Table 显示
+7. `/history` 显示最近 10 轮对话摘要
+8. `compaction.md` prompt 接入 EpisodeSummary 触发逻辑
+9. Phase 7 全量回归 ≥153 passed（不回退）
+10. 新增测试 ≥20 passed
+
+### Allowed Write Set
+
+| 文件 | 变更类型 |
+|------|---------|
+| `fund_agent/service/chat_service.py` | 删除 routing context 预取逻辑 |
+| `fund_agent/service/extraction.py` | 删除 routing context 预取逻辑 + 扩展 alias |
+| `fund_agent/service/scene_config.py` | 新增 FIX_SCENE_CONFIG |
+| `fund_agent/service/prompts/scenes/fix.md` | **新增** — 占位符补强 prompt |
+| `fund_agent/cli/main.py` | 新增 repair/regenerate/fix 子命令 + Rich Table |
+| `fund_agent/service/audit_pipeline.py` | 审计分数驱动的修复策略 |
+| `tests/fund/cli/test_cli.py` | 新增 repair/regenerate/fix 测试 |
+| `tests/fund/service/test_extraction.py` | 新增 alias 测试 |
+| `tests/fund/service/test_scene_config.py` | 新增 fix scene 测试 |
+| `tests/fund/service/test_chat_service.py` | 新增 compaction 测试 |
+| `tests/fund/service/test_audit_pipeline.py` | 新增 auto-select 测试 |
+| `docs/design.md` | 更新 — Phase 7.2 设计 |
+| `docs/implementation-control.md` | 更新 — Phase 7.2 执行面板 |
+| `AGENTS.md` | 更新 — Phase 7.2 状态 |
+
+### Stop Conditions
+
+- routing context 预取代码未完全删除（留有死代码） → 停止
+- repair/regenerate 复用 generate 的全量重跑逻辑 → 停止
+- 修复后丢失 citation + evidence → 停止
+- fix 占位符格式未对齐 Dayu 规范（`【占位符】（缺口：... ｜ 需要：...）`） → 停止
+- `/history` 命令在 interactive REPL 中不可用 → 停止
+- decision 场景进入本次实施 → 停止
+- fix 场景产生投资建议 → 停止
+
+### 验证命令
+
+```bash
+# Phase 7 回归（确保不回退）
+uv run pytest tests/fund/cli/test_cli_interactive.py tests/fund/service/test_chat_service.py tests/fund/host/test_session_store.py tests/fund/agent/test_context_budget.py tests/fund/service/test_scene_config.py -v --tb=short
+
+# Phase 7.2 新增测试
+uv run pytest tests/fund/cli/test_cli.py -k "repair or regenerate" -v --tb=short
+uv run pytest tests/fund/service/test_extraction.py -k "route_plan" -v --tb=short
+uv run pytest tests/fund/cli/test_cli.py -k "fix" -v --tb=short
+uv run pytest tests/fund/service/test_audit_pipeline.py -k "decision" -v --tb=short
+uv run pytest tests/fund/service/test_scene_config.py -k "fix" -v --tb=short
+uv run pytest tests/fund/service/test_chat_service.py -k "compaction" -v --tb=short
+
+# 全量
+uv run pytest tests/fund/cli/ tests/fund/service/ tests/fund/host/ tests/fund/agent/ -v --tb=short
+```
+
+
+## Phase 7.3：对话历史注入 LLM context
+
+> 裁决时间：2026-07-28 | 状态：🔴 待实施
+> 前置条件：Phase 7 ✅、Phase 7.1 ✅、Phase 7.2 ✅
+> 优化设计：`docs/phase7.3-option-b-optimization.md`
+> 演进记录：`docs/agent-evolution-design.md` §8.2
+
+### Phase 7.3 裁决 Gate
+
+| Gate | 条件 | 状态 |
+|------|------|------|
+| Gate 1 | 方案 B 优化设计 DS 二审通过 | ✅ 有条件通过（2026-07-28） |
+| Gate 2 | 实施计划审核通过 | 🔴 待审核 |
+
+### Phase 7.3 任务分解
+
+| # | 任务 | 改动文件 | 行数 | 状态 |
+|---|------|---------|------|------|
+| 1 | 新增 `ToolCallSummary` dataclass | `session_models.py` | ~10 行 | 🔴 |
+| 2 | 新增 `Session.truncate_turns()` | `session_models.py` | ~15 行 | 🔴 |
+| 3 | `_build_history_contribution()` | `chat_service.py` | ~20 行 | 🔴 |
+| 4 | `_format_turn_for_history()` | `chat_service.py` | ~15 行 | 🔴 |
+| 5 | `_estimate_token_count()` | `chat_service.py` | ~5 行 | 🔴 |
+| 6 | `_build_contributions` 增加 history | `chat_service.py` | ~5 行 | 🔴 |
+| 7 | `_run_compaction` 增加 truncate | `chat_service.py` | ~5 行 | 🔴 |
+| 8 | `chat_turn()` 填充 ToolCallSummary | `chat_service.py` | ~10 行 | 🔴 |
+| 9 | `context_slots` 新增 "history" | `scene_config.py` | 1 行 | 🔴 |
+| 10 | 单元测试 | `tests/` | ~20 行 | 🔴 |
+| 11 | e2e 测试 | `tests/e2e/` | ~10 行 | 🔴 |
+
+### Stop Conditions
+
+- `LlmClientProtocol.next_step()` 签名变更 → 停止（违反方案 B 约束）
+- `llm_tool_loop.py` 修改 → 停止（违反方案 B 约束）
+- history 注入后全量回归 < 769 passed → 停止
+- e2e interactive 测试仍全部 xfail → 停止
+
+### 验证命令
+
+```bash
+# Phase 7.3 核心测试
+uv run pytest tests/fund/service/test_chat_service.py -k "history" -v --tb=short
+uv run pytest tests/fund/host/test_session_store.py -k "truncate" -v --tb=short
+
+# Phase 7 回归
+uv run pytest tests/fund/cli/test_cli_interactive.py tests/fund/service/test_chat_service.py tests/fund/host/test_session_store.py tests/fund/agent/test_context_budget.py tests/fund/service/test_scene_config.py -v --tb=short
+
+# e2e 测试
+uv run pytest tests/e2e/ -v --tb=short
+
+# 全量回归
+uv run pytest tests/fund/cli/ tests/fund/service/ tests/fund/host/ tests/fund/agent/ --tb=no -q
+```
+
+### DS 二审待处理项
+
+1. **Bug（必须修）**：`truncate_turns` 补充 `status=self.status, updated_at=...`
+2. **遗漏（必须补）**：`chat_turn()` 显式填充 `ToolCallSummary`
+3. **建议**：ContextBudget 与 history token 交互留 TODO，Phase 8 处理
