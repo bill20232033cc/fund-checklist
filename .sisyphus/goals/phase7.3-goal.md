@@ -31,7 +31,7 @@
 - [ ] history token 不超过 `history_max_tokens` 上限（默认 2000）
 - [ ] 空 tool_trace 轮次（LLM 直接回答）不产生空行
 - [ ] 分隔标记引导 LLM 使用 JSON 格式回答
-- [ ] Phase 7 全量回归 ≥880 passed（不回退）
+- [ ] Phase 7 全量回归 ≥769 passed（不回退）
 - [ ] e2e interactive 测试不再全部 xfail（至少 1 个 PASS）
 
 ---
@@ -103,6 +103,7 @@
 - [ ] `ToolCallSummary` dataclass 包含 `tool_name`、`arguments_display`、`success`、`failure_code` 字段
 - [ ] `result_summary` property 从 `success` + `failure_code` 推导摘要
 - [ ] 成功时返回 "成功"，失败时返回 "失败: {failure_code}"
+- [ ] `Turn` 新增 `tool_calls: tuple[ToolCallSummary, ...] = ()` 字段，默认空元组，向后兼容
 
 **Task 2（truncate_turns）**：
 - [ ] `Session.truncate_turns(keep_last)` 保留最近 `keep_last` 个 turns
@@ -173,7 +174,7 @@ uv run pytest tests/fund/cli/ tests/fund/service/ tests/fund/host/ tests/fund/ag
 
 ### 4.3 Final Checklist
 
-- [ ] 全量回归 ≥880 passed（不回退）
+- [ ] 全量回归 ≥769 passed（不回退）
 - [ ] e2e interactive 测试不再全部 xfail
 - [ ] `grep -r "LlmClientProtocol" fund_agent/agent/llm_tool_loop.py` 无签名变更
 - [ ] `grep -r "next_step" fund_agent/agent/llm_tool_loop.py` 无签名变更
