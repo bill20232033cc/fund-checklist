@@ -2410,7 +2410,7 @@ uv run pytest tests/fund/cli/ tests/fund/service/ tests/fund/host/ tests/fund/ag
 |---|------|---------|------|------|
 | 1 | 新增 `ToolCallSummary` dataclass | `session_models.py` | ~10 行 | 🔴 |
 | 2 | 新增 `Session.truncate_turns()` | `session_models.py` | ~15 行 | 🔴 |
-| 3 | `_build_history_contribution()` | `chat_service.py` | ~20 行 | 🔴 |
+| 3 | `_build_history_contribution()` + `ChatService.__init__` 新增 `history_max_tokens` 参数 | `chat_service.py` | ~20 行 | 🔴 |
 | 4 | `_format_turn_for_history()` | `chat_service.py` | ~15 行 | 🔴 |
 | 5 | `_estimate_token_count()` | `chat_service.py` | ~5 行 | 🔴 |
 | 6 | `_build_contributions` 增加 history | `chat_service.py` | ~5 行 | 🔴 |
@@ -2426,6 +2426,7 @@ uv run pytest tests/fund/cli/ tests/fund/service/ tests/fund/host/ tests/fund/ag
 - `llm_tool_loop.py` 修改 → 停止（违反方案 B 约束）
 - history 注入后全量回归 < 769 passed → 停止
 - e2e interactive 测试仍全部 xfail → 停止
+- history contribution 未出现在 system prompt 中 → 停止（核心功能验收点）
 
 ### 验证命令
 

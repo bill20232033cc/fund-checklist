@@ -76,6 +76,13 @@ Phase 7.2 已裁决（2026-07-27），✅ 已完成（2026-07-27）。交互体�
 - 新建 fix 场景（结构化占位符补强） ✅
 - 扩展 alias 覆盖；Rich 输出格式化；多轮对话增强 ✅
 - 详见 `docs/implementation-control.md` Phase 7.2 节
+
+Phase 7.3 已裁决（2026-07-28），🔴 待实施。对话历史注入 LLM context（方案 B — Prompt 层编织）：
+- **方案 B 优化设计**：`docs/phase7.3-option-b-optimization.md`（DS 二审有条件通过）
+- **核心变更**：ToolCallSummary + history contribution 注入 system prompt + truncate_turns
+- **总改动量**：~121 行（session_models ~30 + chat_service ~60 + scene_config ~1 + 测试 ~30）
+- **失败模式缓解**：9 项（FM1-FM9），详见优化设计文档
+- **DS 二审裁决**：有条件通过。实施前处理 3 项：① truncate_turns 补充 status/updated_at；② chat_turn() 填充 ToolCallSummary；③ ContextBudget 与 history token 交互留 TODO
 - 禁止 Service / UI / Host / 展示层 / LLM prompt 直接消费 raw PDF、raw Docling JSON、PDF cache path、本地路径、URL secret 或 parser private payload。
 - Dayu 只能作为架构参考和能力来源；禁止直接引入 `dayu-agent`、`dayu.host`、`dayu.engine` 作为生产 runtime。
 - 复制或改写 Dayu 代码必须先经过 license/compliance gate。
