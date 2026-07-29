@@ -403,13 +403,15 @@ def _final_result(..., query: str = ""):
 
 ### 7.1 Phase 7.4 任务分解
 
+**方案 E（Dayu 分层方案）**，无分类器、无未验证标记，用 `scene` 参数直接决定校验级别。
+
 | # | 任务 | 文件 | 行数 | 依赖 |
 |---|------|------|------|------|
-| 1 | 实现 `_question_needs_citation()` 分类器 | `llm_tool_loop.py` | ~30 行 | 无 |
-| 2 | `_final_result()` 增加 `enforce_citation` 参数 | `llm_tool_loop.py` | ~15 行 | Task 1 |
-| 3 | `LlmToolLoopRunner.run()` 透传 `enforce_citation` | `llm_tool_loop.py` | ~5 行 | Task 2 |
-| 4 | `chat_service.chat_turn()` 根据场景设置 `enforce_citation` | `chat_service.py` | ~10 行 | Task 3 |
-| 5 | interactive 模式使用弱校验 + 未验证标记 | `chat_service.py` | ~5 行 | Task 4 |
+| 1 | `_final_result()` 增加 `scene: str` 参数 | `llm_tool_loop.py` | ~10 行 | 无 |
+| 2 | `scene == "interactive"` 时跳过 citation + evidence 校验 | `llm_tool_loop.py` | ~15 行 | Task 1 |
+| 3 | `LlmToolLoopRunner.run()` 透传 `scene` | `llm_tool_loop.py` | ~5 行 | Task 1 |
+| 4 | `chat_service.chat_turn()` 透传 `scene` 到 runner | `chat_service.py` | ~10 行 | Task 3 |
+| 5 | interactive system prompt 注入"不发明事实"规则 | `scene.md` | ~10 行 | 无 |
 | 6 | 单元测试 | `tests/` | ~50 行 | Task 1-5 |
 | 7 | e2e 测试 | `tests/e2e/` | ~20 行 | Task 6 |
 
@@ -423,36 +425,44 @@ uv run pytest tests/fund/agent/test_llm_tool_loop.py -v --tb=short
 uv run fund-checklist interactive --fund-code 163415 --work-dir .fund_e2e_163415_v3
 
 # 测试场景：
-# 1. "费率是多少" → 应有 citation
-# 2. "刚才的数据是哪一年的" → 应成功，标记为未验证
-# 3. "你好" → 应成功
+# 1. "费率是多少" → 应成功（interactive 跳过 citation 校验）
+# 2. "刚才的数据是哪一年的" → 应成功（追问场景）
+# 3. "你好" → 应成功（非数据类问题）
+# 4. ask 模式同样问题 → 应严格校验 citation
 ```
 
 ### 7.3 Stop Conditions
 
-- 问题分类器误判率 > 20% → 停止（需要调整规则）
 - ask 模式 citation 校验被绕过 → 停止（违反设计约束）
 - 全量回归 < 900 passed → 停止
+- interactive 模式仍报"缺少受控 citation" → 停止（修复未生效）
 
-### 5.5 推荐方案
+### 7.4 DS Review 问题处理
 
-**推荐方案 E（Dayu 分层方案）**，理由：
+| # | 问题 | 处理 |
+|---|------|------|
+| C2 | LLM 虚假审计通过风险 | 方案 E 设计如此：对话阶段不阻断，依赖事后审计（generate + audit 管道）。已在 §5.5 缺点中说明。 |
+| C3 | multi_turn 连带豁免 | 方案 E 不用 multi_turn，用 scene 参数。interactive/ask/generate 是独立 scene，不存在连带豁免。 |
+| S1 | 方案 E 有隐式分类器 | 是。scene 判定是架构级分类（不是问题级分类），开销可忽略，在 §5.5 实现要点已说明。 |
+| S2 | multi_turn 判定条件 | 方案 E 不用 multi_turn，此问题不适用。 |
+| M1 | 降级路径形同虚设 | 已修正。降级路径改为：如果对话中 LLM 幻觉过多 → 在 interactive prompt 中增加更严格的约束（而非切换到方案 D）。 |
+| P1 | §8 待讨论过时 | 已更新，移除分类器相关问题。 |
 
-1. **Dayu 已验证此模式可行**：对话模式不阻断、报告阶段事后审计，是成熟的设计模式
-2. **实现最简**：~20 行代码改动（scene 参数 + prompt 片段），无需分类器
-3. **用户体验最佳**：对话完全流畅，无"未验证"标记干扰
-4. **与现有架构兼容**：ask/generate 模式的严格校验完全不变
+### 7.5 降级路径
 
-**降级路径**：如果方案 E 在实践中发现对话中 LLM 幻觉过多，可叠加方案 D 的分类器（方案 E → 方案 D 渐进升级）。
+如果方案 E 在实践中发现 interactive 模式 LLM 幻觉过多（用户反馈明显不准确）：
+1. **短期**：在 `scene.md` prompt 中增加更严格的约束规则
+2. **中期**：考虑对特定工具（如 `read_table`）的结果做格式校验（非 citation 校验）
+3. **长期**：如仍不足，可渐进升级到方案 D（增加问题分类器）
 
 ---
 
 ## 8. 待讨论
 
-1. **问题分类器的规则来源**：是硬编码规则还是 LLM 分类？
-2. **"未验证"标记的形式**：是文本标记还是 UI 提示？
-3. **是否需要用户可控**：用户能否手动开启/关闭 citation 校验？
-4. **与 Phase 7.3 history injection 的交互**：历史轮次的 citation 如何处理？
+1. **是否需要用户可控**：用户能否手动开启/关闭 citation 校验？
+2. **与 Phase 7.3 history injection 的交互**：历史轮次的 citation 如何处理？
+3. **事后审计何时触发**：interactive 会话结束后是否自动触发审计？
+4. **审计结果如何反馈**：如果发现对话中有不准确内容，如何通知用户？
 
 ---
 
