@@ -1,0 +1,6 @@
+Task 1 QA: No DIRECT_KEYWORDS in fund_agent/service/
+
+Command: grep -rn "DIRECT_KEYWORDS\|DIRECT_RETURN_KEYWORDS" fund_agent/service/ 2>&1
+Result: (no matches found)
+
+VERDICT: PASS - Zero references to DIRECT_KEYWORDS or DIRECT_RETURN_KEYWORDS in service layer.

@@ -1764,6 +1764,52 @@ MAX_PATCH_ATTEMPTS = 3
 MAX_REGENERATE_ATTEMPTS = 3
 
 
+def select_repair_strategy(decision: AuditDecision | None) -> tuple[str, str]:
+    """基于审计分数和违规严重度自动选择修复策略。
+
+    策略选择规则：
+    - 分数 >= 80（SCORE_PASS）→ skip
+    - 分数 50-79（SCORE_PATCH）且无 CRITICAL 违规 → repair
+    - 分数 50-79 且有 CRITICAL 违规 → regenerate
+    - 分数 < 50 → regenerate
+
+    参数:
+        decision: 审计决定；None 表示无审计产物。
+
+    返回:
+        (strategy, reason) 元组。strategy 为 "skip" | "repair" | "regenerate"。
+    """
+
+    if decision is None:
+        return "regenerate", "无审计产物，需重新生成"
+
+    score = decision.score
+    has_critical = any(
+        v.severity == ViolationSeverity.CRITICAL for v in decision.violations
+    )
+
+    if score >= SCORE_PASS:
+        return "skip", f"分数 {score:.1f} >= {SCORE_PASS}，通过"
+
+    if score >= SCORE_PATCH:
+        if has_critical:
+            critical_codes = sorted({
+                v.code for v in decision.violations
+                if v.severity == ViolationSeverity.CRITICAL
+            })
+            return (
+                "regenerate",
+                f"分数 {score:.1f} >= {SCORE_PATCH} 但存在 CRITICAL 违规 {critical_codes}，需重新生成",
+            )
+        return (
+            "repair",
+            f"分数 {score:.1f} 在 [{SCORE_PATCH}, {SCORE_PASS}) 且无 CRITICAL 违规，走修复路径",
+        )
+
+    # score < SCORE_PATCH
+    return "regenerate", f"分数 {score:.1f} < {SCORE_PATCH}，需重新生成"
+
+
 class ReportGenerationCoordinator:
     """报告生成协调器。
 

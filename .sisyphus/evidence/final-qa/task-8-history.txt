@@ -1,0 +1,11 @@
+Task 8 QA: /history command
+
+Command: grep -n "history" fund_agent/cli/main.py | head -20
+Results:
+  1154:  if command == "history":
+  1155:      _print_history(session, stdout)
+  2014:  "stats", "save", "export", "model", "verbose", "document", "history",
+  2047:  def _print_history(session: object, stdout: TextIO) -> None:
+  2077:  print("  /history    显示最近 10 轮对话摘要", file=stdout)
+
+VERDICT: PASS - /history command is registered (line 1154), listed in known commands (line 2014), has implementation (line 2047), and shows in help text (line 2077).

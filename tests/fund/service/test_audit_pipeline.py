@@ -838,3 +838,168 @@ def test_ch6_contract_rejects_veto_language() -> None:
     assert "分级" in contract.narrative_mode
     assert any("分级" in item for item in contract.must_answer)
     assert any("分级" in item for item in contract.required_output_items)
+
+
+# ============================================================
+# select_repair_strategy 决策测试
+# ============================================================
+
+
+def test_decision_select_strategy_skip_score_above_pass() -> None:
+    """score >= 80 → skip。"""
+    from fund_agent.service.audit_pipeline import select_repair_strategy
+
+    decision = AuditDecision(
+        chapter_id=2,
+        score=85.0,
+        violations=(),
+        recommendation="pass",
+    )
+    strategy, reason = select_repair_strategy(decision)
+    assert strategy == "skip"
+    assert "85.0" in reason
+
+
+def test_decision_select_strategy_skip_score_exactly_pass() -> None:
+    """score == 80 → skip（边界值）。"""
+    from fund_agent.service.audit_pipeline import select_repair_strategy
+
+    decision = AuditDecision(
+        chapter_id=2,
+        score=80.0,
+        violations=(),
+        recommendation="pass",
+    )
+    strategy, reason = select_repair_strategy(decision)
+    assert strategy == "skip"
+
+
+def test_decision_select_strategy_repair_no_critical() -> None:
+    """score 50-79 且无 CRITICAL → repair。"""
+    from fund_agent.service.audit_pipeline import select_repair_strategy
+
+    decision = AuditDecision(
+        chapter_id=2,
+        score=65.0,
+        violations=(
+            AuditViolation(
+                code="C4", category=ViolationCategory.CONTENT,
+                severity=ViolationSeverity.MAJOR, description="分析深度不足",
+            ),
+            AuditViolation(
+                code="S2", category=ViolationCategory.STRUCTURE,
+                severity=ViolationSeverity.MAJOR, description="必须字段缺失",
+            ),
+        ),
+        recommendation="patch",
+    )
+    strategy, reason = select_repair_strategy(decision)
+    assert strategy == "repair"
+    assert "无 CRITICAL" in reason
+
+
+def test_decision_select_strategy_regenerate_with_critical() -> None:
+    """score 50-79 但有 CRITICAL → regenerate。"""
+    from fund_agent.service.audit_pipeline import select_repair_strategy
+
+    decision = AuditDecision(
+        chapter_id=2,
+        score=65.0,
+        violations=(
+            AuditViolation(
+                code="C1", category=ViolationCategory.CONTENT,
+                severity=ViolationSeverity.CRITICAL, description="事实错误",
+            ),
+            AuditViolation(
+                code="C4", category=ViolationCategory.CONTENT,
+                severity=ViolationSeverity.MAJOR, description="分析深度不足",
+            ),
+        ),
+        recommendation="patch",
+    )
+    strategy, reason = select_repair_strategy(decision)
+    assert strategy == "regenerate"
+    assert "CRITICAL" in reason
+    assert "C1" in reason
+
+
+def test_decision_select_strategy_regenerate_low_score() -> None:
+    """score < 50 → regenerate。"""
+    from fund_agent.service.audit_pipeline import select_repair_strategy
+
+    decision = AuditDecision(
+        chapter_id=2,
+        score=35.0,
+        violations=(
+            AuditViolation(
+                code="P2", category=ViolationCategory.PLACEHOLDER,
+                severity=ViolationSeverity.CRITICAL, description="数字编造",
+            ),
+        ),
+        recommendation="regenerate",
+    )
+    strategy, reason = select_repair_strategy(decision)
+    assert strategy == "regenerate"
+    assert "35.0" in reason
+
+
+def test_decision_select_strategy_regenerate_exactly_patch_boundary() -> None:
+    """score == 50 → regenerate（边界值：< 50 才走 regenerate，== 50 走 repair/regenerate）。"""
+    from fund_agent.service.audit_pipeline import select_repair_strategy
+
+    decision = AuditDecision(
+        chapter_id=2,
+        score=50.0,
+        violations=(),
+        recommendation="patch",
+    )
+    strategy, _ = select_repair_strategy(decision)
+    # score == 50 进入 SCORE_PATCH 分支，无 CRITICAL → repair
+    assert strategy == "repair"
+
+
+def test_decision_select_strategy_none_decision() -> None:
+    """decision 为 None → regenerate。"""
+    from fund_agent.service.audit_pipeline import select_repair_strategy
+
+    strategy, reason = select_repair_strategy(None)
+    assert strategy == "regenerate"
+    assert "无审计产物" in reason
+
+
+def test_decision_select_strategy_critical_at_score_79() -> None:
+    """score=79 + CRITICAL → regenerate（紧贴 pass 边界）。"""
+    from fund_agent.service.audit_pipeline import select_repair_strategy
+
+    decision = AuditDecision(
+        chapter_id=2,
+        score=79.0,
+        violations=(
+            AuditViolation(
+                code="P1", category=ViolationCategory.PLACEHOLDER,
+                severity=ViolationSeverity.CRITICAL, description="数据未获取",
+            ),
+        ),
+        recommendation="patch",
+    )
+    strategy, reason = select_repair_strategy(decision)
+    assert strategy == "regenerate"
+
+
+def test_decision_select_strategy_no_critical_at_score_51() -> None:
+    """score=51 + 无 CRITICAL → repair（紧贴 patch 下边界）。"""
+    from fund_agent.service.audit_pipeline import select_repair_strategy
+
+    decision = AuditDecision(
+        chapter_id=2,
+        score=51.0,
+        violations=(
+            AuditViolation(
+                code="S2", category=ViolationCategory.STRUCTURE,
+                severity=ViolationSeverity.MAJOR, description="必须字段缺失",
+            ),
+        ),
+        recommendation="patch",
+    )
+    strategy, _ = select_repair_strategy(decision)
+    assert strategy == "repair"

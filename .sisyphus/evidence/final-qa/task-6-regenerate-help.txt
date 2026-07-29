@@ -1,0 +1,12 @@
+Task 6 QA: regenerate CLI
+
+Command: uv run fund-checklist regenerate --help
+Result:
+usage: fund-checklist regenerate [-h] --fund-code FUND_CODE --year YEAR --chapter CHAPTER [--work-dir WORK_DIR] [--llm]
+  --fund-code FUND_CODE  基金代码
+  --year YEAR            报告年份
+  --chapter CHAPTER      要重写的章节号，逗号分隔（如 3,5,7）
+  --work-dir WORK_DIR
+  --llm                  使用 LLM 执行重写（需要 DEEPSEEK_API_KEY）
+
+VERDICT: PASS - regenerate CLI shows all parameters: --fund-code, --year, --chapter, --work-dir, --llm.

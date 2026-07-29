@@ -1,0 +1,6 @@
+Task 2 QA: Alias Routing - conclusion
+
+Command: uv run python -c "from fund_agent.service.extraction import _route_plan_for_query; r = _route_plan_for_query('结论是什么'); print(f'profile_name={r.profile_name}')"
+Result: profile_name=conclusion
+
+VERDICT: PASS - Query '结论是什么' correctly routes to conclusion profile.

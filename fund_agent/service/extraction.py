@@ -2834,6 +2834,41 @@ class FundReadingService:
                         estimated_aum = f"{total_aum:.2f}元"
                 break
 
+            # Fallback: class-specific NAV regex may fail when report writes
+            # "基金份额净值 X.XX元（A类）" (NAV before class label).
+            # Try class-neutral matching so shares×NAV can still produce estimated_aum.
+            if not estimated_aum:
+                for hit in nav_results:
+                    if isinstance(hit, ToolFailure) or not hit.section_ref:
+                        continue
+                    section = tool_service.read_section(doc_id, hit.section_ref)
+                    if not hasattr(section, "text"):
+                        continue
+                    text = section.text
+                    m = re.search(r'基金份额净值\s*(?:为)?\s*([\d.]+)\s*元', text)
+                    if m:
+                        try:
+                            nav_value = float(m.group(1))
+                            total_shares = 0.0
+                            for shares_str in (total_shares_a, total_shares_c):
+                                if shares_str:
+                                    try:
+                                        total_shares += float(shares_str.replace(",", ""))
+                                    except (ValueError, IndexError):
+                                        pass
+                            if total_shares > 0:
+                                total_aum = nav_value * total_shares
+                                if total_aum >= 1e8:
+                                    estimated_aum = f"{total_aum / 1e8:.2f}亿元"
+                                elif total_aum >= 1e4:
+                                    estimated_aum = f"{total_aum / 1e4:.2f}万元"
+                                else:
+                                    estimated_aum = f"{total_aum:.2f}元"
+                        except (ValueError, IndexError):
+                            pass
+                    if estimated_aum:
+                        break
+
             return ScaleInfo(
                 total_shares_a=total_shares_a,
                 total_shares_c=total_shares_c,

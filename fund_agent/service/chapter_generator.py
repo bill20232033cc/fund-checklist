@@ -374,18 +374,29 @@ def generate_data_table(
                 f"{p.get('benchmark_return_rate', 'N/A')} | "
                 f"{p.get('excess_return', 'N/A')} |"
             )
-        # 费率作为成本C
+        # 费率作为成本C（动态列：展示所有提取到的费率类型）
         lines.extend(["", "## 成本数据(C)", ""])
-        lines.extend(["| 年份 | 管理费 | 托管费 |", "|------|--------|--------|"])
+        all_fee_names: list[str] = []
         for year in sorted(fees.keys()):
-            mgmt = ""
-            cust = ""
             for f in fees[year]:
-                if "管理" in f.fee_name:
-                    mgmt = f.rate
-                elif "托管" in f.fee_name:
-                    cust = f.rate
-            lines.append(f"| {year} | {mgmt} | {cust} |")
+                if f.fee_name not in all_fee_names:
+                    all_fee_names.append(f.fee_name)
+        if all_fee_names:
+            header = "| 年份 | " + " | ".join(all_fee_names) + " |"
+            separator = "|------|" + "|".join(["--------"] * len(all_fee_names)) + "|"
+            lines.extend([header, separator])
+            for year in sorted(fees.keys()):
+                row = f"| {year} |"
+                for name in all_fee_names:
+                    rate = ""
+                    for f in fees[year]:
+                        if f.fee_name == name:
+                            rate = f.rate
+                            break
+                    row += f" {rate} |"
+                lines.append(row)
+        else:
+            lines.extend(["| 年份 | 管理费 | 托管费 |", "|------|--------|--------|"])
         base_content = "\n".join(lines)
 
     # Ch3: 基金经理画像
@@ -605,6 +616,9 @@ def generate_data_table(
             lines.extend(["", "## 综合信号评分"])
             lines.append(f"- 综合信号：{signal_judgment.signal}")
             lines.append(f"- 标准化评分：{signal_judgment.normalized_score:.0f}/100")
+            raw_total = sum(ind.score for ind in signal_judgment.indicators)
+            raw_max = sum(ind.max_score for ind in signal_judgment.indicators)
+            lines.append(f"- 原始得分：{raw_total}/{raw_max}（各指标满分合计归一化至100分制）")
             lines.append(f"- 数据完整度：{signal_judgment.data_completeness:.0%}（{int(signal_judgment.data_completeness * len(signal_judgment.indicators))}/{len(signal_judgment.indicators)}）")
             if signal_judgment.warnings:
                 for w in signal_judgment.warnings:

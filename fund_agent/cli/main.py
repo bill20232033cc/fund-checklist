@@ -110,6 +110,12 @@ def run_cli(
             return _run_ask_command(args, stdout=stdout, stderr=stderr)
         if args.command == "interactive":
             return _run_interactive_command(args, stdout=stdout, stderr=stderr)
+        if args.command == "fix":
+            return _run_fix_command(args, stdout=stdout, stderr=stderr)
+        if args.command == "repair":
+            return _run_repair_command(args, stdout=stdout, stderr=stderr)
+        if args.command == "regenerate":
+            return _run_regenerate_command(args, stdout=stdout, stderr=stderr)
     except DocumentToolError as exc:
         _write_classified_failure(ToolFailure(code=exc.code, message=exc.message), stderr)
         return CLASSIFIED_FAILURE_EXIT_CODE
@@ -211,6 +217,27 @@ def build_parser() -> argparse.ArgumentParser:
     interactive_parser.add_argument("--label", default=None, help="会话标签（用于恢复）")
     interactive_parser.add_argument("--no-stream", action="store_true", default=False, help="禁用流式输出")
     interactive_parser.add_argument("--enable-tool-trace", action="store_true", default=False, help="显示工具调用详情")
+    interactive_parser.add_argument("--plain", action="store_true", default=False, help="保留原始 Markdown 文本，禁用 Rich 格式化")
+
+    fix_parser = subparsers.add_parser("fix")
+    fix_parser.add_argument("--fund-code", required=True, help="基金代码")
+    fix_parser.add_argument("--chapter", required=True, type=int, help="要修复的章节号（1-8）")
+    fix_parser.add_argument("--work-dir", default=Path(DEFAULT_WORK_DIR), type=Path)
+
+    repair_parser = subparsers.add_parser("repair")
+    repair_parser.add_argument("--fund-code", required=True, help="基金代码")
+    repair_parser.add_argument("--year", required=True, type=int, help="报告年份")
+    repair_parser.add_argument("--chapter", required=True, help="要修复的章节号，逗号分隔（如 3,5,7）")
+    repair_parser.add_argument("--work-dir", default=Path(DEFAULT_WORK_DIR), type=Path)
+    repair_parser.add_argument("--llm", action="store_true", default=False, help="使用 LLM 执行修复（需要 DEEPSEEK_API_KEY）")
+    repair_parser.add_argument("--auto", action="store_true", default=False, help="基于审计分数自动选择修复策略")
+
+    regenerate_parser = subparsers.add_parser("regenerate")
+    regenerate_parser.add_argument("--fund-code", required=True, help="基金代码")
+    regenerate_parser.add_argument("--year", required=True, type=int, help="报告年份")
+    regenerate_parser.add_argument("--chapter", required=True, help="要重写的章节号，逗号分隔（如 3,5,7）")
+    regenerate_parser.add_argument("--work-dir", default=Path(DEFAULT_WORK_DIR), type=Path)
+    regenerate_parser.add_argument("--llm", action="store_true", default=False, help="使用 LLM 执行重写（需要 DEEPSEEK_API_KEY）")
     return parser
 
 
@@ -1101,9 +1128,10 @@ def _run_interactive_command(
     )
 
     print(f"\n已选择 {selected_year} 年年报。输入问题开始对话，/help 查看命令，exit 退出。", file=stdout)
+    print("提示：支持多轮对话，可以追问上一个问题的细节。输入 /help 查看命令。", file=stdout)
 
     verbose = getattr(args, "enable_tool_trace", False)
-    current_model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro-thinking")
+    current_model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
 
     while True:
         try:
@@ -1122,6 +1150,9 @@ def _run_interactive_command(
             continue
         if command == "clear":
             print("\033[2J\033[H", file=stdout, end="")  # ANSI 清屏
+            continue
+        if command == "history":
+            _print_history(session, stdout)
             continue
         if command == "label":
             new_label = text.strip() if text else None
@@ -1233,13 +1264,724 @@ def _run_interactive_command(
         if result.investment_advice_detected:
             print("[投资建议检测] 回答已拦截。", file=stdout)
 
-        # 使用 rich Markdown 渲染输出
-        rendered = render_markdown(result.answer, use_rich=True)
+        # 使用 rich Markdown 渲染输出（--plain 保留原始文本）
+        use_rich = not getattr(args, "plain", False)
+        rendered = render_markdown(result.answer, use_rich=use_rich)
         print(rendered, file=stdout)
+
+        # 追问建议（分析性回答末尾）
+        suggestion = _generate_follow_up_suggestion(text, result.answer)
+        if suggestion:
+            print(f"\n{suggestion}", file=stdout)
 
         if verbose and result.tool_trace:
             print(f"\n[工具调用: {', '.join(result.tool_trace)}]", file=stdout)
 
+    return SUCCESS_EXIT_CODE
+
+
+_PLACEHOLDER_RE = re.compile(r"\[(?:待补充|数据缺失|暂无数据|需补充|占位符|待补全|需人工核实|暂无)\]")
+
+
+def _extract_chapter_from_markdown(md_text: str, chapter_num: int) -> str | None:
+    """从 Markdown 报告中按章节号提取章节正文（1-indexed）。"""
+    pattern = re.compile(r"\n---\n\n## 第 (\d+) 章：[^\n]*\n")
+    matches = list(pattern.finditer(md_text))
+
+    for i, match in enumerate(matches):
+        chap_num = int(match.group(1))
+        if chap_num == chapter_num:
+            start = match.end()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(md_text)
+            return md_text[start:end].strip()
+
+    return None
+
+
+def _run_fix_command(args: argparse.Namespace, *, stdout: TextIO, stderr: TextIO) -> int:
+    """修复报告中指定章节的占位符。
+
+    参数:
+        args: argparse 解析出的 fix 参数。
+        stdout: 成功输出流。
+        stderr: 失败输出流。
+
+    返回:
+        成功返回 0；失败返回 2。
+    """
+    work_dir = Path(args.work_dir)
+    chapter_num = args.chapter
+
+    reports_dir = work_dir / "reports"
+    if not reports_dir.is_dir():
+        failure = ToolFailure(code=FailureCode.NOT_FOUND, message="reports 目录不存在，请先运行 generate 命令")
+        _write_classified_failure(failure, stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+    pattern = f"{args.fund_code}-*-analysis.md"
+    report_files = sorted(reports_dir.glob(pattern))
+    if not report_files:
+        failure = ToolFailure(code=FailureCode.NOT_FOUND, message=f"未找到基金 {args.fund_code} 的分析报告")
+        _write_classified_failure(failure, stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+    latest_report = report_files[-1]
+    year_match = re.match(rf"{args.fund_code}-(\d{{4}})-analysis\.md", latest_report.name)
+    if not year_match:
+        failure = ToolFailure(code=FailureCode.SCHEMA_DRIFT, message=f"无法从文件名解析年份: {latest_report.name}")
+        _write_classified_failure(failure, stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+    report_year = int(year_match.group(1))
+
+    md_text = latest_report.read_text(encoding="utf-8")
+    chapter_content = _extract_chapter_from_markdown(md_text, chapter_num)
+    if chapter_content is None:
+        failure = ToolFailure(code=FailureCode.NOT_FOUND, message=f"未找到第 {chapter_num} 章")
+        _write_classified_failure(failure, stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+    matching_docs = _collect_matching_docs(work_dir, args.fund_code, (report_year,))
+    document_id = matching_docs[0].document_id if matching_docs else ""
+
+    placeholders_before = len(_PLACEHOLDER_RE.findall(chapter_content))
+
+    from fund_agent.service.chapter_generator import _fix_chapter_placeholders
+
+    fixed_content = _fix_chapter_placeholders(
+        chapter_content,
+        document_id=document_id,
+    )
+    if fixed_content is None:
+        failure = ToolFailure(code=FailureCode.UNAVAILABLE, message="占位符修复失败")
+        _write_classified_failure(failure, stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+    placeholders_after = len(_PLACEHOLDER_RE.findall(fixed_content))
+    strengthened = placeholders_before - placeholders_after
+    retained = placeholders_after
+
+    print(f"第 {chapter_num} 章修复完成：", file=stdout)
+    print(f"补强占位符: {strengthened}", file=stdout)
+    print(f"保留占位符: {retained}", file=stdout)
+
+    return SUCCESS_EXIT_CODE
+
+
+def _parse_chapters(chapters_str: str) -> list[int]:
+    """Parse comma-separated chapter string into sorted unique int list."""
+    return sorted({int(c.strip()) for c in chapters_str.split(",")})
+
+
+def _replace_chapter_in_markdown(md_text: str, chapter_num: int, new_content: str) -> str:
+    """Replace a single chapter's body content within the full Markdown report."""
+    pattern = re.compile(r"\n---\n\n## 第 (\d+) 章：[^\n]*\n")
+    matches = list(pattern.finditer(md_text))
+
+    for i, match in enumerate(matches):
+        chap_num = int(match.group(1))
+        if chap_num == chapter_num:
+            start = match.end()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(md_text)
+            return md_text[:start] + new_content + "\n\n" + md_text[end:]
+
+    return md_text
+
+
+def _run_repair_command(args: argparse.Namespace, *, stdout: TextIO, stderr: TextIO) -> int:
+    """基于审计产物修复报告中指定章节的违规项。
+
+    Wire REPAIR_SCENE_CONFIG -> ChatTurnContract -> ChatService for scene-aware
+    context, then use ChapterRepairer for plan generation + patch application.
+
+    参数:
+        args: argparse 解析出的 repair 参数。
+        stdout: 成功输出流。
+        stderr: 失败输出流。
+
+    返回:
+        成功返回 0；失败返回 2。
+    """
+    if getattr(args, "auto", False):
+        return _run_auto_fix(args, stdout=stdout, stderr=stderr)
+
+    work_dir = Path(args.work_dir)
+    chapter_ids = _parse_chapters(args.chapter)
+
+    # 查找报告文件
+    reports_dir = work_dir / "reports"
+    report_path = reports_dir / f"{args.fund_code}-{args.year}-analysis.md"
+    if not report_path.is_file():
+        failure = ToolFailure(code=FailureCode.NOT_FOUND, message=f"未找到报告: {report_path.name}")
+        _write_classified_failure(failure, stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+    md_text = report_path.read_text(encoding="utf-8")
+
+    # 初始化 LLM 客户端
+    llm_client = DeepSeekLlmClient() if args.llm else None
+
+    # Wire REPAIR_SCENE_CONFIG -> ChatTurnContract -> ChatService
+    from fund_agent.host.session_store import SessionStore
+    from fund_agent.service.chat_service import ChatService
+    from fund_agent.service.chat_contract import ChatTurnContract
+    from fund_agent.service.prompt_composer import PromptComposer
+    from fund_agent.service.scene_config import REPAIR_SCENE_CONFIG
+    from fund_agent.service.audit_pipeline import (
+        CHAPTER_CONTRACTS,
+        ArtifactStore,
+        ChapterRepairer,
+    )
+
+    template_dir = Path(__file__).parent.parent / "service" / "prompts"
+    prompt_composer = PromptComposer(template_dir=template_dir)
+    sessions_dir = work_dir / "sessions"
+    session_store = SessionStore(sessions_dir)
+    chat_service = ChatService(
+        session_store=session_store,
+        prompt_composer=prompt_composer,
+        scene_config=REPAIR_SCENE_CONFIG,
+        tool_service=None,
+    )
+
+    artifact_store = ArtifactStore(work_dir)
+
+    before_scores: dict[int, float | None] = {}
+    after_scores: dict[int, float | None] = {}
+    repaired_count = 0
+    skipped_count = 0
+
+    for chapter_id in chapter_ids:
+        chapter_content = _extract_chapter_from_markdown(md_text, chapter_id)
+        if chapter_content is None:
+            print(f"第 {chapter_id} 章: 未找到，跳过", file=stdout)
+            skipped_count += 1
+            continue
+
+        audit_decision = artifact_store.load_audit_decision(chapter_id)
+        before_score = audit_decision.score if audit_decision else None
+        violations = audit_decision.violations if audit_decision else ()
+        before_scores[chapter_id] = before_score
+
+        if not violations:
+            print(f"第 {chapter_id} 章: 无违规项 (score={before_score})，跳过", file=stdout)
+            after_scores[chapter_id] = before_score
+            skipped_count += 1
+            continue
+
+        contract = CHAPTER_CONTRACTS.get(chapter_id)
+        if contract is None:
+            print(f"第 {chapter_id} 章: 章节合同未找到，跳过", file=stdout)
+            skipped_count += 1
+            continue
+
+        if llm_client is None:
+            print(f"第 {chapter_id} 章: 未启用 LLM（使用 --llm），跳过", file=stdout)
+            skipped_count += 1
+            continue
+
+        # Create repair contract aligned with scene config
+        repair_contract = ChatTurnContract(
+            scene="repair",
+            session_id=f"repair-{args.fund_code}-{args.year}-ch{chapter_id}",
+            user_text=f"修复章节 {chapter_id}",
+        )
+
+        repairer = ChapterRepairer(
+            llm_client=llm_client,
+            chapter_id=chapter_id,
+            chapter_content=chapter_content,
+            data_table="",
+            contract=contract,
+            violations=violations,
+        )
+
+        plan = repairer.generate_repair_plan()
+        artifact_store.save_repair_plan(plan)
+
+        if plan.strategy == "patch":
+            new_content = repairer.apply_patch(plan)
+            md_text = _replace_chapter_in_markdown(md_text, chapter_id, new_content)
+            repaired_count += 1
+            after_scores[chapter_id] = None  # would need re-audit for true after score
+            print(f"第 {chapter_id} 章: 已修复 ({len(plan.actions)} 个动作, score={before_score})", file=stdout)
+        elif plan.strategy == "regenerate":
+            print(f"第 {chapter_id} 章: 需重新生成 (strategy=regenerate)，当前仅支持 patch", file=stdout)
+            after_scores[chapter_id] = before_score
+            skipped_count += 1
+        else:
+            print(f"第 {chapter_id} 章: 无需修复 (strategy={plan.strategy})", file=stdout)
+            after_scores[chapter_id] = before_score
+            skipped_count += 1
+
+    # 写回报告
+    if repaired_count > 0:
+        report_path.write_text(md_text, encoding="utf-8")
+        print(f"\n已更新报告: {report_path}", file=stdout)
+
+    # 输出审计分数对比
+    print("\n修复前后审计分数对比:", file=stdout)
+    for chapter_id in chapter_ids:
+        before = before_scores.get(chapter_id)
+        after = after_scores.get(chapter_id)
+        before_str = f"{before:.1f}" if before is not None else "N/A"
+        after_str = f"{after:.1f}" if after is not None else "N/A"
+        print(f"  第 {chapter_id} 章: {before_str} → {after_str}", file=stdout)
+
+    print(f"\n修复: {repaired_count} 章, 跳过: {skipped_count} 章", file=stdout)
+    return SUCCESS_EXIT_CODE
+
+
+def _run_auto_fix(
+    args: argparse.Namespace, *, stdout: TextIO, stderr: TextIO
+) -> int:
+    """基于审计分数自动选择修复策略（--auto 模式）。
+
+    对指定章节加载审计决定，按分数和违规严重度自动选择 skip/repair/regenerate，
+    执行修复后增量重审，PATCH/REGENERATE 各最多 3 次。
+
+    参数:
+        args: argparse 解析出的 repair --auto 参数。
+        stdout: 成功输出流。
+        stderr: 失败输出流。
+
+    返回:
+        成功返回 0；失败返回 2。
+    """
+
+    from fund_agent.service.audit_pipeline import (
+        CHAPTER_CONTRACTS,
+        ArtifactStore,
+        ChapterProcessState,
+        ChapterRepairer,
+        ProgrammaticAuditor,
+        SCORE_PASS,
+        SCORE_PATCH,
+        select_repair_strategy,
+    )
+    from fund_agent.service.chapter_generator import (
+        LLM_ANALYSIS_PROMPTS,
+        LLM_CHAPTER_SYSTEM_PROMPT,
+    )
+
+    work_dir = Path(args.work_dir)
+    chapter_ids = _parse_chapters(args.chapter)
+
+    reports_dir = work_dir / "reports"
+    report_path = reports_dir / f"{args.fund_code}-{args.year}-analysis.md"
+    if not report_path.is_file():
+        failure = ToolFailure(
+            code=FailureCode.NOT_FOUND, message=f"未找到报告: {report_path.name}"
+        )
+        _write_classified_failure(failure, stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+    md_text = report_path.read_text(encoding="utf-8")
+    llm_client = DeepSeekLlmClient() if args.llm else None
+    artifact_store = ArtifactStore(work_dir)
+
+    results: dict[int, dict] = {}
+    modified = False
+
+    for chapter_id in chapter_ids:
+        state = ChapterProcessState(chapter_id=chapter_id)
+
+        chapter_content = _extract_chapter_from_markdown(md_text, chapter_id)
+        if chapter_content is None:
+            print(f"第 {chapter_id} 章: 未找到，跳过", file=stdout)
+            state.status = "skipped"
+            results[chapter_id] = {"strategy": "skip", "reason": "章节未找到", "status": "skipped"}
+            continue
+
+        decision = artifact_store.load_audit_decision(chapter_id)
+        strategy, reason = select_repair_strategy(decision)
+
+        print(f"第 {chapter_id} 章: strategy={strategy} | {reason}", file=stdout)
+
+        if strategy == "skip":
+            state.status = "passed"
+            results[chapter_id] = {
+                "strategy": strategy, "reason": reason,
+                "final_score": decision.score if decision else None, "status": "passed",
+            }
+            continue
+
+        if llm_client is None:
+            print(f"  未启用 LLM（使用 --llm），跳过执行", file=stdout)
+            state.status = "skipped"
+            results[chapter_id] = {
+                "strategy": strategy, "reason": reason, "status": "skipped_no_llm",
+            }
+            continue
+
+        contract = CHAPTER_CONTRACTS.get(chapter_id)
+        if contract is None:
+            print(f"  章节合同未找到，跳过", file=stdout)
+            state.status = "skipped"
+            results[chapter_id] = {"strategy": strategy, "reason": "合同缺失", "status": "skipped"}
+            continue
+
+        # 修复循环：PATCH/REGENERATE + 增量重审
+        current_strategy = strategy
+        current_violations = decision.violations if decision else ()
+        final_score = decision.score if decision else 0.0
+
+        while True:
+            if current_strategy == "repair":
+                if not state.can_patch():
+                    if state.can_regenerate():
+                        print(f"  PATCH 次数用尽，降级为 regenerate", file=stdout)
+                        current_strategy = "regenerate"
+                        continue
+                    print(f"  PATCH/REGENERATE 次数均已用尽，标记降级通过", file=stdout)
+                    state.status = "passed_with_degradation"
+                    break
+
+                state.patch_attempts += 1
+                repairer = ChapterRepairer(
+                    llm_client, chapter_id, chapter_content, "",
+                    contract, current_violations,
+                )
+                plan = repairer.generate_repair_plan()
+                artifact_store.save_repair_plan(plan)
+
+                if plan.strategy == "patch":
+                    chapter_content = repairer.apply_patch(plan)
+                    md_text = _replace_chapter_in_markdown(md_text, chapter_id, chapter_content)
+                    modified = True
+                    print(
+                        f"  PATCH #{state.patch_attempts}: {len(plan.actions)} 个动作",
+                        file=stdout,
+                    )
+                else:
+                    print(
+                        f"  PATCH #{state.patch_attempts}: LLM 判断需 regenerate，切换策略",
+                        file=stdout,
+                    )
+                    current_strategy = "regenerate"
+                    continue
+
+            elif current_strategy == "regenerate":
+                if not state.can_regenerate():
+                    if state.can_patch():
+                        print(f"  REGENERATE 次数用尽，降级为 repair", file=stdout)
+                        current_strategy = "repair"
+                        continue
+                    print(f"  REGENERATE 次数用尽，标记降级通过", file=stdout)
+                    state.status = "passed_with_degradation"
+                    break
+
+                state.regenerate_attempts += 1
+                new_content = _llm_regenerate_chapter(
+                    llm_client, chapter_id, chapter_content,
+                    current_violations, contract,
+                )
+                if new_content:
+                    chapter_content = new_content
+                    md_text = _replace_chapter_in_markdown(md_text, chapter_id, chapter_content)
+                    modified = True
+                    print(f"  REGENERATE #{state.regenerate_attempts}: 完成", file=stdout)
+                else:
+                    print(f"  REGENERATE #{state.regenerate_attempts}: LLM 调用失败", file=stdout)
+                    if state.can_patch():
+                        current_strategy = "repair"
+                        continue
+                    state.status = "passed_with_degradation"
+                    break
+
+            # 增量重审（程序审计）
+            prog_auditor = ProgrammaticAuditor(chapter_id, chapter_content, "", contract)
+            prog_score, prog_violations = prog_auditor.audit()
+            state.current_score = prog_score
+            current_violations = prog_violations
+
+            if prog_score >= SCORE_PASS:
+                print(f"  重审: score={prog_score:.1f} >= {SCORE_PASS} → pass", file=stdout)
+                state.status = "passed"
+                final_score = prog_score
+                break
+            elif prog_score >= SCORE_PATCH:
+                print(f"  重审: score={prog_score:.1f}，继续修复", file=stdout)
+                if state.can_patch():
+                    current_strategy = "repair"
+                elif state.can_regenerate():
+                    current_strategy = "regenerate"
+                else:
+                    state.status = "passed_with_degradation"
+                    final_score = prog_score
+                    break
+            else:
+                print(f"  重审: score={prog_score:.1f} < {SCORE_PATCH}，需重新生成", file=stdout)
+                if state.can_regenerate():
+                    current_strategy = "regenerate"
+                elif state.can_patch():
+                    current_strategy = "repair"
+                else:
+                    state.status = "passed_with_degradation"
+                    final_score = prog_score
+                    break
+
+        results[chapter_id] = {
+            "strategy": strategy,
+            "reason": reason,
+            "final_score": final_score,
+            "patch_attempts": state.patch_attempts,
+            "regenerate_attempts": state.regenerate_attempts,
+            "status": state.status,
+        }
+
+    # 写回报告
+    if modified:
+        report_path.write_text(md_text, encoding="utf-8")
+        print(f"\n已更新报告: {report_path}", file=stdout)
+
+    # 输出汇总
+    print("\n=== 自动修复结果 ===", file=stdout)
+    for chapter_id in chapter_ids:
+        r = results.get(chapter_id, {})
+        status = r.get("status", "unknown")
+        score = r.get("final_score")
+        score_str = f"{score:.1f}" if score is not None else "N/A"
+        strategy = r.get("strategy", "?")
+        patches = r.get("patch_attempts", 0)
+        regens = r.get("regenerate_attempts", 0)
+        print(
+            f"  第 {chapter_id} 章: strategy={strategy} → {status} "
+            f"(score={score_str}, patch={patches}, regen={regens})",
+            file=stdout,
+        )
+
+    return SUCCESS_EXIT_CODE
+
+
+def _llm_regenerate_chapter(
+    llm_client: object,
+    chapter_id: int,
+    chapter_content: str,
+    violations: tuple,
+    contract: object,
+) -> str | None:
+    """使用 LLM 重新生成章节分析内容。
+
+    保留原有数据表格，仅重新生成 ## 分析 部分。
+
+    参数:
+        llm_client: LLM 客户端。
+        chapter_id: 章节编号。
+        chapter_content: 完整章节 Markdown。
+        violations: 审计违规项列表。
+        contract: 章节合同。
+
+    返回:
+        重新生成后的完整章节内容；失败返回 None。
+    """
+
+    from fund_agent.service.chapter_generator import (
+        LLM_ANALYSIS_PROMPTS,
+        LLM_CHAPTER_SYSTEM_PROMPT,
+    )
+
+    analysis_prompt = LLM_ANALYSIS_PROMPTS.get(chapter_id)
+    if not analysis_prompt:
+        return None
+
+    # 提取数据表格（## 分析 之前的部分）
+    parts = chapter_content.split("## 分析", 1)
+    data_table = parts[0].strip() if len(parts) > 1 else chapter_content
+
+    # 构建审计反馈
+    feedback_lines = []
+    for v in violations:
+        line = f"- [{v.code}] {v.description}"
+        if v.suggested_fix:
+            line += f"（建议: {v.suggested_fix}）"
+        feedback_lines.append(line)
+    audit_feedback = "\n".join(feedback_lines) if feedback_lines else "无违规项"
+
+    user_prompt = (
+        f"## 数据表格\n\n{data_table}\n\n"
+        f"## 审计违规项（必须修复）\n\n{audit_feedback}\n\n"
+        f"## 分析要求\n\n{analysis_prompt}\n\n"
+        f"请重新生成 ## 分析 部分的完整内容，修复所有审计违规项。"
+    )
+
+    try:
+        analysis = llm_client.generate_text(
+            system_prompt=LLM_CHAPTER_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+        )
+        if not analysis or not isinstance(analysis, str):
+            return None
+        return f"{data_table}\n\n## 分析\n\n{analysis}"
+    except Exception:
+        return None
+
+
+def _run_regenerate_command(args: argparse.Namespace, *, stdout: TextIO, stderr: TextIO) -> int:
+    """基于审计反馈重新生成报告中指定章节。
+
+    Wire REGENERATE_SCENE_CONFIG -> ChatTurnContract -> ChatService for scene-aware
+    context, injecting audit violations as prompt context.
+
+    参数:
+        args: argparse 解析出的 regenerate 参数。
+        stdout: 成功输出流。
+        stderr: 失败输出流。
+
+    返回:
+        成功返回 0；失败返回 2。
+    """
+    work_dir = Path(args.work_dir)
+    chapter_ids = _parse_chapters(args.chapter)
+
+    reports_dir = work_dir / "reports"
+    report_path = reports_dir / f"{args.fund_code}-{args.year}-analysis.md"
+    if not report_path.is_file():
+        failure = ToolFailure(code=FailureCode.NOT_FOUND, message=f"未找到报告: {report_path.name}")
+        _write_classified_failure(failure, stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+    md_text = report_path.read_text(encoding="utf-8")
+
+    llm_client = DeepSeekLlmClient(temperature=0.3) if args.llm else None
+
+    from fund_agent.host.session_store import SessionStore
+    from fund_agent.service.chat_service import ChatService, ChatTurnRequest
+    from fund_agent.service.chat_contract import ChatTurnContract
+    from fund_agent.service.prompt_composer import PromptComposer
+    from fund_agent.service.scene_config import REGENERATE_SCENE_CONFIG
+    from fund_agent.service.audit_pipeline import (
+        CHAPTER_CONTRACTS,
+        ArtifactStore,
+    )
+    from fund_agent.service.session_models import PinnedState
+
+    template_dir = Path(__file__).parent.parent / "service" / "prompts"
+    prompt_composer = PromptComposer(template_dir=template_dir)
+    sessions_dir = work_dir / "sessions"
+    session_store = SessionStore(sessions_dir)
+    chat_service = ChatService(
+        session_store=session_store,
+        prompt_composer=prompt_composer,
+        scene_config=REGENERATE_SCENE_CONFIG,
+        tool_service=None,
+    )
+
+    artifact_store = ArtifactStore(work_dir)
+
+    before_scores: dict[int, float | None] = {}
+    after_scores: dict[int, float | None] = {}
+    regenerated_count = 0
+    skipped_count = 0
+
+    for chapter_id in chapter_ids:
+        chapter_content = _extract_chapter_from_markdown(md_text, chapter_id)
+        if chapter_content is None:
+            print(f"第 {chapter_id} 章: 未找到，跳过", file=stdout)
+            skipped_count += 1
+            continue
+
+        audit_decision = artifact_store.load_audit_decision(chapter_id)
+        before_score = audit_decision.score if audit_decision else None
+        violations = audit_decision.violations if audit_decision else ()
+        before_scores[chapter_id] = before_score
+
+        if not violations:
+            print(f"第 {chapter_id} 章: 无违规项 (score={before_score})，跳过", file=stdout)
+            after_scores[chapter_id] = before_score
+            skipped_count += 1
+            continue
+
+        if llm_client is None:
+            print(f"第 {chapter_id} 章: 未启用 LLM（使用 --llm），跳过", file=stdout)
+            skipped_count += 1
+            continue
+
+        # Build audit feedback from violations
+        audit_feedback_lines = ["## 审计违规项\n"]
+        for v in violations:
+            audit_feedback_lines.append(f"- [{v.code}] {v.description}")
+            if v.evidence:
+                audit_feedback_lines.append(f"  证据: {v.evidence}")
+            if v.suggested_fix:
+                audit_feedback_lines.append(f"  建议: {v.suggested_fix}")
+        audit_feedback = "\n".join(audit_feedback_lines)
+
+        # Build chapter contract text
+        contract = CHAPTER_CONTRACTS.get(chapter_id)
+        chapter_contract_text = ""
+        if contract:
+            chapter_contract_text = "\n".join(
+                f"- {item}" for item in contract.must_answer
+            )
+
+        # Create session with regenerate context in user_constraints
+        session = session_store.create(
+            fund_code=args.fund_code,
+            label=f"regenerate-ch{chapter_id}",
+        )
+        ps = PinnedState(
+            fund_code=args.fund_code,
+            active_year=args.year,
+            user_constraints={
+                "chapter_content": chapter_content,
+                "audit_feedback": audit_feedback,
+                "chapter_contract": chapter_contract_text,
+            },
+        )
+        session = session.with_pinned_state(ps)
+        session_store.save(session)
+
+        # Build user prompt for regeneration
+        user_prompt = (
+            f"请基于以下审计反馈，重新生成第 {chapter_id} 章的完整内容。\n\n"
+            f"## 原始章节内容\n\n{chapter_content}\n\n"
+            f"## 审计反馈\n\n{audit_feedback}\n\n"
+            f"## 章节合同\n\n{chapter_contract_text}\n\n"
+            "请重新生成完整的章节内容（包含数据表格和分析部分），"
+            "修复所有审计违规项。"
+        )
+
+        regenerate_contract = ChatTurnContract(
+            scene="regenerate",
+            session_id=session.session_id,
+            user_text=user_prompt,
+        )
+
+        try:
+            response = chat_service.chat_turn(
+                ChatTurnRequest(
+                    session_id=session.session_id,
+                    user_text=user_prompt,
+                ),
+                contract=regenerate_contract,
+            )
+            new_content = response.answer
+        except Exception as exc:
+            print(f"第 {chapter_id} 章: 重新生成失败 ({exc})", file=stderr)
+            after_scores[chapter_id] = before_score
+            skipped_count += 1
+            continue
+
+        md_text = _replace_chapter_in_markdown(md_text, chapter_id, new_content)
+        regenerated_count += 1
+        after_scores[chapter_id] = None  # would need re-audit for true after score
+        print(f"第 {chapter_id} 章: 已重新生成 (score={before_score})", file=stdout)
+
+    # Write back report
+    if regenerated_count > 0:
+        report_path.write_text(md_text, encoding="utf-8")
+        print(f"\n已更新报告: {report_path}", file=stdout)
+
+    # Output audit score comparison
+    print("\n重写前后审计分数对比:", file=stdout)
+    for chapter_id in chapter_ids:
+        before = before_scores.get(chapter_id)
+        after = after_scores.get(chapter_id)
+        before_str = f"{before:.1f}" if before is not None else "N/A"
+        after_str = f"{after:.1f}" if after is not None else "N/A"
+        print(f"  第 {chapter_id} 章: {before_str} → {after_str}", file=stdout)
+
+    print(f"\n重写: {regenerated_count} 章, 跳过: {skipped_count} 章", file=stdout)
     return SUCCESS_EXIT_CODE
 
 
@@ -1269,7 +2011,7 @@ def _parse_repl_input(text: str) -> tuple[str | None, str | None]:
 
         known_commands = {
             "help", "clear", "exit", "quit", "label",
-            "stats", "save", "export", "model", "verbose", "document",
+            "stats", "save", "export", "model", "verbose", "document", "history",
         }
         if cmd in known_commands:
             # 统一 exit/quit 为 exit
@@ -1283,18 +2025,64 @@ def _parse_repl_input(text: str) -> tuple[str | None, str | None]:
     return None, stripped
 
 
+def _generate_follow_up_suggestion(question: str, answer: str) -> str | None:
+    """基于当前查询上下文生成追问建议。"""
+    if len(answer) < 200:
+        return None
+    keywords = {
+        "经理": "您可以追问：这位基金经理的从业经历、管理其他基金的情况、或任职以来的业绩表现。",
+        "持仓": "您可以追问：重仓股的变化趋势、行业集中度、或与基准的偏离情况。",
+        "业绩": "您可以追问：与同类基金对比、不同时间区间的表现、或风险调整后收益。",
+        "费率": "您可以追问：费率变动原因、与同类基金对比、或对长期收益的影响。",
+        "配置": "您可以追问：资产配置变化趋势、仓位调整逻辑、或与市场环境的匹配度。",
+        "风险": "您可以追问：最大回撤、波动率、或与基准的风险对比。",
+        "债券": "您可以追问：信用评级分布、久期策略、或利率风险管理。",
+    }
+    for keyword, suggestion in keywords.items():
+        if keyword in question:
+            return suggestion
+    return "您可以追问：请求更详细的数据、对比其他年份、或深入了解某个具体方面。"
+
+
+def _print_history(session: object, stdout: TextIO) -> None:
+    """显示最近 10 轮对话摘要（角色 + 内容前 80 字符 + 时间）。"""
+    turns = getattr(session, "turns", ())
+    if not turns:
+        print("暂无对话历史。", file=stdout)
+        return
+
+    recent = turns[-20:]  # 最多 20 个 turn = 10 轮
+    max_rounds = min(len(recent) // 2 + (1 if len(recent) % 2 else 0), 10)
+    print(f"\n对话历史（最近 {max_rounds} 轮）:", file=stdout)
+    idx = 1
+    for i in range(0, len(recent), 2):
+        user_turn = recent[i]
+        asst_turn = recent[i + 1] if i + 1 < len(recent) else None
+        user_content = user_turn.content[:80] + "..." if len(user_turn.content) > 80 else user_turn.content
+        ts = getattr(user_turn, "timestamp", "")[:19]
+        print(f"  {idx}. [用户] {user_content} ({ts})", file=stdout)
+        if asst_turn:
+            asst_content = asst_turn.content[:80] + "..." if len(asst_turn.content) > 80 else asst_turn.content
+            ts_a = getattr(asst_turn, "timestamp", "")[:19]
+            print(f"     [助手] {asst_content} ({ts_a})", file=stdout)
+        idx += 1
+        if idx > 10:
+            break
+
+
 def _print_help(stdout: TextIO) -> None:
     """输出帮助信息。"""
     print("可用命令:", file=stdout)
     print("  /help       显示帮助", file=stdout)
+    print("  /history    显示最近 10 轮对话摘要", file=stdout)
     print("  /clear      清屏", file=stdout)
+    print("  /document   切换或列出可用年报文档（/document [文档ID]）", file=stdout)
     print("  /label      设置会话标签（/label <名称>）", file=stdout)
     print("  /stats      显示会话统计信息", file=stdout)
     print("  /save       手动保存当前会话", file=stdout)
     print("  /export     导出会话（/export [json|markdown]）", file=stdout)
     print("  /model      查看或切换模型（/model [模型名]）", file=stdout)
     print("  /verbose    切换详细模式（显示工具调用详情）", file=stdout)
-    print("  /document   切换或列出可用年报文档（/document [文档ID]）", file=stdout)
     print("  exit, quit  退出对话", file=stdout)
     print("  其他输入     作为问题发送给 LLM", file=stdout)
 
@@ -1306,8 +2094,147 @@ def _write_classified_failure(failure: ToolFailure, stderr: TextIO) -> None:
     print(f"message={failure.message}", file=stderr)
 
 
+_MD_TABLE_ROW_RE = re.compile(r"\|.+")
+
+_MD_TABLE_SEP_RE = re.compile(
+    r"^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$"
+)
+
+
+def _split_table_row(row: str) -> list[str]:
+    """Split a markdown table row into cells, stripping surrounding whitespace."""
+    stripped = row.strip()
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+    return [cell.strip() for cell in stripped.split("|")]
+
+
+def _parse_separator_alignment(cell: str) -> str:
+    """Return Rich-compatible justify string from a separator cell like ':---:'."""
+    c = cell.strip()
+    if c.startswith(":") and c.endswith(":"):
+        return "center"
+    if c.endswith(":"):
+        return "right"
+    return "left"
+
+
+def _try_extract_table(lines: list[str], start: int) -> tuple[list[str], int] | None:
+    """Try to parse a markdown table starting at the given line index.
+
+    Returns (table_lines, consumed_count) or None.
+    """
+    if start >= len(lines) - 1:
+        return None
+
+    header = lines[start]
+    if not _MD_TABLE_ROW_RE.match(header):
+        return None
+
+    sep = lines[start + 1]
+    if not _MD_TABLE_SEP_RE.match(sep):
+        return None
+
+    header_cells = _split_table_row(header)
+    sep_cells = _split_table_row(sep)
+    if len(header_cells) < 2 or len(header_cells) != len(sep_cells):
+        return None
+
+    # Separator cells must consist only of :, -, and whitespace
+    for cell in sep_cells:
+        if cell and not re.match(r"^:?-+:?$", cell):
+            return None
+
+    table_lines = [header, sep]
+    col_count = len(header_cells)
+    j = start + 2
+
+    while j < len(lines):
+        row = lines[j]
+        if _MD_TABLE_ROW_RE.match(row):
+            row_cells = _split_table_row(row)
+            if len(row_cells) == col_count:
+                table_lines.append(row)
+                j += 1
+                continue
+        if row.strip() == "":
+            # skip blank line within table
+            j += 1
+            continue
+        break
+
+    if len(table_lines) < 3:
+        return None  # need at least header + sep + 1 data row
+
+    return table_lines, j - start
+
+
+def _build_rich_table(md_table_lines: list[str]) -> "Table":
+    """Convert markdown table lines into a Rich Table with borders and alignment."""
+    from rich.table import Table
+    from rich import box
+
+    headers = _split_table_row(md_table_lines[0])
+    sep_cells = _split_table_row(md_table_lines[1])
+    data = [_split_table_row(line) for line in md_table_lines[2:]]
+    col_count = len(headers)
+
+    # Pad shorter data rows to match header column count
+    for row in data:
+        while len(row) < col_count:
+            row.append("")
+
+    table = Table(
+        show_header=True,
+        header_style="bold",
+        box=box.ROUNDED,
+        expand=False,
+        padding=(0, 1),
+    )
+
+    for i, (header, sep) in enumerate(zip(headers, sep_cells)):
+        justify = _parse_separator_alignment(sep)
+        table.add_column(header, justify=justify)
+
+    for row in data:
+        table.add_row(*row)
+
+    return table
+
+
+def _split_markdown_by_table(text: str) -> list[tuple[bool, str]]:
+    """Split markdown text into (is_table, content) segments."""
+    lines = text.split("\n")
+    segments: list[tuple[bool, str]] = []
+    i = 0
+    buf: list[str] = []
+
+    while i < len(lines):
+        result = _try_extract_table(lines, i)
+        if result:
+            if buf:
+                segments.append((False, "\n".join(buf)))
+                buf = []
+            table_lines, consumed = result
+            segments.append((True, "\n".join(table_lines)))
+            i += consumed
+        else:
+            buf.append(lines[i])
+            i += 1
+
+    if buf:
+        segments.append((False, "\n".join(buf)))
+
+    return segments
+
+
 def render_markdown(text: str, *, use_rich: bool = True) -> str:
     """将 Markdown 文本渲染为终端可显示的字符串。
+
+    检测 Markdown 表格并转换为 Rich Table（边框、表头粗体、列对齐），
+    其余内容使用 Rich Markdown 渲染（粗体、斜体、代码块等）。
 
     参数:
         text: Markdown 格式文本。
@@ -1325,9 +2252,16 @@ def render_markdown(text: str, *, use_rich: bool = True) -> str:
         from rich.markdown import Markdown
 
         console = Console(force_terminal=True, color_system="auto")
-        md = Markdown(text, code_theme="monokai")
+
         with console.capture() as capture:
-            console.print(md)
+            segments = _split_markdown_by_table(text)
+            for is_table, content in segments:
+                if is_table:
+                    table = _build_rich_table(content.split("\n"))
+                    console.print(table)
+                elif content.strip():
+                    md = Markdown(content, code_theme="monokai")
+                    console.print(md)
         return capture.get()
     except ImportError:
         return text

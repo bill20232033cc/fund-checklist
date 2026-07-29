@@ -30,6 +30,30 @@ class PinnedState:
 
 
 @dataclass(frozen=True)
+class ToolCallSummary:
+    """工具调用摘要，用于 history 注入。
+
+    字段:
+        tool_name: 工具名。
+        arguments_display: 仅用于展示的关键参数拼接。
+        success: 是否成功（result_kind == "success"）。
+        failure_code: 失败分类，成功时为 None。
+    """
+
+    tool_name: str
+    arguments_display: str = ""
+    success: bool = True
+    failure_code: str | None = None
+
+    @property
+    def result_summary(self) -> str:
+        """从 success + failure_code 推导摘要。"""
+        if self.success:
+            return "成功"
+        return f"失败: {self.failure_code}" if self.failure_code else "失败"
+
+
+@dataclass(frozen=True)
 class Turn:
     """单轮对话记录。
 
@@ -38,6 +62,7 @@ class Turn:
         content: 对话文本内容。
         citations: assistant 回答的 citation 引用列表。
         tool_trace: 工具调用轨迹摘要。
+        tool_calls: 结构化工具调用摘要列表。
         timestamp: ISO 8601 时间戳。
     """
 
@@ -45,6 +70,7 @@ class Turn:
     content: str
     citations: tuple[str, ...] = ()
     tool_trace: tuple[str, ...] = ()
+    tool_calls: tuple[ToolCallSummary, ...] = ()
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
@@ -161,6 +187,25 @@ class Session:
             pinned_state=self.pinned_state,
             turns=self.turns,
             episode_summaries=self.episode_summaries + (episode,),
+            created_at=self.created_at,
+            updated_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    def truncate_turns(self, keep_last: int) -> Session:
+        """保留最近 keep_last 个 turns，删除更早的。
+
+        参数:
+            keep_last: 保留的最近轮次数。
+        """
+        if len(self.turns) <= keep_last:
+            return self
+        return Session(
+            session_id=self.session_id,
+            label=self.label,
+            status=self.status,
+            turns=self.turns[-keep_last:],
+            pinned_state=self.pinned_state,
+            episode_summaries=self.episode_summaries,
             created_at=self.created_at,
             updated_at=datetime.now(timezone.utc).isoformat(),
         )

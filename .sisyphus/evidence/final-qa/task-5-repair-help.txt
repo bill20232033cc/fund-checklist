@@ -1,0 +1,13 @@
+Task 5 QA: repair CLI
+
+Command: uv run fund-checklist repair --help
+Result:
+usage: fund-checklist repair [-h] --fund-code FUND_CODE --year YEAR --chapter CHAPTER [--work-dir WORK_DIR] [--llm] [--auto]
+  --fund-code FUND_CODE  基金代码
+  --year YEAR            报告年份
+  --chapter CHAPTER      要修复的章节号，逗号分隔（如 3,5,7）
+  --work-dir WORK_DIR
+  --llm                  使用 LLM 执行修复（需要 DEEPSEEK_API_KEY）
+  --auto                 基于审计分数自动选择修复策略
+
+VERDICT: PASS - repair CLI shows all required parameters: --fund-code, --year, --chapter, --work-dir, --llm, --auto.

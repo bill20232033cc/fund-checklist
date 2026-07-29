@@ -820,7 +820,7 @@ Phase 6 (模板框架适配 + 基金类型感知) — ✅ 已完成
   ↓
 Phase 7 (多轮对话 + 会话记忆) — ✅ 已完成（基础），⚠️ 对话历史注入管道缺失
   ↓
-Phase 7.3 (对话历史注入 LLM context) — 🔴 待实施（最高优先级修复）
+Phase 7.3 (对话历史注入 LLM context) — ✅ 已完成（2026-07-29）
   ↓
 Phase 8 (跨轮上下文治理 + Episode Summary 压缩) — 🔵 候选
   ↓
@@ -856,7 +856,7 @@ Phase 9 (联网搜索，可选) — 🔵 候选
 | **Phase 7** | 多轮对话 + 会话记忆 | ✅ 基础完成 | 对话历史未注入 LLM context（§2.2.5） |
 | **Phase 7.1** | ContextBudget + ToolResult 信封 | ✅ 已完成 | — |
 | **Phase 7.2** | 交互体验增强 + 修复能力激活 | ✅ 已完成（含 e2e 测试） | — |
-| **Phase 7.3** | 对话历史注入 LLM context | 🔴 待实施 | `build_messages()` 管道 + 跨轮证据；DS Review 二审修正：方案 B 40-60 行（首选），方案 A 100-130 行 |
+| **Phase 7.3** | 对话历史注入 LLM context | ✅ 已完成（2026-07-29） | `build_messages()` 管道 + 跨轮证据；DS Review 二审修正：方案 B 40-60 行（首选），方案 A 100-130 行 |
 | **Phase 8** | 跨轮上下文治理 + 压缩 | 🔵 候选 | Episode Summary 接入 LLM context |
 | **Phase 9** | 联网搜索 | 🔵 候选 | — |
 

@@ -1,0 +1,11 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.11.15, pytest-9.1.1, pluggy-1.6.0 -- /Users/maomao/fund-checklist/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /Users/maomao/fund-checklist
+configfile: pyproject.toml
+plugins: anyio-4.14.1, Faker-40.23.0
+collecting ... collected 16 items / 15 deselected / 1 selected
+
+tests/fund/agent/test_tool_result.py::TestToolResultWithMeta::test_wrapper_carries_remaining_budget PASSED [100%]
+
+======================= 1 passed, 15 deselected in 0.03s =======================

@@ -1,0 +1,17 @@
+Task 9 QA: Compaction in chat_service.py
+
+Command: grep -n "compaction" fund_agent/service/chat_service.py
+Results (key lines):
+  98:   compaction_trigger_turns: 触发压缩的最小轮数（默认 10）。
+  99:   compaction_tail_preserve_turns: 压缩时保留的最近轮数（默认 3）。
+  100:  compaction_model_context_window: 模型上下文窗口大小，用于 60% token 触发。
+  112:  compaction_trigger_turns: int = 10,
+  113:  compaction_tail_preserve_turns: int = 3,
+  114:  compaction_model_context_window: int = 65536,
+  236:  def _maybe_trigger_compaction(self, session: Session) -> None:
+  266:  def _run_compaction(self, session: Session) -> None:
+  296:  composed = self._prompt_composer.compose("interactive/compaction.md", context)
+  349:  def inject_compaction_result(self, result: dict | None) -> None:
+  354:  def _parse_compaction_response(raw: str) -> dict | None:
+
+VERDICT: PASS - Compaction is implemented with trigger turns (10), tail preserve (3), context window (65536), and has both trigger logic (_maybe_trigger_compaction) and execution logic (_run_compaction).

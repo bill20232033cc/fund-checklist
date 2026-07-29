@@ -1,0 +1,9 @@
+Task 3 QA: --plain flag in interactive help
+
+Command: uv run fund-checklist interactive --help 2>&1 | grep -A1 "plain"
+Result:
+                                  [--plain]
+--
+  --plain               保留原始 Markdown 文本，禁用 Rich 格式化
+
+VERDICT: PASS - --plain flag is present in interactive command help.

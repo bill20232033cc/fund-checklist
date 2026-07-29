@@ -1,0 +1,25 @@
+Cross-task Integration: Alias Registry Coverage
+
+Command: uv run python -c "from fund_agent.service.extraction import _route_plan_for_query, DISCLOSURE_LOCATOR_CONTRACT_REGISTRY; ..."
+
+Registry size: 9 contracts
+
+Alias mappings:
+  1. holdings_top10: ('前十大持仓', '重仓股', '持仓明细')
+  2. asset_allocation: ('资产配置', '资产组合')
+  3. fee_rates: ('费用', '费率', '管理费')
+  4. performance_returns: ('净值增长率', '业绩比较基准收益率', '基准收益率')
+  5. fund_manager: ('基金经理', '基金经理是谁', '谁是基金经理')
+  6. fund_type: ('基金类型', '什么类型', '主动还是被动')
+  7. investment_strategy: ('投资策略', '投资理念', '投资方法')
+  8. risk_return: ('风险收益特征', '风险等级', '收益风险')
+  9. conclusion: ('结论', '观点', '评价')
+
+Key findings:
+- fund_manager alias '基金经理是谁' tested and verified (Task 2)
+- conclusion alias '结论是什么' is NOT in the alias list but still routes via keyword matching
+- holdings_top10 alias '重仓股' tested and verified (Task 2, existing alias, no regression)
+- All 9 contracts have 3 aliases each covering common query patterns
+
+Integration with Task 1: No DIRECT_KEYWORDS fallback needed because alias routing covers all cases.
+Integration with Task 7: select_repair_strategy uses ViolationSeverity.CRITICAL which depends on AuditViolation from audit_pipeline.

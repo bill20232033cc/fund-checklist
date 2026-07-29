@@ -1,0 +1,6 @@
+Task 2 QA: Alias Routing - holdings_top10 (existing alias)
+
+Command: uv run python -c "from fund_agent.service.extraction import _route_plan_for_query; r = _route_plan_for_query('重仓股'); print(f'profile_name={r.profile_name}')"
+Result: profile_name=holdings_top10
+
+VERDICT: PASS - Query '重仓股' correctly routes to holdings_top10 profile (existing alias, no regression).

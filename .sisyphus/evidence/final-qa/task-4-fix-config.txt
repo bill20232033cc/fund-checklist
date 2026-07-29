@@ -1,0 +1,21 @@
+Task 4/4b QA: FIX_SCENE_CONFIG + fix CLI
+
+=== FIX_SCENE_CONFIG ===
+Command: uv run python -c "from fund_agent.service.scene_config import FIX_SCENE_CONFIG; print('FIX_SCENE_CONFIG exists:', FIX_SCENE_CONFIG is not None); print('fragments:', FIX_SCENE_CONFIG.fragments)"
+Result:
+FIX_SCENE_CONFIG exists: True
+fragments: (Fragment(order=1, path='base/agents.md'), Fragment(order=2, path='base/soul.md'), Fragment(order=3, path='base/fact_rules.md'), Fragment(order=4, path='scenes/fix.md'))
+
+=== fix.md prompt file ===
+Command: ls -la fund_agent/service/prompts/scenes/fix.md
+Result: -rw-r--r-- 1 maomao staff 2154 Jul 27 00:43 .../fix.md
+
+=== fix CLI ===
+Command: uv run fund-checklist fix --help
+Result:
+usage: fund-checklist fix [-h] --fund-code FUND_CODE --chapter CHAPTER [--work-dir WORK_DIR]
+  --fund-code FUND_CODE  基金代码
+  --chapter CHAPTER      要修复的章节号（1-8）
+  --work-dir WORK_DIR
+
+VERDICT: PASS - FIX_SCENE_CONFIG exists with 4 fragments, fix.md prompt exists (2154 bytes), fix CLI has required parameters.

@@ -1,0 +1,11 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.11.15, pytest-9.1.1, pluggy-1.6.0 -- /Users/maomao/fund-checklist/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /Users/maomao/fund-checklist
+configfile: pyproject.toml
+plugins: anyio-4.14.1, Faker-40.23.0
+collecting ... collected 29 items / 28 deselected / 1 selected
+
+tests/fund/agent/test_llm_tool_loop.py::TestForceAnswerDegradation::test_force_answer_aggregates_citations PASSED [100%]
+
+======================= 1 passed, 28 deselected in 0.05s =======================

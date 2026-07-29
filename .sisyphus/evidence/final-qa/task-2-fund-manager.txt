@@ -1,0 +1,6 @@
+Task 2 QA: Alias Routing - fund_manager
+
+Command: uv run python -c "from fund_agent.service.extraction import _route_plan_for_query; r = _route_plan_for_query('基金经理是谁'); print(f'profile_name={r.profile_name}')"
+Result: profile_name=fund_manager
+
+VERDICT: PASS - Query '基金经理是谁' correctly routes to fund_manager profile.

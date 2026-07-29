@@ -1,0 +1,51 @@
+Phase 7.1 Final Gate — 2026-07-26
+
+=== A. 集成补完验收 ===
+
+A1. ToolResult 信封 ✅
+- ToolResultWithMeta 数据类已添加（llm_tool_loop.py L189-194）
+- project_for_llm(budget=...) 在 tool_result.py 中已有（L62-83）
+- _safe_tool_result() 改为接受 remaining_budget 参数（deepseek_llm.py L506-521）
+- tool_calls_remaining 在 remaining_budget 非 None 时注入
+
+A2. ContextBudget 接入 ✅
+- _cap_tool_results() 函数已添加（llm_tool_loop.py L893-925）
+- run() 中 tool_results.append 后调用 _cap_tool_results（L365-366）
+- run_stream() 中同样调用（L481-482）
+- 超过硬限制时按比例截断 evidence_text
+
+A3. force_answer 降级 ✅
+- _force_answer_from_evidence() 已存在（L861-890）
+- run() 和 run_stream() 末尾均调用
+- max_steps 耗尽时返回已收集证据，不报错
+
+A4. tool_calls_remaining ✅
+- run() 中 step_index 追踪，remaining = max_steps - step_index（L333-334）
+- remaining_budget 传给 next_step()（L341）
+- _safe_tool_result() 注入 tool_calls_remaining 到序列化 dict（L516-517）
+
+=== B. Dayu 场景验收 ===
+
+B1. regenerate ✅
+- REGENERATE_SCENE_CONFIG 已添加（scene_config.py）
+- prompts/scenes/regenerate.md 已创建
+- 10 个测试通过
+
+B2. repair ✅
+- REPAIR_SCENE_CONFIG 已添加（scene_config.py）
+- prompts/scenes/repair.md 已创建
+- 10 个测试通过
+
+=== C. 回归与稳定性 ===
+
+C1. 核心集成测试：98 passed（test_tool_result + test_llm_tool_loop + test_llm_production_readiness + test_context_budget）
+C2. 全量回归：767 passed, 2 failed（pre-existing: PDF fixture 缺失 + 数据源不完整）, 300 skipped, 3 xfailed
+C3. Dayu 场景测试：19 passed（test_scene_regenerate_repair）
+C4. Phase 5/6/7 无回退
+
+=== Final Gate 结论 ===
+
+PASS — 所有验收标准满足：
+1. ✅ 集成补完 4 项 P0 全部实现且测试通过
+2. ✅ 全量回归 PASS（767 passed，2 pre-existing failures）
+3. ✅ Dayu 场景 regenerate + repair 实现且测试通过

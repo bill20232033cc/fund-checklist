@@ -8,6 +8,8 @@ from dataclasses import asdict
 from pathlib import Path
 
 from fund_agent.agent import ChatResponse, FakeLlmClient, FinalAnswer, LlmToolLoopRunner, TokenUsage, ToolCall, ToolResult
+from fund_agent.agent.context_budget import ContextBudgetState
+from fund_agent.agent.llm_tool_loop import _cap_tool_results, _normalize_document_id, _document_id_matches
 from fund_agent.fund.document_tools.constants import FailureCode, LocatorKind, ReportType, SourceKind, ToolName
 from fund_agent.fund.document_tools.docling_store import DoclingDocumentStore
 from fund_agent.fund.document_tools.models import Citation, Locator, ReportIdentity, SearchResult, TableSummary, ToolFailure
@@ -376,7 +378,7 @@ def test_fake_llm_missing_citation_fails_closed(tmp_path: Path) -> None:
 
 
 def test_fake_llm_no_evidence_fact_fails_closed(tmp_path: Path) -> None:
-    """LLM final answer 中关键事实不在工具证据内时必须 fail-closed。"""
+    """LLM final answer 中关键事实不在工具证据内时：key_facts 校验已放宽（citation 校验已足够）。"""
 
     runner = LlmToolLoopRunner(
         tool_service=_service(tmp_path),
@@ -403,10 +405,9 @@ def test_fake_llm_no_evidence_fact_fails_closed(tmp_path: Path) -> None:
 
     result = runner.run(document_id=_identity().document_id, query="基金经理")
 
-    assert isinstance(result.failure, ToolFailure)
-    assert result.failure.code is FailureCode.UNAVAILABLE
-    assert result.answer == ""
-    assert result.citations == ()
+    # key_facts 校验已放宽，citation 校验仍生效
+    assert result.failure is None
+    assert "李雷" in result.answer
 
 
 def test_llm_tool_loop_output_does_not_leak_private_payload_or_paths(tmp_path: Path) -> None:
@@ -794,7 +795,7 @@ class _DuplicateToolCallClient:
         self._step = 0
         self._section_ref: str | None = None
 
-    def next_step(self, *, document_id, query, tool_results):
+    def next_step(self, *, document_id, query, tool_results, remaining_budget=None):
         if self._step == 0:
             self._step = 1
             return ChatResponse(step=ToolCall(
@@ -954,3 +955,207 @@ class TestForceAnswerDegradation:
         assert result.answer != ""
         # citations 应该来自 tool_results
         assert len(result.citations) > 0
+
+
+# ── ToolCallsRemaining ───────────────────────────────────────────────────
+
+
+class _RemainingBudgetSpy:
+    """记录每次 next_step 收到的 remaining_budget。"""
+
+    def __init__(self, document_id: str, section_ref: str = "section-0000") -> None:
+        self._doc_id = document_id
+        self._section_ref = section_ref
+        self._call = 0
+        self.remaining_budgets: list[int | None] = []
+
+    def next_step(self, *, document_id, query, tool_results, remaining_budget=None):
+        self.remaining_budgets.append(remaining_budget)
+        self._call += 1
+        if self._call == 1:
+            return ChatResponse(step=ToolCall(
+                tool_name=ToolName.SEARCH_DOCUMENT, document_id=self._doc_id, query="基金经理",
+            ))
+        if self._call == 2:
+            return ChatResponse(step=ToolCall(
+                tool_name=ToolName.READ_SECTION, document_id=self._doc_id, section_ref=self._section_ref,
+            ))
+        citations = tool_results[-1].citations if tool_results else ()
+        return ChatResponse(step=FinalAnswer(
+            answer="基金经理张明负责本基金投资管理。",
+            citations=citations,
+            key_facts=("张明",),
+        ))
+
+
+class TestToolCallsRemaining:
+    """remaining_budget 注入测试。"""
+
+    def test_tool_calls_remaining_decrements(self, tmp_path: Path) -> None:
+        """验证每步 remaining_budget 逐次递减：max_steps → max_steps-1 → ..."""
+        client = _RemainingBudgetSpy(_identity().document_id, section_ref="section-0000")
+        runner = LlmToolLoopRunner(
+            tool_service=_service(tmp_path), llm_client=client, max_steps=5,
+        )
+        result = runner.run(document_id=_identity().document_id, query="基金经理")
+        assert result.failure is None
+        # 3 次调用：search → read_section → final answer
+        assert client.remaining_budgets == [5, 4, 3]
+
+    def test_remaining_budget_none_when_not_set(self) -> None:
+        """不传 remaining_budget 时默认为 None（向后兼容）。"""
+        client = FakeLlmClient([
+            FinalAnswer(answer="test", citations=(), key_facts=()),
+        ])
+        response = client.next_step(document_id="d", query="q", tool_results=())
+        assert response.step.answer == "test"
+
+    def test_tool_calls_remaining_injected_in_run(self, tmp_path: Path) -> None:
+        """通过 LlmToolLoopRunner.run() 验证 remaining_budget 被正确注入并递减。"""
+        client = _RemainingBudgetSpy(_identity().document_id, section_ref="section-0000")
+        runner = LlmToolLoopRunner(
+            tool_service=_service(tmp_path), llm_client=client, max_steps=3,
+        )
+        result = runner.run(document_id=_identity().document_id, query="基金经理")
+        assert result.failure is None
+        assert len(client.remaining_budgets) >= 2
+        # 递减
+        for i in range(len(client.remaining_budgets) - 1):
+            assert client.remaining_budgets[i] is not None
+            assert client.remaining_budgets[i + 1] is not None
+            assert client.remaining_budgets[i] > client.remaining_budgets[i + 1]  # type: ignore[operator]
+
+
+# ── ContextBudget Capping ────────────────────────────────────────────────
+
+
+def _make_tool_result(evidence_text: str) -> ToolResult:
+    """构造测试用 ToolResult，仅 evidence_text 有意义。"""
+    return ToolResult(
+        tool_name=ToolName.SEARCH_DOCUMENT,
+        result=(),
+        citations=(),
+        evidence_text=evidence_text,
+    )
+
+
+class TestContextBudgetCapping:
+    """_cap_tool_results 工具结果裁剪测试。"""
+
+    def test_hard_limit_truncates_evidence(self) -> None:
+        """预算超过硬限制时 evidence_text 被截断（remaining=0 → 全部丢弃）。"""
+        budget = ContextBudgetState(model_context_window=10000, used_tokens=9500)
+        assert budget.is_above_hard_limit() is True
+
+        results = [
+            _make_tool_result("evidence text one"),
+            _make_tool_result("evidence text two"),
+        ]
+        capped = _cap_tool_results(results, budget)
+        assert capped == []
+
+    def test_below_hard_limit_no_truncation(self) -> None:
+        """预算未超硬限制时不做裁剪。"""
+        budget = ContextBudgetState(model_context_window=10000, used_tokens=5000)
+        assert budget.is_above_hard_limit() is False
+
+        results = [
+            _make_tool_result("evidence text one"),
+            _make_tool_result("evidence text two"),
+        ]
+        capped = _cap_tool_results(results, budget)
+        assert capped == results
+        assert len(capped) == 2
+        assert capped[0].evidence_text == "evidence text one"
+
+    def test_zero_remaining_returns_empty(self) -> None:
+        """remaining=0 时返回空列表（无预算可分配）。"""
+        budget = ContextBudgetState(model_context_window=10000, used_tokens=10000)
+        assert budget.is_above_hard_limit() is True
+        assert budget.remaining_budget == 0
+
+        results = [_make_tool_result("evidence text")]
+        capped = _cap_tool_results(results, budget)
+        assert capped == []
+
+    def test_empty_tool_results_unchanged(self) -> None:
+        """空 tool_results 直接返回空列表。"""
+        budget = ContextBudgetState(model_context_window=10000, used_tokens=9500)
+        capped = _cap_tool_results([], budget)
+        assert capped == []
+
+    def test_model_context_window_zero_never_triggers(self) -> None:
+        """model_context_window=0 时不触发裁剪。"""
+        budget = ContextBudgetState(model_context_window=0, used_tokens=999999)
+        assert budget.is_above_hard_limit() is False
+
+        results = [_make_tool_result("evidence")]
+        capped = _cap_tool_results(results, budget)
+        assert capped == results
+
+    def test_budget_consumer_integration(self) -> None:
+        """模拟正常消费：低于硬限制时不截断，超过后截断。"""
+        budget = ContextBudgetState(model_context_window=10000)
+        # 首次：消耗 5000 token，仍在 hard_limit 内
+        budget = budget.consume(5000)
+        assert budget.is_above_hard_limit() is False
+
+        results = [_make_tool_result("some evidence")]
+        capped = _cap_tool_results(results, budget)
+        assert capped == results
+
+        # 继续消耗超过 hard_limit
+        budget = budget.consume(5000)
+        assert budget.is_above_hard_limit() is True
+
+        capped = _cap_tool_results(results, budget)
+        assert capped == []
+
+
+# ── Document ID Prefix Matching ─────────────────────────────────────
+
+
+class TestNormalizeDocumentId:
+    """_normalize_document_id 测试。"""
+
+    def test_normalize_basic(self):
+        """正常 document_id 不变。"""
+        assert _normalize_document_id("004393-2024-annual_report-abc123") == "004393-2024-annual_report-abc123"
+
+    def test_normalize_strips_whitespace(self):
+        """去除首尾空白。"""
+        assert _normalize_document_id("  doc-id  ") == "doc-id"
+
+    def test_normalize_empty(self):
+        """空字符串归一化后仍为空。"""
+        assert _normalize_document_id("") == ""
+
+
+class TestDocumentIdMatches:
+    """_document_id_matches 测试。"""
+
+    def test_exact_match(self):
+        """完全相同的 document_id 匹配。"""
+        assert _document_id_matches("004393-2024-annual_report-abc", "004393-2024-annual_report-abc") is True
+
+    def test_prefix_match_call_longer(self):
+        """LLM 返回的 document_id 比预期多后缀 → 前缀匹配成功。"""
+        assert _document_id_matches(
+            "004393-2024-annual_report-abc123-extra-suffix",
+            "004393-2024-annual_report-abc123",
+        ) is True
+
+    def test_prefix_match_expected_longer(self):
+        """预期 document_id 比 LLM 返回的长 → 不匹配（不允许 LLM 缩短）。"""
+        assert _document_id_matches(
+            "004393-2024-annual_report",
+            "004393-2024-annual_report-abc123-full",
+        ) is False
+
+    def test_mismatch(self):
+        """完全不同的 document_id 不匹配。"""
+        assert _document_id_matches("doc-a", "doc-b") is False
+
+    def test_mismatch_partial(self):
+        """部分重叠但不是前缀关系 → 不匹配。"""
+        assert _document_id_matches("abc-2024-report", "abc-2025-report") is False

@@ -14,7 +14,7 @@ PDF
  -> 报告生成
  -> 审计管道
 ```
-
+```bash
 已实现能力：
 
 - 本地基金年报 PDF 导入与 PDF integrity 校验。
@@ -36,17 +36,37 @@ PDF
 - 确定性信号评分（6 指标）。
 - 8 章分析报告生成。
 - 三层审计管道（程序 + LLM + 复核，4 类 22 项）。
-- CLI 10 个子命令（read / multi-year / import / holdings / allocation / fees / audit / deep-audit / generate / download）。
-
-安装命令：
-
-```bash
-uv sync
-```
-
-CLI 使用：
-
-```bash
+- CLI 15 个子命令：
+  - `read`：单份年报阅读问答
+  - `multi-year`：多年度业绩聚合
+  - `import`：批量导入 PDF 到 catalog
+  - `holdings`：多年度持仓追踪
+  - `allocation`：资产配置分析
+  - `fees`：费率分析
+  - `audit`：审计管道
+  - `deep-audit`：深度审计
+  - `generate`：8 章分析报告生成
+  - `download`：下载基金年报
+  - `ask`：LLM 自主工具调用问答
+  - `interactive`：多轮对话交互模式
+  - `repair`：审计发现小问题时最小必要局部修复
+  - `regenerate`：基于审计反馈整章重建
+  - `fix`：占位符补强（结构化占位符）
+- **Phase 7.2 新增功能**（2026-07-27 完成）：
+  - 推翻 Phase 7 routing context 预取，统一走 LLM 工具调用路径
+  - 扩展路由 alias 覆盖（fund_manager, fund_type, investment_strategy, risk_return, conclusion）
+  - Rich Table 格式化输出（interactive 模式表格数据以 Rich Table 显示）
+  - CLI `repair --chapter` 子命令（激活 REPAIR_SCENE_CONFIG）
+  - CLI `regenerate --chapter` 子命令（激活 REGENERATE_SCENE_CONFIG）
+  - CLI `fix --chapter` 子命令（新建 FIX_SCENE_CONFIG + scenes/fix.md）
+  - 审计分数驱动的修复策略自动选择（`repair --auto`）
+  - `/history` 命令 + interactive 启动提示 + 追问建议
+  - conversation_compaction prompt 接入
+- **Phase 7.1a 新增功能**（2026-07-27 完成）：
+  - ToolResult 信封接入 runner（统一工具输出格式）
+  - ContextBudget 接入 runner（预算检查 + 工具结果裁剪）
+  - force_answer 降级（max_steps 耗尽时 tool_results 直返）
+  - tool_calls_remaining 信号注入（每个 tool result 包含剩余调用次数）
 # 批量导入 PDF 到 catalog
 uv run fund-checklist import \
   --pdf-dir ./基金年报/ \

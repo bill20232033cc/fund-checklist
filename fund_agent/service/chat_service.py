@@ -30,7 +30,7 @@ from fund_agent.fund.document_tools.service import FundDocumentToolService
 from .chat_contract import ChatTurnContract
 from .investment_guard import contains_investment_advice
 from .prompt_composer import PromptComposer
-from .session_models import EpisodeSummary, PinnedState, Session, Turn
+from .session_models import EpisodeSummary, PinnedState, Session, ToolCallSummary, Turn
 from fund_agent.host.session_store import SessionStore
 
 RunnerFactory = Callable[
@@ -112,6 +112,7 @@ class ChatService:
         compaction_trigger_turns: int = 10,
         compaction_tail_preserve_turns: int = 3,
         compaction_model_context_window: int = 65536,
+        history_max_tokens: int = 2000,
     ) -> None:
         self._session_store = session_store
         self._prompt_composer = prompt_composer
@@ -122,6 +123,7 @@ class ChatService:
         self._compaction_trigger_turns = compaction_trigger_turns
         self._compaction_tail_preserve_turns = compaction_tail_preserve_turns
         self._compaction_model_context_window = compaction_model_context_window
+        self._history_max_tokens = history_max_tokens
         self._cumulative_tokens = 0
         self._compacting: set[str] = set()  # 正在压缩的 session_id 集合
         self._injected_compaction_result: dict | None = None  # 测试用
@@ -172,11 +174,12 @@ class ChatService:
                 # 从 contract 或 scene config 取 model 配置
                 model_name = os.environ.get("DEEPSEEK_MODEL", "")
                 temperature = 0.7
+                if hasattr(self._scene_config, "model"):
+                    temperature = self._scene_config.model.temperature
                 if contract is not None and contract.model_name:
                     model_name = contract.model_name
                 elif hasattr(self._scene_config, "model"):
                     model_name = self._scene_config.model.default_name
-                    temperature = self._scene_config.model.temperature
                 # 通过环境变量临时覆盖 model（DeepSeekLlmClient 内部读取环境变量）
                 llm_env: dict[str, str] | None = None
                 if model_name:
@@ -186,6 +189,7 @@ class ChatService:
                 llm_client = DeepSeekLlmClient(
                     system_prompt=composed.system_message,
                     env=llm_env,
+                    temperature=temperature,
                 )
             try:
                 max_steps = 8
@@ -198,6 +202,9 @@ class ChatService:
             except Exception:
                 return ChatTurnResponse(answer="LLM 服务暂不可用，请稍后重试。")
 
+        if agent_result.failure is not None:
+            return ChatTurnResponse(answer=f"LLM 处理失败：{agent_result.failure.message}")
+
         answer = agent_result.answer
 
         # 5. 投资建议检测（fail-closed）
@@ -207,6 +214,17 @@ class ChatService:
 
         # 6. 更新 session
         user_turn = Turn(role="user", content=user_text)
+
+        tool_calls = tuple(
+            ToolCallSummary(
+                tool_name=entry.tool_name,
+                arguments_display=str(entry.arguments)[:100] if entry.arguments else "",
+                success=entry.result_kind == "success",
+                failure_code=entry.failure_code if entry.result_kind != "success" else None,
+            )
+            for entry in agent_result.tool_trace
+        ) if agent_result.tool_trace else ()
+
         assistant_turn = Turn(
             role="assistant",
             content=answer,
@@ -218,6 +236,7 @@ class ChatService:
                 e.tool_name if hasattr(e, "tool_name") else str(e)
                 for e in agent_result.tool_trace
             ),
+            tool_calls=tool_calls,
         )
         session = session.add_turn(user_turn).add_turn(assistant_turn)
         self._session_store.save(session)
@@ -278,40 +297,35 @@ class ChatService:
                 self._compacting.discard(session.session_id)
                 return
 
-            # 构建压缩 prompt
+            # 构建压缩 prompt（通过 PromptComposer 加载 compaction.md 模板）
             turns_text = "\n".join(
                 f"[{t.role}]: {t.content}" for t in compact_turns
             )
 
             ps = session.pinned_state
-            user_prompt = f"""## 当前固定状态
-- 基金代码: {ps.fund_code}
-- 当前年份: {ps.active_year or '未选择'}
-- 当前目标: {ps.user_constraints.get('current_goal', '无')}
-- 已确认事实: {ps.user_constraints.get('confirmed_facts', '无')}
-- 待解决问题: {ps.user_constraints.get('open_questions', '无')}
+            context = {
+                "fund_code": ps.fund_code or "未知",
+                "active_year": str(ps.active_year) if ps.active_year else "未选择",
+                "current_goal": ps.user_constraints.get("current_goal", "无"),
+                "confirmed_facts": ps.user_constraints.get("confirmed_facts", "无"),
+                "open_questions": ps.user_constraints.get("open_questions", "无"),
+                "turns_text": turns_text,
+            }
 
-## 对话记录（待压缩）
-{turns_text}"""
-
-            system_prompt = (
-                "你是一个对话记忆压缩助手。请阅读对话片段，生成紧凑的记忆摘要。"
-                "严格按照 JSON 格式输出，不要包含其他文本。"
-                '格式: {"episode_summary": {"title": "...", "goal": "...", '
-                '"confirmed_facts": [...], "open_questions": [...], "next_step": "..."}, '
-                '"pinned_state_patch": {"current_goal": "..."|null, '
-                '"confirmed_facts": "..."|null, "open_questions": "..."|null}}'
-            )
+            composed = self._prompt_composer.compose("interactive/compaction.md", context)
 
             # 调用 LLM 生成摘要（或使用注入结果）
             if self._injected_compaction_result is not None:
                 raw = json.dumps(self._injected_compaction_result, ensure_ascii=False)
             else:
                 try:
-                    llm = DeepSeekLlmClient()
+                    temp = 0.3
+                    if hasattr(self._scene_config, "model"):
+                        temp = getattr(self._scene_config.model, "temperature", 0.3)
+                    llm = DeepSeekLlmClient(temperature=temp)
                     raw = llm.generate_text(
-                        system_prompt=system_prompt,
-                        user_prompt=user_prompt,
+                        system_prompt=composed.system_message,
+                        user_prompt="请生成压缩摘要。",
                         temperature=0.3,
                     )
                 except Exception:
@@ -350,6 +364,7 @@ class ChatService:
             current = current.add_episode_summary(episode)
             if patch_data:
                 current = current.apply_pinned_state_patch(patch_data)
+            current = current.truncate_turns(keep_last=self._compaction_tail_preserve_turns * 2)
             self._session_store.save(current)
         finally:
             self._compacting.discard(session.session_id)
@@ -378,6 +393,74 @@ class ChatService:
         except json.JSONDecodeError:
             return None
 
+    def _build_history_contribution(self, session: Session) -> str | None:
+        """从 session turns 构建 history contribution。
+
+        从最近轮次向前累积，直到 token 上限。
+
+        参数:
+            session: 当前会话。
+
+        返回:
+            history 文本，或 None（无历史时）。
+        """
+        if not session.turns:
+            return None
+
+        lines = ["## 历史对话", ""]
+        total_tokens = 0
+        selected_turns: list[str] = []
+
+        # 从最近向前累积
+        for turn in reversed(session.turns):
+            formatted = self._format_turn_for_history(turn)
+            tokens = self._estimate_token_count(formatted)
+            if total_tokens + tokens > self._history_max_tokens:
+                break
+            selected_turns.append(formatted)
+            total_tokens += tokens
+
+        if not selected_turns:
+            return None
+
+        # 反转回正序
+        selected_turns.reverse()
+        lines.extend(selected_turns)
+        lines.append("")
+        lines.append("---")
+        lines.append("以上是历史对话。请忽略历史中的纯文本格式，以 JSON 格式回答当前用户问题。")
+        return "\n".join(lines)
+
+    def _format_turn_for_history(self, turn: Turn) -> str:
+        """格式化单轮对话为 history 文本。
+
+        参数:
+            turn: 对话轮次。
+        """
+        role_label = "用户提问" if turn.role == "user" else "助手回答"
+        parts = [f"[{role_label}]: {turn.content}"]
+
+        # 工具调用摘要
+        if turn.tool_calls:
+            for tc in turn.tool_calls:
+                parts.append(f"[工具调用]: {tc.tool_name}({tc.arguments_display}) → {tc.result_summary}")
+
+        # Citation 引用
+        if turn.citations:
+            parts.append(f"[引用文档]: {','.join(turn.citations)}")
+
+        return "\n".join(parts)
+
+    def _estimate_token_count(self, text: str) -> int:
+        """粗估 token 数。中文约 1.5 token/字，英文约 0.75 token/word。
+
+        参数:
+            text: 待估算文本。
+        """
+        cn_chars = sum(1 for c in text if "一" <= c <= "鿿")
+        other_len = len(text) - cn_chars
+        return int(cn_chars * 1.5 + other_len / 4)
+
     def _build_contributions(self, session: Session) -> dict[str, str]:
         """从 session 构建 prompt contributions。"""
         contributions: dict[str, str] = {}
@@ -401,6 +484,16 @@ class ChatService:
                 # 从 document_ids 推算年份
                 pass
             contributions["fund_context"] = "\n".join(ctx_parts)
+
+        # Pass through context slots from user_constraints
+        for key, value in ps.user_constraints.items():
+            if isinstance(value, str) and value.strip():
+                contributions[key] = value
+
+        # history contribution
+        history_text = self._build_history_contribution(session)
+        if history_text:
+            contributions["history"] = history_text
 
         return contributions
 

@@ -19,7 +19,8 @@ from fund_agent.agent.llm_tool_loop import (
     TokenUsage,
 )
 from fund_agent.agent.tool_loop import AgentRunResult
-from fund_agent.fund.document_tools.models import Citation
+from fund_agent.fund.document_tools.constants import FailureCode
+from fund_agent.fund.document_tools.models import Citation, ToolFailure
 from fund_agent.host.session_store import SessionStore
 from fund_agent.service.chat_service import (
     ChatService,
@@ -28,7 +29,7 @@ from fund_agent.service.chat_service import (
 )
 from fund_agent.service.prompt_composer import PromptComposer
 from fund_agent.service.scene_config import ASK_SCENE_CONFIG
-from fund_agent.service.session_models import PinnedState, Session, Turn
+from fund_agent.service.session_models import PinnedState, Session, ToolCallSummary, Turn
 
 
 # ── helpers ──────────────────────────────────────────────────────
@@ -201,3 +202,219 @@ class TestChatTurn:
 
         assert result.answer is not None  # 应返回错误提示而非崩溃
 
+    def test_failure_propagated_to_answer(self, service: ChatService, session_store: SessionStore):
+        """agent_result.failure 非 None 时 → 错误信息作为 answer 返回，而非空字符串。"""
+        session = self._create_session(session_store)
+
+        failure = ToolFailure(code=FailureCode.UNAVAILABLE, message="LLM 最终回答缺少受控 citation")
+        failed_result = AgentRunResult(answer="", citations=(), tool_trace=(), failure=failure)
+
+        result = service.chat_turn(
+            ChatTurnRequest(session_id=session.session_id, user_text="问题"),
+            agent_result=failed_result,
+        )
+
+        assert "LLM 处理失败" in result.answer
+        assert "受控 citation" in result.answer
+        # 失败不应更新 session turns
+        updated = session_store.load(session.session_id)
+        assert len(updated.turns) == 0
+
+    def test_success_no_failure(self, service: ChatService, session_store: SessionStore):
+        """agent_result.failure 为 None → 正常返回 answer。"""
+        session = self._create_session(session_store)
+
+        result = service.chat_turn(
+            ChatTurnRequest(session_id=session.session_id, user_text="基金经理是谁？"),
+            agent_result=_make_agent_result("基金经理是张三。"),
+        )
+
+        assert "张三" in result.answer
+        assert "LLM 处理失败" not in result.answer
+
+
+# ── History Contribution ───────────────────────────────────────────
+
+
+def _history_service(
+    session_store: SessionStore,
+    prompt_composer: PromptComposer,
+    history_max_tokens: int = 2000,
+) -> ChatService:
+    """构造用于 history 测试的 ChatService。"""
+    return ChatService(
+        session_store=session_store,
+        prompt_composer=prompt_composer,
+        scene_config=ASK_SCENE_CONFIG,
+        history_max_tokens=history_max_tokens,
+    )
+
+
+class TestBuildHistoryContribution:
+    """_build_history_contribution 测试。"""
+
+    @pytest.fixture
+    def session_store(self, tmp_path: Path) -> SessionStore:
+        return SessionStore(tmp_path / "sessions")
+
+    @pytest.fixture
+    def prompt_composer(self) -> PromptComposer:
+        return PromptComposer(template_dir=_template_dir())
+
+    def test_empty_session_returns_none(self, session_store: SessionStore, prompt_composer: PromptComposer):
+        """空 session（无 turns）返回 None。"""
+        service = _history_service(session_store, prompt_composer)
+        session = session_store.create(fund_code="011649")
+        result = service._build_history_contribution(session)
+        assert result is None
+
+    def test_contains_header(self, session_store: SessionStore, prompt_composer: PromptComposer):
+        """返回的 history 文本以 "## 历史对话" 开头。"""
+        service = _history_service(session_store, prompt_composer)
+        session = session_store.create(fund_code="011649")
+        session = session.add_turn(Turn(role="user", content="基金经理是谁？"))
+        session = session.add_turn(Turn(role="assistant", content="基金经理是张三。"))
+        session_store.save(session)
+
+        result = service._build_history_contribution(session)
+        assert result is not None
+        assert result.startswith("## 历史对话")
+
+    def test_contains_separator(self, session_store: SessionStore, prompt_composer: PromptComposer):
+        """history 末尾包含 "---" 分隔线和 JSON 格式指引。"""
+        service = _history_service(session_store, prompt_composer)
+        session = session_store.create(fund_code="011649")
+        session = session.add_turn(Turn(role="user", content="你好"))
+        session = session.add_turn(Turn(role="assistant", content="你好！"))
+        session_store.save(session)
+
+        result = service._build_history_contribution(session)
+        assert result is not None
+        assert "---" in result
+        assert "JSON 格式" in result
+
+    def test_within_token_limit(self, session_store: SessionStore, prompt_composer: PromptComposer):
+        """token 超限时旧轮次被截断，只保留最近轮次。"""
+        limit = 80
+        service = _history_service(session_store, prompt_composer, history_max_tokens=limit)
+        session = session_store.create(fund_code="011649")
+        # 添加 30 对 turns，远超 token 限制
+        for i in range(30):
+            session = session.add_turn(Turn(role="user", content=f"这是第 {i} 个问题"))
+            session = session.add_turn(Turn(role="assistant", content=f"这是第 {i} 个回答"))
+        session_store.save(session)
+
+        result = service._build_history_contribution(session)
+        assert result is not None
+        # 最近的问题应该在
+        assert "第 29 个问题" in result
+        # 最早的问题应该被截断
+        assert "第 0 个问题" not in result
+
+    def test_recent_first_order(self, session_store: SessionStore, prompt_composer: PromptComposer):
+        """history 中 turns 按时间正序排列（旧→新）。"""
+        service = _history_service(session_store, prompt_composer)
+        session = session_store.create(fund_code="011649")
+        session = session.add_turn(Turn(role="user", content="第一个问题"))
+        session = session.add_turn(Turn(role="assistant", content="第一个回答"))
+        session = session.add_turn(Turn(role="user", content="第二个问题"))
+        session = session.add_turn(Turn(role="assistant", content="第二个回答"))
+        session_store.save(session)
+
+        result = service._build_history_contribution(session)
+        assert result is not None
+        idx1 = result.index("第一个问题")
+        idx2 = result.index("第二个问题")
+        assert idx1 < idx2  # 旧问题在前
+
+
+class TestFormatTurnForHistory:
+    """_format_turn_for_history 测试。"""
+
+    @pytest.fixture
+    def session_store(self, tmp_path: Path) -> SessionStore:
+        return SessionStore(tmp_path / "sessions")
+
+    @pytest.fixture
+    def prompt_composer(self) -> PromptComposer:
+        return PromptComposer(template_dir=_template_dir())
+
+    def test_format_user_turn(self, session_store: SessionStore, prompt_composer: PromptComposer):
+        """用户轮次格式包含 [用户提问] 标签。"""
+        service = _history_service(session_store, prompt_composer)
+        turn = Turn(role="user", content="基金经理是谁？")
+        result = service._format_turn_for_history(turn)
+        assert "[用户提问]" in result
+        assert "基金经理是谁？" in result
+
+    def test_format_assistant_turn_with_tool_calls(self, session_store: SessionStore, prompt_composer: PromptComposer):
+        """带工具调用的助手轮次包含 [工具调用] 行。"""
+        service = _history_service(session_store, prompt_composer)
+        tc = ToolCallSummary(
+            tool_name="search_document",
+            arguments_display="query=基金经理",
+            success=True,
+        )
+        turn = Turn(
+            role="assistant",
+            content="基金经理是张三。",
+            tool_calls=(tc,),
+        )
+        result = service._format_turn_for_history(turn)
+        assert "[助手回答]" in result
+        assert "[工具调用]" in result
+        assert "search_document" in result
+        assert "成功" in result
+
+    def test_format_turn_with_citations(self, session_store: SessionStore, prompt_composer: PromptComposer):
+        """带 citation 的轮次包含 [引用文档] 行。"""
+        service = _history_service(session_store, prompt_composer)
+        turn = Turn(
+            role="assistant",
+            content="基金经理是张三。",
+            citations=("doc-1", "doc-2"),
+        )
+        result = service._format_turn_for_history(turn)
+        assert "[引用文档]" in result
+        assert "doc-1" in result
+        assert "doc-2" in result
+
+    def test_format_empty_tool_calls_skipped(self, session_store: SessionStore, prompt_composer: PromptComposer):
+        """空 tool_calls 不产生 [工具调用] 行。"""
+        service = _history_service(session_store, prompt_composer)
+        turn = Turn(role="assistant", content="你好。", tool_calls=())
+        result = service._format_turn_for_history(turn)
+        assert "[工具调用]" not in result
+
+
+class TestEstimateTokenCount:
+    """_estimate_token_count 测试。"""
+
+    @pytest.fixture
+    def session_store(self, tmp_path: Path) -> SessionStore:
+        return SessionStore(tmp_path / "sessions")
+
+    @pytest.fixture
+    def prompt_composer(self) -> PromptComposer:
+        return PromptComposer(template_dir=_template_dir())
+
+    def test_estimate_chinese_text(self, session_store: SessionStore, prompt_composer: PromptComposer):
+        """中文文本估算约 1.5 token/字。"""
+        service = _history_service(session_store, prompt_composer)
+        tokens = service._estimate_token_count("基金经理是谁")
+        # 6 个中文字符 → 6 * 1.5 = 9
+        assert tokens == 9
+
+    def test_estimate_english_text(self, session_store: SessionStore, prompt_composer: PromptComposer):
+        """英文文本估算约 0.25 token/字符。"""
+        service = _history_service(session_store, prompt_composer)
+        tokens = service._estimate_token_count("Hello world")
+        # 11 个英文字符 → 11 / 4 = 2.75 → int = 2
+        assert tokens == 2
+
+    def test_estimate_mixed_text(self, session_store: SessionStore, prompt_composer: PromptComposer):
+        """中英混合文本正确分别计算。"""
+        service = _history_service(session_store, prompt_composer)
+        # "你好world" = 2 中文 + 5 英文 = 2*1.5 + 5/4 = 3 + 1.25 = 4.25 → 4
+        tokens = service._estimate_token_count("你好world")
+        assert tokens == 4

@@ -1,0 +1,10 @@
+tests/fund/cli/test_cli.py::test_generate_cli_real_pdf_smoke_writes_report_and_audit
+tests/fund/service/test_extraction.py::test_real_pdf_controlled_profiles_apply_disclosure_target_contract
+  /Users/maomao/fund-checklist/.venv/lib/python3.11/site-packages/docling/pipeline/standard_pdf_pipeline.py:588: DeprecationWarning: This field is deprecated. Use `generate_page_images=True` and call `TableItem.get_image()` to extract table images from page images.
+    or self.pipeline_options.generate_table_images
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/fund/document_tools/test_docling_conversion.py::test_convert_local_pdf_writes_docling_json
+FAILED tests/fund/test_e2e_holdings_regression.py::test_fee_rates_extraction[001564 \u4e1c\u65b9\u7ea2\u4eac\u4e1c\u5927\u6570\u636e\u6df7\u5408A]
+2 failed, 786 passed, 300 skipped, 3 xfailed, 3 warnings in 292.74s (0:04:52)

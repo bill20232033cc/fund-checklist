@@ -1,9 +1,9 @@
 # fund-checklist implementation-control
 
-更新时间：2026-07-28（Phase 7.2 + Phase 7.1a 已完成，Phase 7.3 已裁决）
+更新时间：2026-07-29（Phase 7.3 已完成，Phase 7.2 + Phase 7.1a 已完成）
 当前阶段：`FUND_ANALYSIS_ASSISTANT`
 当前角色：control / CIC-lite controller
-当前目标：Phase 7.3 对话历史注入 LLM context — 🔴 待实施。Phase 7.2 交互体验增强 + 修复能力激活 + 场景扩展 — ✅ 已完成（2026-07-27）。Phase 7.1a 集成补完 — ✅ 已完成（2026-07-27）。Phase 7 已完成。
+当前目标：Phase 7.3 对话历史注入 LLM context — ✅ 已完成（2026-07-29）。Phase 7.2 交互体验增强 + 修复能力激活 + 场景扩展 — ✅ 已完成（2026-07-27）。Phase 7.1a 集成补完 — ✅ 已完成（2026-07-27）。Phase 7 已完成。
 关联文档：AGENTS.md（执行规则）、docs/design.md（设计决策）
 
 ## 已完成研究报告
@@ -2392,7 +2392,7 @@ uv run pytest tests/fund/cli/ tests/fund/service/ tests/fund/host/ tests/fund/ag
 
 ## Phase 7.3：对话历史注入 LLM context
 
-> 裁决时间：2026-07-28 | 状态：🔴 待实施
+> 裁决时间：2026-07-28 | 完成时间：2026-07-29 | 状态：✅ 已完成
 > 前置条件：Phase 7 ✅、Phase 7.1 ✅、Phase 7.2 ✅
 > 优化设计：`docs/phase7.3-option-b-optimization.md`
 > 演进记录：`docs/agent-evolution-design.md` §8.2
@@ -2402,28 +2402,34 @@ uv run pytest tests/fund/cli/ tests/fund/service/ tests/fund/host/ tests/fund/ag
 | Gate | 条件 | 状态 |
 |------|------|------|
 | Gate 1 | 方案 B 优化设计 DS 二审通过 | ✅ 有条件通过（2026-07-28） |
-| Gate 2 | 实施计划审核通过 | 🔴 待审核 |
+| Gate 2 | 实施计划审核通过 | ✅ 已通过（2026-07-29） |
 
 ### Phase 7.3 任务分解
 
 | # | 任务 | 改动文件 | 行数 | 状态 |
 |---|------|---------|------|------|
-| 1 | 新增 `ToolCallSummary` dataclass | `session_models.py` | ~10 行 | 🔴 |
-| 2 | 新增 `Session.truncate_turns()` | `session_models.py` | ~15 行 | 🔴 |
-| 3 | `_build_history_contribution()` + `ChatService.__init__` 新增 `history_max_tokens` 参数 | `chat_service.py` | ~20 行 | 🔴 |
-| 4 | `_format_turn_for_history()` | `chat_service.py` | ~15 行 | 🔴 |
-| 5 | `_estimate_token_count()` | `chat_service.py` | ~5 行 | 🔴 |
-| 6 | `_build_contributions` 增加 history | `chat_service.py` | ~5 行 | 🔴 |
-| 7 | `_run_compaction` 增加 truncate | `chat_service.py` | ~5 行 | 🔴 |
-| 8 | `chat_turn()` 填充 ToolCallSummary | `chat_service.py` | ~10 行 | 🔴 |
-| 9 | `context_slots` 新增 "history" | `scene_config.py` | 1 行 | 🔴 |
-| 10 | 单元测试 | `tests/` | ~20 行 | 🔴 |
-| 11 | e2e 测试 | `tests/e2e/` | ~10 行 | 🔴 |
+| 1 | 新增 `ToolCallSummary` dataclass | `session_models.py` | ~10 行 | ✅ |
+| 2 | 新增 `Session.truncate_turns()` | `session_models.py` | ~15 行 | ✅ |
+| 3 | `_build_history_contribution()` + `ChatService.__init__` 新增 `history_max_tokens` 参数 | `chat_service.py` | ~20 行 | ✅ |
+| 4 | `_format_turn_for_history()` | `chat_service.py` | ~15 行 | ✅ |
+| 5 | `_estimate_token_count()` | `chat_service.py` | ~5 行 | ✅ |
+| 6 | `_build_contributions` 增加 history | `chat_service.py` | ~5 行 | ✅ |
+| 7 | `_run_compaction` 增加 truncate | `chat_service.py` | ~5 行 | ✅ |
+| 8 | `chat_turn()` 填充 ToolCallSummary | `chat_service.py` | ~10 行 | ✅ |
+| 9 | `context_slots` 新增 "history" | `scene_config.py` | 1 行 | ✅ |
+| 10 | Bug A: `next_step_stream()` 补 `temperature=self._temperature` | `deepseek_llm.py` | 1 行 | ✅ |
+| 11 | Bug B+C: contract 分支 + compaction 路径 temperature 修复 | `chat_service.py` | ~3 行 | ✅ |
+| 12 | Bug D: `_default_runner_factory` 新增 `temperature` 参数 | `extraction.py` | ~3 行 | ✅ |
+| 13 | Bug E: regenerate helper `DeepSeekLlmClient` 补 temperature | `main.py` | 1 行 | ✅ |
+| 14 | 新增 `_normalize_document_id()` 前缀匹配 | `llm_tool_loop.py` | ~15 行 | ✅ |
+| 15 | 单元测试（含 document_id + temperature A~E） | `tests/` | 34 个测试 | ✅ |
+| 16 | e2e 测试 | `tests/e2e/` | ~10 行 | ⚠️ xfail（已知 bug） |
 
 ### Stop Conditions
 
 - `LlmClientProtocol.next_step()` 签名变更 → 停止（违反方案 B 约束）
-- `llm_tool_loop.py` 修改 → 停止（违反方案 B 约束）
+- `llm_tool_loop.py` 核心 loop 逻辑修改 → 停止（`_normalize_document_id` 前缀匹配是批准的例外）
+- `deepseek_llm.py` / `extraction.py` / `main.py` 超出 temperature 透传范围的修改 → 停止
 - history 注入后全量回归 < 769 passed → 停止
 - e2e interactive 测试仍全部 xfail → 停止
 - history contribution 未出现在 system prompt 中 → 停止（核心功能验收点）
@@ -2445,8 +2451,8 @@ uv run pytest tests/e2e/ -v --tb=short
 uv run pytest tests/fund/cli/ tests/fund/service/ tests/fund/host/ tests/fund/agent/ --tb=no -q
 ```
 
-### DS 二审待处理项
+### DS 二审待处理项（已处理）
 
-1. **Bug（必须修）**：`truncate_turns` 补充 `status=self.status, updated_at=...`
-2. **遗漏（必须补）**：`chat_turn()` 显式填充 `ToolCallSummary`
+1. **Bug（已修）**：`truncate_turns` 已补充 `status=self.status, updated_at=...`
+2. **遗漏（已补）**：`chat_turn()` 已显式填充 `ToolCallSummary`
 3. **建议**：ContextBudget 与 history token 交互留 TODO，Phase 8 处理

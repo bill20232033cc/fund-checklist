@@ -37,6 +37,7 @@ _SYSTEM_PROMPT = (
     "4. 不要猜测 section_ref 或 table_ref，必须从工具返回结果中获取"
     "最终回答必须返回 JSON: "
     '{"answer": string, "citations": Citation[], "key_facts": string[]}。'
+    "citations 必须从工具返回结果中直接复制，不得修改或构造。"
     "不得请求 repository/private loader、raw PDF、raw Docling JSON、本地路径、cache path、"
     "local_import_id、URL secret 或 parser private payload。"
 )
@@ -226,11 +227,13 @@ class DeepSeekLlmClient:
         timeout_seconds: int = DEFAULT_DEEPSEEK_TIMEOUT_SECONDS,
         options: ExecutionOptions | None = None,
         system_prompt: str | None = None,
+        temperature: float = 0,
     ) -> None:
         """保存 transport、环境变量来源、超时设置和执行选项。
 
         参数:
             system_prompt: 可选自定义 system prompt；None 时使用默认 _SYSTEM_PROMPT。
+            temperature: LLM 生成温度；0 为确定性，0.7 适合对话。
         """
 
         self._transport = transport or UrlLibDeepSeekTransport()
@@ -239,6 +242,7 @@ class DeepSeekLlmClient:
         self._options = options or ExecutionOptions()
         self._cumulative_usage = TokenUsage()
         self._system_prompt = system_prompt  # None = 使用默认
+        self._temperature = temperature
 
     @property
     def cumulative_usage(self) -> TokenUsage:
@@ -251,6 +255,7 @@ class DeepSeekLlmClient:
         document_id: str,
         query: str,
         tool_results: tuple[ToolResult, ...],
+        remaining_budget: int | None = None,
     ) -> ChatResponse:
         """调用 DeepSeek 并解析为 ChatResponse（含 ToolCall/FinalAnswer + token usage）。
 
@@ -281,6 +286,8 @@ class DeepSeekLlmClient:
                 model=env.get(DEEPSEEK_MODEL_ENV, DEFAULT_DEEPSEEK_MODEL).strip() or DEFAULT_DEEPSEEK_MODEL,
                 stream=use_stream,
                 system_prompt=self._system_prompt,
+                remaining_budget=remaining_budget,
+                temperature=self._temperature,
             ),
             timeout_seconds=self._timeout_seconds,
         )
@@ -329,6 +336,7 @@ class DeepSeekLlmClient:
         document_id: str,
         query: str,
         tool_results: tuple[ToolResult, ...],
+        remaining_budget: int | None = None,
     ) -> Iterator[StreamEvent]:
         """流式调用 DeepSeek 并 yield StreamEvent。
 
@@ -360,6 +368,8 @@ class DeepSeekLlmClient:
                 model=env.get(DEEPSEEK_MODEL_ENV, DEFAULT_DEEPSEEK_MODEL).strip() or DEFAULT_DEEPSEEK_MODEL,
                 stream=True,
                 system_prompt=self._system_prompt,
+                remaining_budget=remaining_budget,
+                temperature=self._temperature,
             ),
             timeout_seconds=self._timeout_seconds,
         )
@@ -472,6 +482,8 @@ def _request_payload(
     model: str,
     stream: bool = False,
     system_prompt: str | None = None,
+    remaining_budget: int | None = None,
+    temperature: float = 0,
 ) -> dict[str, Any]:
     """构造不含 raw/private payload 的 OpenAI-compatible chat completions payload。"""
 
@@ -485,7 +497,10 @@ def _request_payload(
                     {
                         "document_id": document_id,
                         "query": query,
-                        "prior_tool_results": [_safe_tool_result(result) for result in tool_results],
+                        "prior_tool_results": [
+                            _safe_tool_result(result, remaining_budget=remaining_budget)
+                            for result in tool_results
+                        ],
                     },
                     ensure_ascii=False,
                 ),
@@ -493,19 +508,28 @@ def _request_payload(
         ],
         "tools": _tool_schemas(),
         "tool_choice": "auto",
-        "temperature": 0,
+        "temperature": temperature,
         "stream": stream,
     }
 
 
-def _safe_tool_result(result: ToolResult) -> dict[str, Any]:
-    """序列化受控工具结果，只给 provider evidence_text 与 public citations。"""
+def _safe_tool_result(
+    result: ToolResult,
+    *,
+    remaining_budget: int | None = None,
+) -> dict[str, Any]:
+    """将 runner ToolResult 经 ToolResult 信封包裹后投射为 LLM-facing dict。"""
 
-    return {
-        "tool_name": result.tool_name.value,
-        "evidence_text": result.evidence_text,
-        "citations": [_safe_citation(citation) for citation in result.citations],
-    }
+    from fund_agent.agent.tool_result import ToolResult as Envelope, project_for_llm
+
+    envelope = Envelope.success(
+        value={
+            "tool_name": result.tool_name.value,
+            "evidence_text": result.evidence_text,
+            "citations": [_safe_citation(citation) for citation in result.citations],
+        },
+    )
+    return project_for_llm(envelope, budget=remaining_budget)
 
 
 def _tool_schemas() -> list[dict[str, Any]]:
@@ -672,21 +696,31 @@ def _parse_final_answer(content: Any) -> FinalAnswer:
     """解析 message.content 中的 final answer。
 
     优先尝试 JSON 格式（{"answer","citations","key_facts"}）；
-    若非合法 JSON 或缺少 answer 字段，则将整个 content 视为 markdown 回答，
-    citations 和 key_facts 设为空。
+    其次尝试从 ```json ... ``` 代码块中提取 JSON；
+    最后 fallback 为 markdown 回答（citations/key_facts 为空）。
     """
 
     if not isinstance(content, str) or not content.strip():
         raise LlmClientFailure(FailureCode.LLM_MALFORMED_RESPONSE, _MALFORMED_MESSAGE)
-    try:
-        payload = json.loads(content)
-        if isinstance(payload, dict) and "answer" in payload:
-            answer = _required_str(payload, "answer")
-            citations = tuple(_citation_from_dict(item) for item in _required_list(payload, "citations"))
-            key_facts = tuple(str(item) for item in _required_list(payload, "key_facts"))
-            return FinalAnswer(answer=answer, citations=citations, key_facts=key_facts)
-    except (json.JSONDecodeError, TypeError, ValueError, KeyError):
-        pass
+
+    candidates: list[str] = [content]
+    # 提取 ```json ... ``` 代码块
+    import re as _re
+    json_blocks = _re.findall(r"```(?:json)?\s*\n?(.*?)\n?```", content, _re.DOTALL)
+    if json_blocks:
+        # 优先尝试最后一个代码块（最可能是最终 JSON）
+        candidates = [json_blocks[-1]] + candidates
+
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate)
+            if isinstance(payload, dict) and "answer" in payload:
+                answer = _required_str(payload, "answer")
+                citations = tuple(_citation_from_dict(item) for item in _required_list(payload, "citations"))
+                key_facts = tuple(str(item) for item in _required_list(payload, "key_facts"))
+                return FinalAnswer(answer=answer, citations=citations, key_facts=key_facts)
+        except (json.JSONDecodeError, TypeError, ValueError, KeyError):
+            continue
     # fallback: 整个 content 作为 markdown 回答
     return FinalAnswer(answer=content.strip(), citations=(), key_facts=())
 

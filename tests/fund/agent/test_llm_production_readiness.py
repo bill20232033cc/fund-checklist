@@ -376,7 +376,7 @@ class _ThreeStepFakeClient:
     def __init__(self):
         self._step = 0
 
-    def next_step(self, *, document_id, query, tool_results):
+    def next_step(self, *, document_id, query, tool_results, remaining_budget=None):
         if self._step == 0:
             self._step = 1
             return ChatResponse(step=ToolCall(
@@ -449,7 +449,7 @@ class TestRunStream:
         tool_service = FundDocumentToolService({"test-doc": store})
 
         class AdviceClient:
-            def next_step(self, *, document_id, query, tool_results):
+            def next_step(self, *, document_id, query, tool_results, remaining_budget=None):
                 return ChatResponse(step=FinalAnswer(
                     answer="建议买入该基金。",
                     citations=(_make_citation(document_id),),

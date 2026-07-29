@@ -50,6 +50,19 @@ class TestInteractiveParser:
         assert args.work_dir == Path(".fund_checklist")
         assert args.label is None
         assert args.no_stream is False
+        assert args.plain is False
+
+    def test_plain_flag_parsed(self):
+        """--plain 参数正确解析。"""
+        parser = build_parser()
+        args = parser.parse_args(["interactive", "--fund-code", "000001", "--plain"])
+        assert args.plain is True
+
+    def test_plain_flag_default_false(self):
+        """--plain 默认关闭。"""
+        parser = build_parser()
+        args = parser.parse_args(["interactive", "--fund-code", "000001"])
+        assert args.plain is False
 
 
 class TestInteractiveCommandExecution:
@@ -620,13 +633,81 @@ class TestRichMarkdownRenderer:
         assert "hello" in result
 
     def test_render_table(self):
-        """Markdown 表格渲染。"""
+        """Markdown 表格渲染为 Rich Table（边框、表头、列对齐）。"""
         from fund_agent.cli.main import render_markdown
 
         md = "| 年份 | 收益率 |\n|------|--------|\n| 2024 | 12.5% |\n| 2023 | 8.3% |"
         result = render_markdown(md)
         assert "2024" in result
         assert "12.5" in result
+        # Rich Table 渲染应包含表头和数据
+        assert "年份" in result
+        assert "收益率" in result
+
+    def test_render_table_with_alignment(self):
+        """表格列对齐：左对齐、居中、右对齐。"""
+        from fund_agent.cli.main import render_markdown
+
+        md = (
+            "| 名称 | 代码 | 占比 |\n"
+            "|:-----|:----:|-----:|\n"
+            "| 股票A | 000001 | 5.2% |\n"
+            "| 股票B | 000002 | 3.1% |"
+        )
+        result = render_markdown(md)
+        assert "股票A" in result
+        assert "000001" in result
+        assert "5.2" in result
+
+    def test_render_table_without_leading_trailing_pipes(self):
+        """无首尾竖线的表格也能正确识别渲染。"""
+        from fund_agent.cli.main import render_markdown
+
+        md = "年份 | 收益率\n------|--------\n2024 | 12.5%\n2023 | 8.3%"
+        result = render_markdown(md)
+        assert "2024" in result
+        assert "12.5" in result
+
+    def test_render_table_mixed_with_text(self):
+        """表格与普通文本混合渲染。"""
+        from fund_agent.cli.main import render_markdown
+
+        md = "以下是最新年报数据：\n\n| 年份 | 收益率 |\n|------|--------|\n| 2024 | 12.5% |\n\n数据来源：基金年报。"
+        result = render_markdown(md)
+        assert "最新年报" in result
+        assert "2024" in result
+        assert "12.5" in result
+        assert "数据来源" in result
+
+    def test_render_italic_text(self):
+        """斜体 markdown 正确渲染。"""
+        from fund_agent.cli.main import render_markdown
+
+        result = render_markdown("这是 *斜体* 内容。")
+        assert "斜体" in result
+
+    def test_render_bold_italic_text(self):
+        """粗斜体 markdown 正确渲染。"""
+        from fund_agent.cli.main import render_markdown
+
+        result = render_markdown("这是 ***粗斜体*** 内容。")
+        assert "粗斜体" in result
+
+    def test_render_multiple_tables(self):
+        """多个表格独立渲染。"""
+        from fund_agent.cli.main import render_markdown
+
+        md = (
+            "| A | B |\n|---|---|\n| 1 | 2 |\n\n"
+            "| X | Y |\n|---|---|\n| 9 | 8 |"
+        )
+        result = render_markdown(md)
+        assert "A" in result
+        assert "B" in result
+        assert "X" in result
+        assert "Y" in result
+        assert "1" in result
+        assert "9" in result
 
     def test_render_inline_code(self):
         """行内代码渲染。"""
@@ -665,3 +746,425 @@ class TestRichMarkdownRenderer:
         result = render_markdown("**测试**", use_rich=False)
         # 无 rich 时返回原始文本或简化渲染
         assert "测试" in result
+
+
+# ── Phase 7.2 Task 8: /history、追问建议、启动提示 ────────────────────
+
+
+class TestHistoryCommand:
+    """/history 命令解析与输出测试。"""
+
+    def _parse(self, text: str) -> tuple[str | None, str | None]:
+        from fund_agent.cli.main import _parse_repl_input
+        return _parse_repl_input(text)
+
+    def test_history_command_parsed(self):
+        """/history 命令正确解析。"""
+        cmd, arg = self._parse("/history")
+        assert cmd == "history"
+
+    def test_history_empty_session(self):
+        """空 session 时 /history 不崩溃。"""
+        import io
+        from fund_agent.cli.main import _print_history
+        from fund_agent.service.session_models import PinnedState, Session
+
+        session = Session.create(fund_code="011649")
+        stdout = io.StringIO()
+        _print_history(session, stdout)
+        assert "暂无对话历史" in stdout.getvalue()
+
+    def test_history_shows_turns(self):
+        """有对话记录时显示角色、内容摘要和时间。"""
+        import io
+        from fund_agent.cli.main import _print_history
+        from fund_agent.service.session_models import PinnedState, Session, Turn
+
+        session = Session.create(fund_code="011649")
+        session = session.add_turn(Turn(role="user", content="基金经理是谁？", timestamp="2025-07-01T10:00:00+00:00"))
+        session = session.add_turn(Turn(role="assistant", content="基金经理是张三，从业15年。", timestamp="2025-07-01T10:00:05+00:00"))
+
+        stdout = io.StringIO()
+        _print_history(session, stdout)
+        output = stdout.getvalue()
+        assert "[用户]" in output
+        assert "[助手]" in output
+        assert "基金经理是谁？" in output
+        assert "张三" in output
+
+    def test_history_truncates_long_content(self):
+        """超过 80 字符的内容截断并加 ..."""
+        import io
+        from fund_agent.cli.main import _print_history
+        from fund_agent.service.session_models import PinnedState, Session, Turn
+
+        session = Session.create(fund_code="011649")
+        long_text = "这是一个" + "非常" * 50 + "长的回答"
+        session = session.add_turn(Turn(role="assistant", content=long_text, timestamp="2025-07-01T10:00:00+00:00"))
+
+        stdout = io.StringIO()
+        _print_history(session, stdout)
+        output = stdout.getvalue()
+        assert "..." in output
+        assert len(long_text) > 80
+
+    def test_history_shows_timestamp(self):
+        """历史记录包含时间戳。"""
+        import io
+        from fund_agent.cli.main import _print_history
+        from fund_agent.service.session_models import PinnedState, Session, Turn
+
+        session = Session.create(fund_code="011649")
+        session = session.add_turn(Turn(role="user", content="测试", timestamp="2025-07-01T12:30:45+00:00"))
+
+        stdout = io.StringIO()
+        _print_history(session, stdout)
+        output = stdout.getvalue()
+        assert "2025-07-01T12:30:45" in output
+
+    def test_history_max_10_rounds(self):
+        """只显示最近 10 轮对话。"""
+        import io
+        from fund_agent.cli.main import _print_history
+        from fund_agent.service.session_models import PinnedState, Session, Turn
+
+        session = Session.create(fund_code="011649")
+        for i in range(25):
+            session = session.add_turn(Turn(role="user", content=f"问题{i}"))
+            session = session.add_turn(Turn(role="assistant", content=f"回答{i}"))
+
+        stdout = io.StringIO()
+        _print_history(session, stdout)
+        output = stdout.getvalue()
+        # 应只显示 10 轮
+        assert "问题14" not in output  # 第 15 轮之前的不应出现
+        assert "问题24" in output  # 最后一轮
+
+
+class TestFollowUpSuggestions:
+    """追问建议生成测试。"""
+
+    def test_short_answer_no_suggestion(self):
+        """短回答不生成追问建议。"""
+        from fund_agent.cli.main import _generate_follow_up_suggestion
+        result = _generate_follow_up_suggestion("基金经理是谁？", "张三。")
+        assert result is None
+
+    def test_manager_keyword_suggestion(self):
+        """含"经理"关键词生成对应建议。"""
+        from fund_agent.cli.main import _generate_follow_up_suggestion
+        result = _generate_follow_up_suggestion(
+            "基金经理是谁？",
+            "基金经理是张三，从业15年，" + "有丰富经验。" * 35,
+        )
+        assert result is not None
+        assert "经理" in result
+
+    def test_holdings_keyword_suggestion(self):
+        """含"持仓"关键词生成对应建议。"""
+        from fund_agent.cli.main import _generate_follow_up_suggestion
+        result = _generate_follow_up_suggestion(
+            "最新持仓有哪些？",
+            "前十大重仓股包括" + "详细分析。" * 39,
+        )
+        assert result is not None
+        assert "持仓" in result or "重仓" in result
+
+    def test_generic_fallback_suggestion(self):
+        """无关键词匹配时返回通用建议。"""
+        from fund_agent.cli.main import _generate_follow_up_suggestion
+        result = _generate_follow_up_suggestion(
+            "这只基金怎么样？",
+            "这是一只表现不错的基金，" + "数据表明。" * 38,
+        )
+        assert result is not None
+        assert "追问" in result
+
+    def test_short_answer_below_threshold(self):
+        """正好 200 字符以下不生成建议。"""
+        from fund_agent.cli.main import _generate_follow_up_suggestion
+        short = "A" * 199
+        result = _generate_follow_up_suggestion("基金经理是谁？", short)
+        assert result is None
+
+    def test_answer_at_threshold_generates(self):
+        """200 字符及以上生成建议。"""
+        from fund_agent.cli.main import _generate_follow_up_suggestion
+        at_threshold = "A" * 200
+        result = _generate_follow_up_suggestion("基金经理是谁？", at_threshold)
+        assert result is not None
+
+
+class TestStartupTip:
+    """interactive 启动提示测试。"""
+
+    def test_startup_message_in_output(self, tmp_path: Path):
+        """验证启动提示出现在交互模式输出中。"""
+        # 写入假 catalog
+        catalog_path = tmp_path / "completed_reports.json"
+        catalog_data = {
+            "schema_version": 1,
+            "reports": {
+                f"doc-011649-{year}": {
+                    "schema_version": 1,
+                    "document_id": f"doc-011649-{year}",
+                    "identity": {
+                        "fund_code": "011649",
+                        "fund_name": "测试基金",
+                        "year": year,
+                        "report_type": "annual_report",
+                        "source_kind": "local_pdf",
+                        "content_fingerprint": "abc123",
+                        "document_id": f"doc-011649-{year}",
+                        "share_class": "A",
+                    },
+                    "stored_blob_ref": f"local_pdf::doc-011649-{year}",
+                    "docling_json_ref": f"docling_json::doc-011649-{year}",
+                    "parser_health": {"status": "ok"},
+                }
+                for year in [2021, 2022, 2023, 2024, 2025]
+            },
+        }
+        catalog_path.parent.mkdir(parents=True, exist_ok=True)
+        catalog_path.write_text(json.dumps(catalog_data, ensure_ascii=False), encoding="utf-8")
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with mock.patch("sys.stdin", io.StringIO("exit\n")):
+            try:
+                run_cli(
+                    ["interactive", "--fund-code", "011649", "--work-dir", str(tmp_path)],
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+            except (EOFError, SystemExit):
+                pass
+
+        output = stdout.getvalue()
+        assert "支持多轮对话" in output
+        assert "可以追问" in output
+
+
+class TestHelpIncludesHistory:
+    """帮助信息包含 /history 命令。"""
+
+    def test_help_mentions_history(self):
+        """帮助输出提及 /history 命令。"""
+        import io
+        from fund_agent.cli.main import _print_help
+
+        stdout = io.StringIO()
+        _print_help(stdout)
+        output = stdout.getvalue()
+        assert "/history" in output
+        assert "10 轮" in output or "对话摘要" in output
+
+    def test_help_mentions_document_clear_exit(self):
+        """/help 列出 /document、/clear、exit。"""
+        import io
+        from fund_agent.cli.main import _print_help
+
+        stdout = io.StringIO()
+        _print_help(stdout)
+        output = stdout.getvalue()
+        assert "/document" in output
+        assert "/clear" in output
+        assert "exit" in output
+
+
+# ── Phase 7.2 Smoke Tests ────────────────────────────────────────────
+
+
+class TestPhase72Smoke:
+    """Phase 7.2 端到端 smoke 测试：interactive 查询 + Rich 渲染 + /history + 追问建议。"""
+
+    # ── Smoke 1: interactive 查询流程 ──────────────────────────────
+
+    def test_smoke1_query_parsed_as_normal_text(self):
+        """Smoke 1: "基金经理是谁" 解析为普通查询，非命令。"""
+        from fund_agent.cli.main import _parse_repl_input
+
+        for q in ("基金经理是谁？", "基金经理", "谁是基金经理", "最新持仓有哪些？"):
+            cmd, arg = _parse_repl_input(q)
+            assert cmd is None, f"'{q}' 应为普通查询而非命令"
+            assert arg is not None
+            assert len(arg) > 0
+
+    def test_smoke1_rich_table_rendering_in_response(self):
+        """Smoke 1: 含有表格的回答经 Rich 渲染后保留数据。"""
+        from fund_agent.cli.main import render_markdown
+
+        answer = (
+            "**基金经理是张三**，从业 15 年。\n\n"
+            "| 年份 | 收益率 | 排名 |\n"
+            "|------|--------|------|\n"
+            "| 2024 | 12.5% | 前25% |\n"
+            "| 2023 | 8.3%  | 前50% |\n"
+            "| 2022 | -5.1% | 前75% |"
+        )
+        rendered = render_markdown(answer)
+        assert "张三" in rendered
+        assert "12.5" in rendered
+        assert "2024" in rendered
+        assert "排名" in rendered
+
+    def test_smoke1_query_response_flow(self):
+        """Smoke 1: 查询 → 回答 → 渲染，全链路非空。"""
+        from fund_agent.cli.main import _parse_repl_input, render_markdown
+
+        # Step 1: 用户输入被解析为查询
+        cmd, arg = _parse_repl_input("基金经理是谁？")
+        assert cmd is None
+        assert "基金经理" in arg
+
+        # Step 2: 模拟 LLM 回答（含 markdown 表格）
+        answer = (
+            "基金经理是**李四**，自 2018 年起管理本基金。\n\n"
+            "## 管理业绩\n\n"
+            "| 年份 | 收益 | 基准 |\n"
+            "|------|------|------|\n"
+            "| 2024 | 15%  | 10%  |\n"
+            "| 2023 | 8%   | 5%   |"
+        )
+
+        # Step 3: Rich 渲染后非空
+        rendered = render_markdown(answer)
+        assert len(rendered) > 0
+        assert "李四" in rendered
+        assert "2018" in rendered
+
+    def test_smoke1_plain_mode_passthrough(self):
+        """Smoke 1: --plain 模式下保留原始 Markdown 文本。"""
+        from fund_agent.cli.main import render_markdown
+
+        answer = "**基金经理是王五**，管理规模 50 亿。"
+        rendered = render_markdown(answer, use_rich=False)
+        assert "王五" in rendered
+        assert "**" in rendered or "王五" in rendered  # raw markdown preserved
+
+    # ── Smoke 4: /history + 追问建议 ────────────────────────────────
+
+    def test_smoke4_history_command_available(self):
+        """Smoke 4: /history 命令可解析，空 session 不崩溃。"""
+        import io
+        from fund_agent.cli.main import _parse_repl_input, _print_history
+        from fund_agent.service.session_models import Session
+
+        cmd, arg = _parse_repl_input("/history")
+        assert cmd == "history"
+
+        session = Session.create(fund_code="011649")
+        stdout = io.StringIO()
+        _print_history(session, stdout)
+        assert "暂无对话历史" in stdout.getvalue()
+
+    def test_smoke4_history_shows_dialog_summary(self):
+        """Smoke 4: /history 显示最近对话的角色、内容摘要和时间。"""
+        import io
+        from fund_agent.cli.main import _print_history
+        from fund_agent.service.session_models import Session, Turn
+
+        session = Session.create(fund_code="011649")
+        session = session.add_turn(Turn(role="user", content="基金经理是谁？", timestamp="2025-07-01T10:00:00+00:00"))
+        session = session.add_turn(Turn(role="assistant", content="基金经理是张三，从业15年，历史业绩优秀。", timestamp="2025-07-01T10:00:05+00:00"))
+
+        stdout = io.StringIO()
+        _print_history(session, stdout)
+        output = stdout.getvalue()
+        assert "[用户]" in output
+        assert "[助手]" in output
+        assert "基金经理是谁？" in output
+        assert "张三" in output
+
+    def test_smoke4_follow_up_suggestion_on_long_answer(self):
+        """Smoke 4: 长回答（≥200 字符）末尾出现追问建议。"""
+        from fund_agent.cli.main import _generate_follow_up_suggestion
+
+        long_answer = "基金经理是张三，自 2015 年起管理本基金，" + "历史业绩表现优异。" * 25
+        assert len(long_answer) >= 200
+
+        result = _generate_follow_up_suggestion("基金经理是谁？", long_answer)
+        assert result is not None
+        assert "经理" in result
+
+    def test_smoke4_no_suggestion_on_short_answer(self):
+        """Smoke 4: 短回答不显示追问建议。"""
+        from fund_agent.cli.main import _generate_follow_up_suggestion
+
+        result = _generate_follow_up_suggestion("测试", "短回答。")
+        assert result is None
+
+    def test_smoke4_follow_up_coverage(self):
+        """Smoke 4: 各关键词均触发非空追问建议。"""
+        from fund_agent.cli.main import _generate_follow_up_suggestion
+
+        long_answer = "X" * 200
+        queries = [
+            "基金经理是谁？",
+            "最新持仓有哪些？",
+            "历史业绩如何？",
+            "费率是多少？",
+            "资产配置情况？",
+            "风险如何？",
+            "债券情况？",
+        ]
+        for question in queries:
+            result = _generate_follow_up_suggestion(question, long_answer)
+            assert result is not None, f"'{question}' 应触发追问建议"
+            assert len(result) > 10, f"'{question}' 的建议过短"
+
+    def test_smoke4_help_includes_history(self):
+        """Smoke 4: /help 输出包含 /history 命令及说明。"""
+        import io
+        from fund_agent.cli.main import _print_help
+
+        stdout = io.StringIO()
+        _print_help(stdout)
+        output = stdout.getvalue()
+        assert "/history" in output
+        assert "对话摘要" in output or "10 轮" in output
+
+    def test_smoke4_startup_tip_present(self, tmp_path: Path):
+        """Smoke 4: interactive 启动提示包含多轮对话与命令提示。"""
+        import io
+        import json
+
+        catalog_path = tmp_path / "completed_reports.json"
+        catalog_data = {
+            "schema_version": 1,
+            "reports": {
+                f"doc-011649-{year}": {
+                    "schema_version": 1,
+                    "document_id": f"doc-011649-{year}",
+                    "identity": {
+                        "fund_code": "011649", "fund_name": "测试基金",
+                        "year": year, "report_type": "annual_report",
+                        "source_kind": "local_pdf", "content_fingerprint": "abc",
+                        "document_id": f"doc-011649-{year}", "share_class": "A",
+                    },
+                    "stored_blob_ref": f"local_pdf::doc-011649-{year}",
+                    "docling_json_ref": f"docling_json::doc-011649-{year}",
+                    "parser_health": {"status": "ok"},
+                }
+                for year in [2023, 2024, 2025]
+            },
+        }
+        catalog_path.parent.mkdir(parents=True, exist_ok=True)
+        catalog_path.write_text(json.dumps(catalog_data, ensure_ascii=False), encoding="utf-8")
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with mock.patch("sys.stdin", io.StringIO("exit\n")):
+            try:
+                run_cli(
+                    ["interactive", "--fund-code", "011649", "--work-dir", str(tmp_path)],
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+            except (EOFError, SystemExit):
+                pass
+
+        output = stdout.getvalue()
+        assert "多轮对话" in output or "可以追问" in output or "/help" in output

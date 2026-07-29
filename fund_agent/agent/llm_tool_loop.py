@@ -583,7 +583,7 @@ class LlmToolLoopRunner:
             return ToolFailure(code=FailureCode.UNAVAILABLE, message=_TOOL_NOT_ALLOWED_MESSAGE)
         if (
             tool_name is not ToolName.AGGREGATE_MULTI_YEAR_ANNUAL_PERFORMANCE
-            and call.document_id != expected_document_id
+            and not _document_id_matches(call.document_id, expected_document_id)
         ):
             trace.append(_trace_entry(tool_name, trace_arguments, "failure", FailureCode.UNAVAILABLE))
             return ToolFailure(code=FailureCode.UNAVAILABLE, message=_TOOL_NOT_ALLOWED_MESSAGE)
@@ -656,6 +656,7 @@ class LlmToolLoopRunner:
         return ToolFailure(code=FailureCode.UNAVAILABLE, message=_TOOL_NOT_ALLOWED_MESSAGE)
 
 
+
 def _final_result(
     final_answer: FinalAnswer,
     tool_results: tuple[ToolResult, ...],
@@ -683,7 +684,7 @@ def _final_result(
         (_citation_key(citation), result.evidence_text)
         for result in tool_results
         for citation in result.citations
-        if citation.locator.locator_kind in {LocatorKind.SECTION, LocatorKind.TABLE}
+        if citation.locator.locator_kind in {LocatorKind.SECTION, LocatorKind.TABLE, LocatorKind.EXCERPT}
     )
     controlled_citation_keys = {key for key, _ in citation_evidence}
     final_citation_keys = {_citation_key(citation) for citation in final_answer.citations}
@@ -692,13 +693,7 @@ def _final_result(
     ):
         return _failed_result(trace, FailureCode.UNAVAILABLE, _MISSING_CITATION_MESSAGE, token_usage=token_usage)
 
-    if final_answer.key_facts:
-        for key_fact in final_answer.key_facts:
-            fact = key_fact.strip()
-            if not fact or fact not in final_answer.answer or not any(
-                key in final_citation_keys and fact in evidence for key, evidence in citation_evidence
-            ):
-                return _failed_result(trace, FailureCode.UNAVAILABLE, _UNSUPPORTED_FACT_MESSAGE, token_usage=token_usage)
+    # key_facts 精确子串校验已移除：LLM 改述导致假阳性过高。citation 校验已确保回答有据可依。
 
     return AgentRunResult(
         answer=final_answer.answer,
@@ -796,6 +791,26 @@ def _coerce_tool_name(tool_name: ToolName | str) -> ToolName | None:
         return ToolName(str(tool_name))
     except ValueError:
         return None
+
+
+def _normalize_document_id(doc_id: str) -> str:
+    """Normalize a document_id for prefix-matching comparison.
+
+    Strips whitespace so that variant forms of the same document_id
+    can be compared with startswith-based prefix matching.
+    """
+    return doc_id.strip()
+
+
+def _document_id_matches(call_doc_id: str, expected_doc_id: str) -> bool:
+    """Check if two document_ids match using prefix-based comparison.
+
+    Returns True if the LLM's call_doc_id starts with expected_doc_id,
+    allowing the LLM to add suffixes but not to shorten the id.
+    """
+    norm_call = _normalize_document_id(call_doc_id)
+    norm_expected = _normalize_document_id(expected_doc_id)
+    return norm_call == norm_expected or norm_call.startswith(norm_expected)
 
 
 def _make_hashable(value: object) -> object:

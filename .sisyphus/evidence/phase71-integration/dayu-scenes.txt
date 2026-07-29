@@ -1,0 +1,29 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.11.15, pytest-9.1.1, pluggy-1.6.0 -- /Users/maomao/fund-checklist/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /Users/maomao/fund-checklist
+configfile: pyproject.toml
+plugins: anyio-4.14.1, Faker-40.23.0
+collecting ... collected 19 items
+
+tests/fund/service/test_scene_regenerate_repair.py::TestRegenerateSceneConfig::test_scene_name PASSED [  5%]
+tests/fund/service/test_scene_regenerate_repair.py::TestRegenerateSceneConfig::test_fragments_include_template PASSED [ 10%]
+tests/fund/service/test_scene_regenerate_repair.py::TestRegenerateSceneConfig::test_context_slots PASSED [ 15%]
+tests/fund/service/test_scene_regenerate_repair.py::TestRegenerateSceneConfig::test_model_name PASSED [ 21%]
+tests/fund/service/test_scene_regenerate_repair.py::TestRegenerateSceneConfig::test_temperature PASSED [ 26%]
+tests/fund/service/test_scene_regenerate_repair.py::TestRegenerateSceneConfig::test_max_iterations PASSED [ 31%]
+tests/fund/service/test_scene_regenerate_repair.py::TestRegenerateSceneConfig::test_allowed_tools PASSED [ 36%]
+tests/fund/service/test_scene_regenerate_repair.py::TestRegenerateSceneConfig::test_four_fragments PASSED [ 42%]
+tests/fund/service/test_scene_regenerate_repair.py::TestRepairSceneConfig::test_scene_name PASSED [ 47%]
+tests/fund/service/test_scene_regenerate_repair.py::TestRepairSceneConfig::test_fragments_include_template PASSED [ 52%]
+tests/fund/service/test_scene_regenerate_repair.py::TestRepairSceneConfig::test_context_slots PASSED [ 57%]
+tests/fund/service/test_scene_regenerate_repair.py::TestRepairSceneConfig::test_model_name PASSED [ 63%]
+tests/fund/service/test_scene_regenerate_repair.py::TestRepairSceneConfig::test_temperature PASSED [ 68%]
+tests/fund/service/test_scene_regenerate_repair.py::TestRepairSceneConfig::test_max_iterations PASSED [ 73%]
+tests/fund/service/test_scene_regenerate_repair.py::TestRepairSceneConfig::test_allowed_tools PASSED [ 78%]
+tests/fund/service/test_scene_regenerate_repair.py::TestRepairSceneConfig::test_four_fragments PASSED [ 84%]
+tests/fund/service/test_scene_regenerate_repair.py::TestComposeFromSceneRendering::test_renders_regenerate_scene PASSED [ 89%]
+tests/fund/service/test_scene_regenerate_repair.py::TestComposeFromSceneRendering::test_renders_repair_scene PASSED [ 94%]
+tests/fund/service/test_scene_regenerate_repair.py::TestComposeFromSceneRendering::test_regenerate_differs_from_repair PASSED [100%]
+
+============================== 19 passed in 0.05s ==============================

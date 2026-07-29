@@ -96,8 +96,8 @@ _INTERACTIVE_FRAGMENTS = (
 INTERACTIVE_SCENE_CONFIG = SceneConfig(
     scene="interactive",
     fragments=_INTERACTIVE_FRAGMENTS,
-    context_slots=("runtime", "fund_context", "memory"),
-    model=SceneModelSpec(default_name="deepseek-v4-pro-thinking", temperature=0.7),
+    context_slots=("runtime", "fund_context", "memory", "history"),
+    model=SceneModelSpec(default_name="deepseek-v4-pro", temperature=0.7),
     runtime=SceneRuntimeSpec(max_iterations=20),
     allowed_tools=(
         ToolName.SEARCH_DOCUMENT.value,
@@ -106,5 +106,77 @@ INTERACTIVE_SCENE_CONFIG = SceneConfig(
         ToolName.READ_TABLE.value,
         ToolName.GET_EXCERPT.value,
         ToolName.AGGREGATE_MULTI_YEAR_ANNUAL_PERFORMANCE.value,
+    ),
+)
+
+# ── Regenerate Scene ──────────────────────────────────────────────
+
+_REGENERATE_FRAGMENTS = (
+    Fragment(order=1, path="base/agents.md"),
+    Fragment(order=2, path="base/soul.md"),
+    Fragment(order=3, path="base/fact_rules.md"),
+    Fragment(order=4, path="scenes/regenerate.md"),
+)
+
+REGENERATE_SCENE_CONFIG = SceneConfig(
+    scene="regenerate",
+    fragments=_REGENERATE_FRAGMENTS,
+    context_slots=("chapter_content", "audit_feedback", "chapter_contract"),
+    model=SceneModelSpec(default_name="deepseek-v4-pro", temperature=0.3),
+    runtime=SceneRuntimeSpec(max_iterations=24),
+    allowed_tools=(
+        ToolName.SEARCH_DOCUMENT.value,
+        ToolName.READ_SECTION.value,
+        ToolName.LIST_TABLES.value,
+        ToolName.READ_TABLE.value,
+        ToolName.GET_EXCERPT.value,
+    ),
+)
+
+# ── Fix Scene ─────────────────────────────────────────────────────
+
+_FIX_FRAGMENTS = (
+    Fragment(order=1, path="base/agents.md"),
+    Fragment(order=2, path="base/soul.md"),
+    Fragment(order=3, path="base/fact_rules.md"),
+    Fragment(order=4, path="scenes/fix.md"),
+)
+
+FIX_SCENE_CONFIG = SceneConfig(
+    scene="fix",
+    fragments=_FIX_FRAGMENTS,
+    context_slots=("chapter_content", "audit_feedback", "chapter_contract"),
+    model=SceneModelSpec(default_name="deepseek-v4-flash", temperature=0.2),
+    runtime=SceneRuntimeSpec(max_iterations=12),
+    allowed_tools=(
+        ToolName.SEARCH_DOCUMENT.value,
+        ToolName.READ_SECTION.value,
+        ToolName.LIST_TABLES.value,
+        ToolName.READ_TABLE.value,
+        ToolName.GET_EXCERPT.value,
+    ),
+)
+
+# ── Repair Scene ──────────────────────────────────────────────────
+
+_REPAIR_FRAGMENTS = (
+    Fragment(order=1, path="base/agents.md"),
+    Fragment(order=2, path="base/soul.md"),
+    Fragment(order=3, path="base/fact_rules.md"),
+    Fragment(order=4, path="scenes/repair.md"),
+)
+
+REPAIR_SCENE_CONFIG = SceneConfig(
+    scene="repair",
+    fragments=_REPAIR_FRAGMENTS,
+    context_slots=("chapter_content", "audit_feedback", "chapter_contract"),
+    model=SceneModelSpec(default_name="deepseek-v4-flash", temperature=0.2),
+    runtime=SceneRuntimeSpec(max_iterations=16),
+    allowed_tools=(
+        ToolName.SEARCH_DOCUMENT.value,
+        ToolName.READ_SECTION.value,
+        ToolName.LIST_TABLES.value,
+        ToolName.READ_TABLE.value,
+        ToolName.GET_EXCERPT.value,
     ),
 )

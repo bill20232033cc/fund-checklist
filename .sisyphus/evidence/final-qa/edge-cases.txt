@@ -1,0 +1,34 @@
+Edge Case Tests (static verification due to sandbox restrictions on CLI subcommands)
+
+=== Edge 1: Invalid fund-code ===
+Command: uv run fund-checklist repair --fund-code INVALID --year 2024 --chapter 3
+Static Analysis (fund_agent/cli/main.py:1412-1416):
+  File lookup: reports_dir / "{fund_code}-{year}-analysis.md"
+  If not found -> ToolFailure(code=NOT_FOUND, message="未找到报告: {name}")
+  Returns CLASSIFIED_FAILURE_EXIT_CODE (2)
+VERDICT: Proper error handling - NOT_FOUND failure with exit code 2.
+
+=== Edge 2: Missing --chapter for repair ===
+Command: uv run fund-checklist repair --fund-code 004393 --year 2024
+Static Analysis (fund_agent/cli/main.py:230):
+  repair_parser.add_argument("--chapter", required=True, ...)
+  argparse enforces required=True -> will print error and exit before execution.
+VERDICT: Proper error handling - argparse required=True rejects missing --chapter.
+
+=== Edge 3: Missing --chapter for fix ===
+Command: uv run fund-checklist fix --fund-code 004393
+Static Analysis (fund_agent/cli/main.py:224):
+  fix_parser.add_argument("--chapter", required=True, ...)
+  argparse enforces required=True -> will print error and exit.
+VERDICT: Proper error handling - argparse required=True rejects missing --chapter.
+
+=== Edge 4: Missing --work-dir ===
+Static Analysis: --work-dir has default=Path(DEFAULT_WORK_DIR) for all subcommands.
+Not an error condition - uses default ".fund_checklist".
+VERDICT: Correct behavior - uses default work-dir.
+
+=== Additional boundaries tested (runtime) ===
+- select_repair_strategy(None) -> ("regenerate", "无审计产物，需重新生成")
+- Score 80.0 (boundary) -> skip
+- Score 50.0 (boundary) -> repair
+- Score 49.9 (boundary) -> regenerate

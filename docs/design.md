@@ -1476,7 +1476,7 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - `tests/fund/service/test_prompt_contributions.py` — Prompt Contributions 测试
 ### Phase 7.3：对话历史注入 LLM context（方案 B）
 
-> 裁决时间：2026-07-28 | 状态：🔴 待实施
+> 裁决时间：2026-07-28 | 完成时间：2026-07-29 | 状态：✅ 已完成
 > 优化设计：`docs/phase7.3-option-b-optimization.md`
 > 演进记录：`docs/agent-evolution-design.md` §8.2
 
@@ -1496,6 +1496,25 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 | `chat_service.py` | `chat_turn()` 填充 `ToolCallSummary` | 从 `AgentRunResult.tool_trace` 提取 |
 | `chat_service.py` | `_run_compaction()` 增加 truncate | compaction 后调用 `truncate_turns()` |
 | `scene_config.py` | `context_slots` 新增 `"history"` | interactive scene 配置 |
+| `deepseek_llm.py` | Bug A: `next_step_stream()` 补 `temperature=self._temperature` | stream 路径 temperature 透传 |
+| `chat_service.py` | Bug B (contract 分支) + Bug C (compaction 路径) temperature 修复 | 统一从 scene config 读取 temperature |
+| `llm_tool_loop.py` | 新增 `_normalize_document_id()` 前缀匹配 | document_id 变体容错 |
+| `extraction.py` | Bug D: `_default_runner_factory` 新增 `temperature` 参数 | ask 场景 temperature 透传 |
+| `main.py` | Bug E: regenerate helper `DeepSeekLlmClient` 补 temperature | regenerate 路径 temperature 透传 |
+
+**Bug 修复：Temperature 透传（5 处）**：
+
+| Bug | 位置 | 问题 |
+|-----|------|------|
+| A | `deepseek_llm.py` `next_step_stream()` | 调用 `_request_payload()` 遗漏 `temperature=self._temperature` |
+| B | `chat_service.py` contract 分支 | temperature 硬编码 0.7，不读 scene config |
+| C | `chat_service.py` compaction 路径 | `DeepSeekLlmClient()` 无 temperature 参数 |
+| D | `extraction.py` `_default_runner_factory` | 创建 `DeepSeekLlmClient()` 未传 temperature |
+| E | `main.py` regenerate helper | `DeepSeekLlmClient()` 默认 temperature=0 |
+
+**Bug 修复：document_id 前缀匹配**：
+
+`llm_tool_loop.py` 中 `_invoke_tool_call()` 对 `call.document_id != expected_document_id` 做严格相等校验。LLM 可能传递 variant ID（如自行拼接后缀），导致合法工具调用被误拒。新增 `_normalize_document_id()`：精确匹配直接通过；`fund_code-year-report_type` 前缀一致则接受并使用 `expected_document_id`；前缀不匹配则拒绝。
 
 **关键设计决策**：
 - `ToolCallSummary.result_summary` 从 `result_kind + failure_code` 推导（B1 方案），不存储 raw tool result
@@ -1503,7 +1522,7 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - 分隔标记引导 LLM 使用 JSON 格式回答
 - `history_max_tokens` 可配置（默认 2000）
 
-**总改动量**：~121 行（session_models ~30 + chat_service ~60 + scene_config ~1 + 测试 ~30）
+**总改动量**：~164 行（session_models ~30 + chat_service ~63 + scene_config ~1 + deepseek_llm ~1 + llm_tool_loop ~15 + extraction ~3 + main ~1 + 测试 ~50）
 
 **失败模式缓解**（9 项，详见优化设计文档）：
 - FM1: Context window 溢出 → token 上限 + 截断
@@ -1511,10 +1530,14 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - FM3: 跨轮 tool results 不可见 → B1 方案（result_kind/failure_code 推导）
 - FM4: Scene config slot 缺失 → 新增 history slot
 - FM5: Compaction 交互 → truncate_turns
-- FM6: Temperature → 不改（观察后决定）
+- FM6: Temperature → 修复 5 处未透传 bug（A~E），不改变 temperature 取值逻辑
 - FM7: 空 tool_trace → 跳过空 tool_calls 行
 - FM8: Token 估算 → 中英文混合估算函数
 - FM9: JSON 指令冲突 → 分隔标记加格式指引
+
+**后续优化**：
+
+- **generate_text temperature 按场景区分**：`generate_text()` 当前默认 `temperature=0`，建议按场景区分 — 审计评分保持 0（一致性）、章节分析写作用 0.3（语言多样性）、章节修复用 0.3（避免重复同一错误模式）。留待后续 phase 处理。
 
 ### 技术债
 

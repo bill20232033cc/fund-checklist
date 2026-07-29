@@ -10,14 +10,17 @@
 
 import pytest
 
+from pathlib import Path
+
 from fund_agent.service.scene_config import (
     ASK_SCENE_CONFIG,
+    FIX_SCENE_CONFIG,
     INTERACTIVE_SCENE_CONFIG,
     SceneConfig,
     SceneModelSpec,
     SceneRuntimeSpec,
 )
-from fund_agent.service.prompt_composer import Fragment
+from fund_agent.service.prompt_composer import Fragment, PromptComposer
 
 
 class TestSceneModelSpec:
@@ -116,9 +119,9 @@ class TestAskSceneConfig:
 class TestInteractiveSceneConfig:
     """INTERACTIVE_SCENE_CONFIG 预设测试。"""
 
-    def test_uses_thinking_model(self):
-        """interactive scene 使用 thinking 模型。"""
-        assert "thinking" in INTERACTIVE_SCENE_CONFIG.model.default_name
+    def test_uses_pro_model(self):
+        """interactive scene 使用 deepseek-v4-pro 模型。"""
+        assert INTERACTIVE_SCENE_CONFIG.model.default_name == "deepseek-v4-pro"
 
     def test_higher_temperature(self):
         """interactive scene temperature 更高（0.7）。"""
@@ -148,6 +151,73 @@ class TestInteractiveSceneConfig:
         assert "fund_context" in INTERACTIVE_SCENE_CONFIG.context_slots
         assert "memory" in INTERACTIVE_SCENE_CONFIG.context_slots
 
+    def test_has_history_slot(self):
+        """interactive scene 的 context_slots 包含 history。"""
+        assert "history" in INTERACTIVE_SCENE_CONFIG.context_slots
+
     def test_interactive_has_more_tools_than_ask(self):
         """interactive 工具集严格大于 ask。"""
         assert len(INTERACTIVE_SCENE_CONFIG.allowed_tools) > len(ASK_SCENE_CONFIG.allowed_tools)
+
+
+# ── helpers ──────────────────────────────────────────────────────
+
+def _prompts_dir() -> Path:
+    """Return the real prompts/ template directory."""
+    return Path(__file__).resolve().parents[3] / "fund_agent" / "service" / "prompts"
+
+
+# ── Fix Scene Config ─────────────────────────────────────────────
+
+class TestFixSceneConfig:
+    """FIX_SCENE_CONFIG 测试。"""
+
+    def test_scene_name(self):
+        assert FIX_SCENE_CONFIG.scene == "fix"
+
+    def test_fragments_include_template(self):
+        paths = {f.path for f in FIX_SCENE_CONFIG.fragments}
+        assert "scenes/fix.md" in paths
+
+    def test_context_slots(self):
+        assert "chapter_content" in FIX_SCENE_CONFIG.context_slots
+        assert "audit_feedback" in FIX_SCENE_CONFIG.context_slots
+        assert "chapter_contract" in FIX_SCENE_CONFIG.context_slots
+        assert len(FIX_SCENE_CONFIG.context_slots) == 3
+
+    def test_model_name(self):
+        assert FIX_SCENE_CONFIG.model.default_name == "deepseek-v4-flash"
+
+    def test_temperature(self):
+        assert FIX_SCENE_CONFIG.model.temperature == 0.2
+
+    def test_max_iterations(self):
+        assert FIX_SCENE_CONFIG.runtime.max_iterations == 12
+
+    def test_allowed_tools(self):
+        tools = set(FIX_SCENE_CONFIG.allowed_tools)
+        assert "search_document" in tools
+        assert "read_section" in tools
+        assert "list_tables" in tools
+        assert "read_table" in tools
+        assert "get_excerpt" in tools
+        assert len(tools) == 5
+
+    def test_four_fragments(self):
+        assert len(FIX_SCENE_CONFIG.fragments) == 4
+
+
+# ── rendering ────────────────────────────────────────────────────
+
+class TestComposeFromSceneFixRendering:
+    """PromptComposer.compose_from_scene 渲染测试 for FIX scene。"""
+
+    @pytest.fixture
+    def composer(self) -> PromptComposer:
+        return PromptComposer(template_dir=_prompts_dir())
+
+    def test_renders_fix_scene(self, composer: PromptComposer):
+        result = composer.compose_from_scene(FIX_SCENE_CONFIG, contributions={})
+        assert result.system_message
+        assert "占位符补强" in result.system_message
+        assert result.template_name == "scene:fix"

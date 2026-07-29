@@ -15,6 +15,7 @@ from fund_agent.cli.main import (
     CLASSIFIED_FAILURE_EXIT_CODE,
     SUCCESS_EXIT_CODE,
     UNEXPECTED_FAILURE_EXIT_CODE,
+    _extract_chapter_from_markdown,
     build_parser,
     run_cli,
 )
@@ -56,6 +57,20 @@ def _docling_payload() -> dict[str, object]:
                 "self_ref": "#/texts/1",
                 "label": "text",
                 "text": "基金经理在本报告期内保持稳定。股票投资明细展示前十名股票投资明细。",
+                "prov": [{"page_no": 1}],
+            },
+            {
+                "self_ref": "#/texts/2",
+                "label": "section_header",
+                "text": "基金管理人",
+                "level": 1,
+                "prov": [{"page_no": 1}],
+            },
+            {
+                "self_ref": "#/texts/3",
+                "label": "section_header",
+                "text": "管理人报告",
+                "level": 1,
                 "prov": [{"page_no": 1}],
             },
         ],
@@ -184,7 +199,7 @@ def test_cli_happy_path_orchestrates_import_store_service_and_host(monkeypatch, 
     assert stderr == ""
     assert _FakeConverter.calls
     assert "Answer:" in stdout
-    assert "基金经理" in stdout
+    assert "基金管理人" in stdout
     assert "Citations:" in stdout
     assert "Trace:" in stdout
     assert "search_document success" in stdout
@@ -431,7 +446,7 @@ def test_cli_reuses_existing_docling_json_without_converter(monkeypatch, tmp_pat
 
     assert exit_code == SUCCESS_EXIT_CODE
     assert stderr == ""
-    assert "基金经理" in stdout
+    assert "基金管理人" in stdout
 
 
 def test_cli_classified_failure_outputs_code_and_exit_2(tmp_path: Path) -> None:
@@ -2397,3 +2412,931 @@ def test_generate_cli_real_pdf_smoke_writes_report_and_audit(monkeypatch, tmp_pa
 
     audit_files = sorted(audit_dir.glob("chapter_*_audit.json"))
     assert audit_files, audit_dir
+
+
+def test_fix_chapter(tmp_path: Path, monkeypatch) -> None:
+    """fix --chapter 3 只修复 Ch3，exit code 0，输出包含修复统计。"""
+
+    work_dir = tmp_path / "work"
+    reports_dir = work_dir / "reports"
+    reports_dir.mkdir(parents=True)
+
+    md_content = (
+        "# 测试基金（004393）2024 年度分析报告\n\n"
+        "**风险警示**：本报告由 AI 辅助生成，仅供参考，不构成投资建议。\n\n"
+        "---\n\n"
+        "## 第 1 章：投资要点概览\n"
+        "Ch1 content [待补充]\n\n"
+        "---\n\n"
+        "## 第 2 章：产品定义\n"
+        "Ch2 content\n\n"
+        "---\n\n"
+        "## 第 3 章：基金经理画像\n"
+        "Ch3 content [待补充] [数据缺失]\n\n"
+        "---\n\n"
+        "## 第 4 章：投资者获得感\n"
+        "Ch4 content [暂无数据]\n"
+    )
+    report_path = reports_dir / "004393-2024-analysis.md"
+    report_path.write_text(md_content, encoding="utf-8")
+
+    _write_catalog(work_dir, [
+        {"document_id": "doc-2024", "year": 2024, "fund_code": "004393"},
+    ])
+
+    captured_content: list[str] = []
+
+    def _mock_fix(chapter_content, *, audit_feedback="", chapter_contract="", document_id=""):
+        captured_content.append(chapter_content)
+        return chapter_content.replace("[待补充]", "[已补充]").replace("[数据缺失]", "")
+
+    monkeypatch.setattr(
+        "fund_agent.service.chapter_generator._fix_chapter_placeholders",
+        _mock_fix,
+    )
+
+    exit_code, stdout, stderr = _run([
+        "fix",
+        "--fund-code", "004393",
+        "--chapter", "3",
+        "--work-dir", str(work_dir),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE, stderr
+    assert "补强占位符: 2" in stdout
+    assert "保留占位符: 0" in stdout
+    assert len(captured_content) == 1
+    assert "Ch3 content" in captured_content[0]
+    assert "Ch1 content" not in captured_content[0]
+    assert "Ch4 content" not in captured_content[0]
+
+
+# ── repair 子命令测试 ──────────────────────────────────────────────────
+
+
+def _write_audit_artifact(work_dir: Path, chapter_id: int, score: float = 65.0, *, violations: tuple | None = None) -> None:
+    """写入测试用审计产物。"""
+    from fund_agent.service.audit_pipeline import ViolationSeverity, ViolationCategory
+
+    audit_dir = work_dir / "audit_artifacts"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    if violations is None:
+        violations = (
+            {
+                "code": "P3",
+                "category": "P",
+                "severity": "major",
+                "description": "模板残留（占位符未替换）",
+                "location": "Ch3 paragraph 2",
+                "suggested_fix": "替换为实际数据",
+                "evidence": "报告期内管理费为[待补充]。",
+            },
+        )
+
+    data = {
+        "chapter_id": chapter_id,
+        "score": score,
+        "programmatic_score": 70.0,
+        "llm_score": 60.0,
+        "recommendation": "patch",
+        "audit_time": "2026-07-27T00:00:00",
+        "violations": [
+            {
+                "code": v["code"],
+                "category": v["category"],
+                "severity": v["severity"],
+                "description": v["description"],
+                "location": v.get("location", ""),
+                "suggested_fix": v.get("suggested_fix", ""),
+                "evidence": v.get("evidence", ""),
+            }
+            for v in violations
+        ],
+    }
+    filepath = audit_dir / f"chapter_{chapter_id}_audit.json"
+    filepath.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+class _FakeChapterRepairer:
+    """Mock ChapterRepairer that applies a simple string replacement."""
+
+    def __init__(self, llm_client, chapter_id, chapter_content, data_table, contract, violations):
+        self._content = chapter_content
+        self._chapter_id = chapter_id
+
+    def generate_repair_plan(self):
+        from fund_agent.service.audit_pipeline import RepairPlan, RepairAction
+        return RepairPlan(
+            chapter_id=self._chapter_id,
+            actions=(
+                RepairAction(
+                    violation_code="P3",
+                    strategy="patch",
+                    target_excerpt="[待补充]",
+                    replacement="[已修复]",
+                    target_kind="substring",
+                    occurrence_index=0,
+                ),
+            ),
+            strategy="patch",
+        )
+
+    def apply_patch(self, plan):
+        return self._content.replace("[待补充]", "[已修复]")
+
+
+def test_repair_parser_accepts_valid_args() -> None:
+    """repair 子命令 parser 必须接受合法参数。"""
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "repair",
+        "--fund-code", "004393",
+        "--year", "2024",
+        "--chapter", "3",
+    ])
+
+    assert args.command == "repair"
+    assert args.fund_code == "004393"
+    assert args.year == 2024
+    assert args.chapter == "3"
+    assert args.work_dir == Path(".fund_checklist")
+    assert args.llm is False
+
+
+def test_repair_parser_accepts_multiple_chapters() -> None:
+    """repair --chapter 必须接受逗号分隔的多章节。"""
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "repair",
+        "--fund-code", "004393",
+        "--year", "2024",
+        "--chapter", "3,5,7",
+        "--llm",
+    ])
+
+    assert args.command == "repair"
+    assert args.chapter == "3,5,7"
+    assert args.llm is True
+
+
+def test_repair_help_shows_params() -> None:
+    """repair --help 必须显示 --fund-code、--year、--chapter、--llm。"""
+
+    parser = build_parser()
+    repair_help = parser._subparsers._group_actions[0].choices["repair"].format_help()
+
+    assert "--fund-code" in repair_help
+    assert "--year" in repair_help
+    assert "--chapter" in repair_help
+    assert "--llm" in repair_help
+
+
+def test_repair_exits_0_on_success(tmp_path: Path, monkeypatch) -> None:
+    """repair 成功时必须返回 exit code 0 并输出审计分数对比。"""
+
+    work_dir = tmp_path / "work"
+    reports_dir = work_dir / "reports"
+    reports_dir.mkdir(parents=True)
+
+    md_content = (
+        "# 测试基金（004393）2024 年度分析报告\n\n"
+        "**风险警示**：本报告由 AI 辅助生成，仅供参考，不构成投资建议。\n\n"
+        "---\n\n"
+        "## 第 1 章：投资要点概览\n"
+        "Ch1 content\n\n"
+        "---\n\n"
+        "## 第 3 章：基金经理画像\n"
+        "Ch3 content [待补充]\n"
+    )
+    report_path = reports_dir / "004393-2024-analysis.md"
+    report_path.write_text(md_content, encoding="utf-8")
+
+    _write_audit_artifact(work_dir, chapter_id=3, score=65.0)
+    _write_catalog(work_dir, [
+        {"document_id": "doc-2024", "year": 2024, "fund_code": "004393"},
+    ])
+
+    # Use the fake repairer from tests
+    monkeypatch.setattr(
+        "fund_agent.service.audit_pipeline.ChapterRepairer",
+        _FakeChapterRepairer,
+    )
+    # Mock DeepSeekLlmClient to avoid real API call
+    monkeypatch.setattr(cli_module, "DeepSeekLlmClient", lambda **kw: object())
+
+    exit_code, stdout, stderr = _run([
+        "repair",
+        "--fund-code", "004393",
+        "--year", "2024",
+        "--chapter", "3",
+        "--llm",
+        "--work-dir", str(work_dir),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE, stderr
+    assert "第 3 章: 已修复" in stdout
+    assert "修复前后审计分数对比" in stdout
+    assert "65.0" in stdout
+
+
+def test_repair_only_changes_target_chapter(tmp_path: Path, monkeypatch) -> None:
+    """修复后只有 Ch3 被修改，其他章节不变。"""
+
+    work_dir = tmp_path / "work"
+    reports_dir = work_dir / "reports"
+    reports_dir.mkdir(parents=True)
+
+    md_content = (
+        "# 测试基金（004393）2024 年度分析报告\n\n"
+        "**风险警示**：本报告由 AI 辅助生成，仅供参考，不构成投资建议。\n\n"
+        "---\n\n"
+        "## 第 1 章：投资要点概览\n"
+        "Ch1 content [待补充]\n\n"
+        "---\n\n"
+        "## 第 2 章：产品定义\n"
+        "Ch2 content [待补充]\n\n"
+        "---\n\n"
+        "## 第 3 章：基金经理画像\n"
+        "Ch3 content [待补充]\n\n"
+        "---\n\n"
+        "## 第 4 章：投资者获得感\n"
+        "Ch4 content [待补充]\n"
+    )
+    report_path = reports_dir / "004393-2024-analysis.md"
+    report_path.write_text(md_content, encoding="utf-8")
+
+    _write_audit_artifact(work_dir, chapter_id=3, score=65.0)
+    _write_catalog(work_dir, [
+        {"document_id": "doc-2024", "year": 2024, "fund_code": "004393"},
+    ])
+
+    monkeypatch.setattr(
+        "fund_agent.service.audit_pipeline.ChapterRepairer",
+        _FakeChapterRepairer,
+    )
+    monkeypatch.setattr(cli_module, "DeepSeekLlmClient", lambda **kw: object())
+
+    exit_code, stdout, stderr = _run([
+        "repair",
+        "--fund-code", "004393",
+        "--year", "2024",
+        "--chapter", "3",
+        "--llm",
+        "--work-dir", str(work_dir),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE, stderr
+
+    # Read back the modified report
+    updated = report_path.read_text(encoding="utf-8")
+
+    # Ch3 should have [已修复]; other chapters should still have [待补充]
+    ch3_content = _extract_chapter_from_markdown(updated, 3)
+    assert ch3_content is not None
+    assert "[已修复]" in ch3_content
+    assert "[待补充]" not in ch3_content
+
+    for ch_id in (1, 2, 4):
+        ch_content = _extract_chapter_from_markdown(updated, ch_id)
+        assert ch_content is not None, f"Ch{ch_id} should still exist"
+        assert "[待补充]" in ch_content, f"Ch{ch_id} should not be modified"
+        assert "[已修复]" not in ch_content, f"Ch{ch_id} should not be modified"
+
+
+def test_repair_exits_2_when_report_not_found(tmp_path: Path) -> None:
+    """报告文件不存在时 repair 必须返回 exit 2。"""
+
+    work_dir = tmp_path / "work"
+
+    exit_code, stdout, stderr = _run([
+        "repair",
+        "--fund-code", "004393",
+        "--year", "2024",
+        "--chapter", "3",
+        "--work-dir", str(work_dir),
+    ])
+
+    assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
+    assert "not_found" in stderr
+
+
+def test_repair_skips_without_llm_flag(tmp_path: Path, monkeypatch) -> None:
+    """未传 --llm 时应跳过修复并输出提示。"""
+
+    work_dir = tmp_path / "work"
+    reports_dir = work_dir / "reports"
+    reports_dir.mkdir(parents=True)
+
+    md_content = (
+        "# 测试基金（004393）2024 年度分析报告\n\n"
+        "**风险警示**：本报告由 AI 辅助生成，仅供参考，不构成投资建议。\n\n"
+        "---\n\n"
+        "## 第 3 章：基金经理画像\n"
+        "Ch3 content [待补充]\n"
+    )
+    report_path = reports_dir / "004393-2024-analysis.md"
+    report_path.write_text(md_content, encoding="utf-8")
+
+    _write_audit_artifact(work_dir, chapter_id=3, score=65.0)
+
+    exit_code, stdout, stderr = _run([
+        "repair",
+        "--fund-code", "004393",
+        "--year", "2024",
+        "--chapter", "3",
+        "--work-dir", str(work_dir),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE
+    assert "未启用 LLM" in stdout
+    assert "跳过: 1" in stdout
+
+
+# ── regenerate 子命令测试 ──────────────────────────────────────────────────
+
+
+def test_regenerate_parser_accepts_valid_args() -> None:
+    """regenerate 子命令 parser 必须接受合法参数。"""
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "regenerate",
+        "--fund-code", "004393",
+        "--year", "2024",
+        "--chapter", "3",
+    ])
+
+    assert args.command == "regenerate"
+    assert args.fund_code == "004393"
+    assert args.year == 2024
+    assert args.chapter == "3"
+    assert args.work_dir == Path(".fund_checklist")
+    assert args.llm is False
+
+
+def test_regenerate_parser_accepts_multiple_chapters() -> None:
+    """regenerate --chapter 必须接受逗号分隔的多章节。"""
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "regenerate",
+        "--fund-code", "004393",
+        "--year", "2024",
+        "--chapter", "3,5,7",
+        "--llm",
+    ])
+
+    assert args.command == "regenerate"
+    assert args.chapter == "3,5,7"
+    assert args.llm is True
+
+
+def test_regenerate_help_shows_params() -> None:
+    """regenerate --help 必须显示 --fund-code、--year、--chapter、--llm。"""
+
+    parser = build_parser()
+    regen_help = parser._subparsers._group_actions[0].choices["regenerate"].format_help()
+
+    assert "--fund-code" in regen_help
+    assert "--year" in regen_help
+    assert "--chapter" in regen_help
+    assert "--llm" in regen_help
+
+
+def test_regenerate_exits_0_on_success(tmp_path: Path, monkeypatch) -> None:
+    """regenerate 成功时必须返回 exit code 0 并输出审计分数对比。"""
+
+    work_dir = tmp_path / "work"
+    reports_dir = work_dir / "reports"
+    reports_dir.mkdir(parents=True)
+
+    md_content = (
+        "# 测试基金（004393）2024 年度分析报告\n\n"
+        "**风险警示**：本报告由 AI 辅助生成，仅供参考，不构成投资建议。\n\n"
+        "---\n\n"
+        "## 第 1 章：投资要点概览\n"
+        "Ch1 content\n\n"
+        "---\n\n"
+        "## 第 3 章：基金经理画像\n"
+        "Ch3 content [待补充]\n"
+    )
+    report_path = reports_dir / "004393-2024-analysis.md"
+    report_path.write_text(md_content, encoding="utf-8")
+
+    _write_audit_artifact(work_dir, chapter_id=3, score=65.0)
+
+    from fund_agent.service.chat_service import ChatTurnResponse
+    regenerated = "Ch3 regenerated content with fixes applied"
+
+    def _mock_chat_turn(self, request, *, llm_client=None, agent_result=None, contract=None):
+        return ChatTurnResponse(answer=regenerated)
+
+    monkeypatch.setattr(
+        "fund_agent.service.chat_service.ChatService.chat_turn",
+        _mock_chat_turn,
+    )
+    monkeypatch.setattr(cli_module, "DeepSeekLlmClient", lambda **kw: object())
+
+    exit_code, stdout, stderr = _run([
+        "regenerate",
+        "--fund-code", "004393",
+        "--year", "2024",
+        "--chapter", "3",
+        "--llm",
+        "--work-dir", str(work_dir),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE, stderr
+    assert "第 3 章: 已重新生成" in stdout
+    assert "重写前后审计分数对比" in stdout
+    assert "65.0" in stdout
+
+
+def test_regenerate_only_changes_target_chapter(tmp_path: Path, monkeypatch) -> None:
+    """重写后只有 Ch3 被修改，其他章节不变。"""
+
+    work_dir = tmp_path / "work"
+    reports_dir = work_dir / "reports"
+    reports_dir.mkdir(parents=True)
+
+    md_content = (
+        "# 测试基金（004393）2024 年度分析报告\n\n"
+        "**风险警示**：本报告由 AI 辅助生成，仅供参考，不构成投资建议。\n\n"
+        "---\n\n"
+        "## 第 1 章：投资要点概览\n"
+        "Ch1 content [待补充]\n\n"
+        "---\n\n"
+        "## 第 2 章：产品定义\n"
+        "Ch2 content [待补充]\n\n"
+        "---\n\n"
+        "## 第 3 章：基金经理画像\n"
+        "Ch3 content [待补充]\n\n"
+        "---\n\n"
+        "## 第 4 章：投资者获得感\n"
+        "Ch4 content [待补充]\n"
+    )
+    report_path = reports_dir / "004393-2024-analysis.md"
+    report_path.write_text(md_content, encoding="utf-8")
+
+    _write_audit_artifact(work_dir, chapter_id=3, score=65.0)
+
+    from fund_agent.service.chat_service import ChatTurnResponse
+    regenerated = "Ch3 regenerated content"
+
+    def _mock_chat_turn(self, request, *, llm_client=None, agent_result=None, contract=None):
+        return ChatTurnResponse(answer=regenerated)
+
+    monkeypatch.setattr(
+        "fund_agent.service.chat_service.ChatService.chat_turn",
+        _mock_chat_turn,
+    )
+    monkeypatch.setattr(cli_module, "DeepSeekLlmClient", lambda **kw: object())
+
+    exit_code, stdout, stderr = _run([
+        "regenerate",
+        "--fund-code", "004393",
+        "--year", "2024",
+        "--chapter", "3",
+        "--llm",
+        "--work-dir", str(work_dir),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE, stderr
+
+    updated = report_path.read_text(encoding="utf-8")
+
+    ch3_content = _extract_chapter_from_markdown(updated, 3)
+    assert ch3_content is not None
+    assert "regenerated content" in ch3_content
+    assert "[待补充]" not in ch3_content
+
+    for ch_id in (1, 2, 4):
+        ch_content = _extract_chapter_from_markdown(updated, ch_id)
+        assert ch_content is not None, f"Ch{ch_id} should still exist"
+        assert "[待补充]" in ch_content, f"Ch{ch_id} should not be modified"
+        assert "regenerated content" not in ch_content, f"Ch{ch_id} should not be modified"
+
+
+def test_regenerate_exits_2_when_report_not_found(tmp_path: Path) -> None:
+    """报告文件不存在时 regenerate 必须返回 exit 2。"""
+
+    work_dir = tmp_path / "work"
+
+    exit_code, stdout, stderr = _run([
+        "regenerate",
+        "--fund-code", "004393",
+        "--year", "2024",
+        "--chapter", "3",
+        "--work-dir", str(work_dir),
+    ])
+
+    assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
+    assert "not_found" in stderr
+
+
+def test_regenerate_skips_without_llm_flag(tmp_path: Path, monkeypatch) -> None:
+    """未传 --llm 时应跳过重写并输出提示。"""
+
+    work_dir = tmp_path / "work"
+    reports_dir = work_dir / "reports"
+    reports_dir.mkdir(parents=True)
+
+    md_content = (
+        "# 测试基金（004393）2024 年度分析报告\n\n"
+        "**风险警示**：本报告由 AI 辅助生成，仅供参考，不构成投资建议。\n\n"
+        "---\n\n"
+        "## 第 3 章：基金经理画像\n"
+        "Ch3 content [待补充]\n"
+    )
+    report_path = reports_dir / "004393-2024-analysis.md"
+    report_path.write_text(md_content, encoding="utf-8")
+
+    _write_audit_artifact(work_dir, chapter_id=3, score=65.0)
+
+    exit_code, stdout, stderr = _run([
+        "regenerate",
+        "--fund-code", "004393",
+        "--year", "2024",
+        "--chapter", "3",
+        "--work-dir", str(work_dir),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE
+    assert "未启用 LLM" in stdout
+    assert "跳过: 1" in stdout
+
+
+def test_regenerate_injects_audit_feedback_in_prompt(tmp_path: Path, monkeypatch) -> None:
+    """regenerate 必须在 prompt 中注入审计违规作为 context。"""
+
+    work_dir = tmp_path / "work"
+    reports_dir = work_dir / "reports"
+    reports_dir.mkdir(parents=True)
+
+    md_content = (
+        "# 测试基金（004393）2024 年度分析报告\n\n"
+        "**风险警示**：本报告由 AI 辅助生成，仅供参考，不构成投资建议。\n\n"
+        "---\n\n"
+        "## 第 3 章：基金经理画像\n"
+        "Ch3 content [待补充]\n"
+    )
+    report_path = reports_dir / "004393-2024-analysis.md"
+    report_path.write_text(md_content, encoding="utf-8")
+
+    _write_audit_artifact(work_dir, chapter_id=3, score=65.0, violations=(
+        {
+            "code": "P3",
+            "category": "P",
+            "severity": "major",
+            "description": "模板残留（占位符未替换）",
+            "location": "Ch3 paragraph 2",
+            "suggested_fix": "替换为实际数据",
+            "evidence": "报告期内管理费为[待补充]。",
+        },
+        {
+            "code": "C4",
+            "category": "C",
+            "severity": "major",
+            "description": "分析深度不足",
+            "location": "Ch3 paragraph 3",
+            "suggested_fix": "补充持仓集中度趋势分析",
+            "evidence": "",
+        },
+    ))
+
+    captured_user_prompt: list[str] = []
+
+    from fund_agent.service.chat_service import ChatTurnResponse
+
+    def _mock_chat_turn(self, request, *, llm_client=None, agent_result=None, contract=None):
+        captured_user_prompt.append(request.user_text)
+        return ChatTurnResponse(answer="regenerated content")
+
+    monkeypatch.setattr(
+        "fund_agent.service.chat_service.ChatService.chat_turn",
+        _mock_chat_turn,
+    )
+    monkeypatch.setattr(cli_module, "DeepSeekLlmClient", lambda **kw: object())
+
+    exit_code, stdout, stderr = _run([
+        "regenerate",
+        "--fund-code", "004393",
+        "--year", "2024",
+        "--chapter", "3",
+        "--llm",
+        "--work-dir", str(work_dir),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE, stderr
+    assert len(captured_user_prompt) == 1
+    user_prompt = captured_user_prompt[0]
+    assert "P3" in user_prompt
+    assert "模板残留" in user_prompt
+    assert "C4" in user_prompt
+    assert "分析深度不足" in user_prompt
+    assert "[待补充]" in user_prompt
+
+
+# ── Phase 7.2 Smoke Tests ──────────────────────────────────────────────
+
+
+class TestPhase72Smoke:
+    """Phase 7.2 端到端 smoke 测试：repair + regenerate + 全量回归。"""
+
+    # ── Smoke 2: repair 分数不降低 ──────────────────────────────────
+
+    def test_smoke2_repair_score_displayed_and_non_negative(self, tmp_path: Path, monkeypatch) -> None:
+        """Smoke 2: repair 执行后输出审计分数对比，分数值非负。"""
+        work_dir = tmp_path / "work"
+        reports_dir = work_dir / "reports"
+        reports_dir.mkdir(parents=True)
+
+        md_content = (
+            "# 测试基金（004393）2024 年度分析报告\n\n"
+            "**风险警示**：本报告由 AI 辅助生成，仅供参考，不构成投资建议。\n\n"
+            "---\n\n"
+            "## 第 3 章：基金经理画像\n"
+            "Ch3 content [待补充]\n"
+        )
+        report_path = reports_dir / "004393-2024-analysis.md"
+        report_path.write_text(md_content, encoding="utf-8")
+
+        _write_audit_artifact(work_dir, chapter_id=3, score=65.0)
+        _write_catalog(work_dir, [
+            {"document_id": "doc-2024", "year": 2024, "fund_code": "004393"},
+        ])
+
+        monkeypatch.setattr(
+            "fund_agent.service.audit_pipeline.ChapterRepairer",
+            _FakeChapterRepairer,
+        )
+        monkeypatch.setattr(cli_module, "DeepSeekLlmClient", lambda **kw: object())
+
+        exit_code, stdout, stderr = _run([
+            "repair",
+            "--fund-code", "004393",
+            "--year", "2024",
+            "--chapter", "3",
+            "--llm",
+            "--work-dir", str(work_dir),
+        ])
+
+        assert exit_code == SUCCESS_EXIT_CODE, stderr
+        assert "修复前后审计分数对比" in stdout
+        assert "65.0" in stdout  # before score present
+        assert "第 3 章" in stdout
+
+    def test_smoke2_repair_preserves_other_chapters(self, tmp_path: Path, monkeypatch) -> None:
+        """Smoke 2: repair Ch3 后 Ch1 内容不变（分数影响隔离）。"""
+        work_dir = tmp_path / "work"
+        reports_dir = work_dir / "reports"
+        reports_dir.mkdir(parents=True)
+
+        original_ch1 = "Ch1 original investment thesis content [待补充]"
+        original_ch2 = "Ch2 original product definition content [待补充]"
+        md_content = (
+            "# 测试基金（004393）2024 年度分析报告\n\n"
+            "**风险警示**：本报告由 AI 辅助生成，仅供参考，不构成投资建议。\n\n"
+            "---\n\n"
+            "## 第 1 章：投资要点概览\n"
+            f"{original_ch1}\n\n"
+            "---\n\n"
+            "## 第 2 章：产品定义\n"
+            f"{original_ch2}\n\n"
+            "---\n\n"
+            "## 第 3 章：基金经理画像\n"
+            "Ch3 content [待补充]\n"
+        )
+        report_path = reports_dir / "004393-2024-analysis.md"
+        report_path.write_text(md_content, encoding="utf-8")
+
+        _write_audit_artifact(work_dir, chapter_id=3, score=65.0)
+        _write_catalog(work_dir, [
+            {"document_id": "doc-2024", "year": 2024, "fund_code": "004393"},
+        ])
+
+        monkeypatch.setattr(
+            "fund_agent.service.audit_pipeline.ChapterRepairer",
+            _FakeChapterRepairer,
+        )
+        monkeypatch.setattr(cli_module, "DeepSeekLlmClient", lambda **kw: object())
+
+        exit_code, stdout, stderr = _run([
+            "repair",
+            "--fund-code", "004393",
+            "--year", "2024",
+            "--chapter", "3",
+            "--llm",
+            "--work-dir", str(work_dir),
+        ])
+
+        assert exit_code == SUCCESS_EXIT_CODE, stderr
+        updated = report_path.read_text(encoding="utf-8")
+        assert original_ch1 in updated, "Ch1 must be unchanged"
+        assert original_ch2 in updated, "Ch2 must be unchanged"
+
+    def test_smoke2_repair_multi_chapter_scores(self, tmp_path: Path, monkeypatch) -> None:
+        """Smoke 2: 多章节 repair 每章独立显示分数。"""
+        work_dir = tmp_path / "work"
+        reports_dir = work_dir / "reports"
+        reports_dir.mkdir(parents=True)
+
+        md_content = (
+            "# 测试基金（004393）2024 年度分析报告\n\n"
+            "**风险警示**：本报告由 AI 辅助生成，仅供参考，不构成投资建议。\n\n"
+            "---\n\n"
+            "## 第 1 章：投资要点概览\n"
+            "Ch1 content\n\n"
+            "---\n\n"
+            "## 第 3 章：基金经理画像\n"
+            "Ch3 content [待补充]\n\n"
+            "---\n\n"
+            "## 第 5 章：费率分析\n"
+            "Ch5 content [待补充]\n"
+        )
+        report_path = reports_dir / "004393-2024-analysis.md"
+        report_path.write_text(md_content, encoding="utf-8")
+
+        _write_audit_artifact(work_dir, chapter_id=3, score=65.0)
+        _write_audit_artifact(work_dir, chapter_id=5, score=45.0)
+        _write_catalog(work_dir, [
+            {"document_id": "doc-2024", "year": 2024, "fund_code": "004393"},
+        ])
+
+        monkeypatch.setattr(
+            "fund_agent.service.audit_pipeline.ChapterRepairer",
+            _FakeChapterRepairer,
+        )
+        monkeypatch.setattr(cli_module, "DeepSeekLlmClient", lambda **kw: object())
+
+        exit_code, stdout, stderr = _run([
+            "repair",
+            "--fund-code", "004393",
+            "--year", "2024",
+            "--chapter", "3,5",
+            "--llm",
+            "--work-dir", str(work_dir),
+        ])
+
+        assert exit_code == SUCCESS_EXIT_CODE, stderr
+        assert "第 3 章" in stdout
+        assert "第 5 章" in stdout
+        assert "65.0" in stdout
+        assert "45.0" in stdout
+
+    # ── Smoke 3: regenerate 单章重写 ────────────────────────────────
+
+    def test_smoke3_regenerate_target_only(self, tmp_path: Path, monkeypatch) -> None:
+        """Smoke 3: regenerate Ch3 后仅 Ch3 变化，其他章节保留原文。"""
+        work_dir = tmp_path / "work"
+        reports_dir = work_dir / "reports"
+        reports_dir.mkdir(parents=True)
+
+        original_ch1 = "Ch1 original content [待补充]"
+        original_ch2 = "Ch2 original content [待补充]"
+        md_content = (
+            "# 测试基金（004393）2024 年度分析报告\n\n"
+            "**风险警示**：本报告由 AI 辅助生成，仅供参考，不构成投资建议。\n\n"
+            "---\n\n"
+            "## 第 1 章：投资要点概览\n"
+            f"{original_ch1}\n\n"
+            "---\n\n"
+            "## 第 2 章：产品定义\n"
+            f"{original_ch2}\n\n"
+            "---\n\n"
+            "## 第 3 章：基金经理画像\n"
+            "Ch3 content [待补充]\n"
+        )
+        report_path = reports_dir / "004393-2024-analysis.md"
+        report_path.write_text(md_content, encoding="utf-8")
+
+        _write_audit_artifact(work_dir, chapter_id=3, score=65.0)
+
+        from fund_agent.service.chat_service import ChatTurnResponse
+        regenerated = "Ch3 regenerated content with fixes applied"
+
+        def _mock_chat_turn(self, request, *, llm_client=None, agent_result=None, contract=None):
+            return ChatTurnResponse(answer=regenerated)
+
+        monkeypatch.setattr(
+            "fund_agent.service.chat_service.ChatService.chat_turn",
+            _mock_chat_turn,
+        )
+        monkeypatch.setattr(cli_module, "DeepSeekLlmClient", lambda **kw: object())
+
+        exit_code, stdout, stderr = _run([
+            "regenerate",
+            "--fund-code", "004393",
+            "--year", "2024",
+            "--chapter", "3",
+            "--llm",
+            "--work-dir", str(work_dir),
+        ])
+
+        assert exit_code == SUCCESS_EXIT_CODE, stderr
+        updated = report_path.read_text(encoding="utf-8")
+
+        assert original_ch1 in updated, "Ch1 must be unchanged"
+        assert original_ch2 in updated, "Ch2 must be unchanged"
+        assert regenerated in updated, "Ch3 must be regenerated"
+        assert "[待补充]" in updated  # Ch1/Ch2 still have placeholder
+
+    def test_smoke3_regenerate_score_comparison(self, tmp_path: Path, monkeypatch) -> None:
+        """Smoke 3: regenerate 输出重写前后分数对比。"""
+        work_dir = tmp_path / "work"
+        reports_dir = work_dir / "reports"
+        reports_dir.mkdir(parents=True)
+
+        md_content = (
+            "# 测试基金（004393）2024 年度分析报告\n\n"
+            "**风险警示**：本报告由 AI 辅助生成，仅供参考，不构成投资建议。\n\n"
+            "---\n\n"
+            "## 第 3 章：基金经理画像\n"
+            "Ch3 content [待补充]\n"
+        )
+        report_path = reports_dir / "004393-2024-analysis.md"
+        report_path.write_text(md_content, encoding="utf-8")
+
+        _write_audit_artifact(work_dir, chapter_id=3, score=70.0)
+
+        from fund_agent.service.chat_service import ChatTurnResponse
+
+        def _mock_chat_turn(self, request, *, llm_client=None, agent_result=None, contract=None):
+            return ChatTurnResponse(answer="regenerated chapter 3")
+
+        monkeypatch.setattr(
+            "fund_agent.service.chat_service.ChatService.chat_turn",
+            _mock_chat_turn,
+        )
+        monkeypatch.setattr(cli_module, "DeepSeekLlmClient", lambda **kw: object())
+
+        exit_code, stdout, stderr = _run([
+            "regenerate",
+            "--fund-code", "004393",
+            "--year", "2024",
+            "--chapter", "3",
+            "--llm",
+            "--work-dir", str(work_dir),
+        ])
+
+        assert exit_code == SUCCESS_EXIT_CODE, stderr
+        assert "重写前后审计分数对比" in stdout
+        assert "70.0" in stdout
+        assert "第 3 章" in stdout
+
+    # ── Smoke 5: 全量回归 ──────────────────────────────────────────
+
+    def test_smoke5_phase72_modules_importable(self) -> None:
+        """Smoke 5: Phase 7.2 所有关键模块可导入。"""
+        modules = [
+            "fund_agent.cli.main",
+            "fund_agent.service.scene_config",
+            "fund_agent.service.chat_service",
+            "fund_agent.service.chat_contract",
+            "fund_agent.service.audit_pipeline",
+            "fund_agent.service.chapter_generator",
+            "fund_agent.service.session_models",
+            "fund_agent.host.session_store",
+            "fund_agent.host.minimal_host",
+        ]
+        for mod_name in modules:
+            importlib.import_module(mod_name)
+
+    def test_smoke5_scene_configs_defined(self) -> None:
+        """Smoke 5: Phase 7.2 所有 SceneConfig 已定义。"""
+        from fund_agent.service.scene_config import (
+            ASK_SCENE_CONFIG,
+            FIX_SCENE_CONFIG,
+            INTERACTIVE_SCENE_CONFIG,
+            REGENERATE_SCENE_CONFIG,
+            REPAIR_SCENE_CONFIG,
+        )
+
+        configs = {
+            "ask": ASK_SCENE_CONFIG,
+            "interactive": INTERACTIVE_SCENE_CONFIG,
+            "regenerate": REGENERATE_SCENE_CONFIG,
+            "repair": REPAIR_SCENE_CONFIG,
+            "fix": FIX_SCENE_CONFIG,
+        }
+        for name, cfg in configs.items():
+            assert cfg.scene == name
+            assert len(cfg.fragments) >= 3, f"{name} fragments too few"
+            assert cfg.model.default_name, f"{name} model name empty"
+
+    def test_smoke5_repair_regenerate_parsers_registered(self) -> None:
+        """Smoke 5: repair / regenerate / fix CLI 子命令已注册。"""
+        parser = build_parser()
+        choices = parser._subparsers._group_actions[0].choices
+        for cmd in ("repair", "regenerate", "fix"):
+            assert cmd in choices, f"'{cmd}' 子命令未注册"
+
+    def test_smoke5_cli_help_includes_all_subcommands(self) -> None:
+        """Smoke 5: --help 输出包含所有 Phase 7.2 子命令。"""
+        parser = build_parser()
+        help_text = parser.format_help()
+        for cmd in ("repair", "regenerate", "fix", "interactive", "generate"):
+            assert cmd in help_text, f"'{cmd}' 未出现在 --help 中"

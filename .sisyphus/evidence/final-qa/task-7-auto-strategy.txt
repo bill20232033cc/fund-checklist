@@ -1,0 +1,18 @@
+Task 7 QA: Auto Strategy (select_repair_strategy)
+
+Command: select_repair_strategy() with various score/violation combinations
+Results:
+  Score 85: strategy=skip, reason=分数 85.0 >= 80.0，通过
+  Score 65 no crit: strategy=repair, reason=分数 65.0 在 [50.0, 80.0) 且无 CRITICAL 违规，走修复路径
+  Score 65 with CRITICAL: strategy=regenerate, reason=分数 65.0 >= 50.0 但存在 CRITICAL 违规 ['TEST']，需重新生成
+  Score 40: strategy=regenerate, reason=分数 40.0 < 50.0，需重新生成
+  None decision: strategy=regenerate, reason=无审计产物，需重新生成
+
+Strategy rules verified:
+  >= 80  -> skip     PASS
+  50-79  -> repair (no CRITICAL)  PASS
+  50-79  -> regenerate (with CRITICAL)  PASS
+  < 50   -> regenerate  PASS
+  None   -> regenerate  PASS
+
+VERDICT: PASS - All five decision branches produce correct strategy/reason pairs.

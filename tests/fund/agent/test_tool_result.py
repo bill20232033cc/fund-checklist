@@ -129,3 +129,38 @@ class TestProjectForLlmBudget:
         result = ToolResult.success(value="test")
         llm_view = project_for_llm(result, budget=0)
         assert llm_view["tool_calls_remaining"] == 0
+
+
+class TestToolResultWithMeta:
+    """ToolResultWithMeta 包装器测试。"""
+
+    def test_wrapper_carries_remaining_budget(self) -> None:
+        """包装器正确携带 remaining_budget。"""
+        from fund_agent.agent.llm_tool_loop import ToolResultWithMeta, ToolResult as LoopToolResult
+        from fund_agent.fund.document_tools.constants import ToolName as Tn
+
+        inner = LoopToolResult(
+            tool_name=Tn.SEARCH_DOCUMENT,
+            result=(),
+            citations=(),
+            evidence_text="",
+        )
+        wrapper = ToolResultWithMeta(result=inner, remaining_budget=5)
+        assert wrapper.remaining_budget == 5
+        assert wrapper.result is inner
+
+    def test_wrapper_preserves_original_result(self) -> None:
+        """包装器不修改原始 ToolResult。"""
+        from fund_agent.agent.llm_tool_loop import ToolResultWithMeta, ToolResult as LoopToolResult
+        from fund_agent.fund.document_tools.constants import ToolName as Tn
+
+        inner = LoopToolResult(
+            tool_name=Tn.READ_SECTION,
+            result=(),
+            citations=(),
+            evidence_text="some evidence",
+        )
+        wrapper = ToolResultWithMeta(result=inner)
+        assert wrapper.result.tool_name is Tn.READ_SECTION
+        assert wrapper.result.evidence_text == "some evidence"
+        assert wrapper.remaining_budget is None
