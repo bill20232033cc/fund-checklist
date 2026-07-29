@@ -52,6 +52,14 @@ PDF
   - `repair`：审计发现小问题时最小必要局部修复
   - `regenerate`：基于审计反馈整章重建
   - `fix`：占位符补强（结构化占位符）
+- **Phase 7.3 新增功能**（2026-07-29 完成）：
+  - 对话历史注入 LLM context（方案 B — Prompt 层编织，session turns → runner context）
+  - temperature 透传修复（5 处：deepseek_llm / chat_service / extraction / main.py / scene_config）
+  - document_id 前缀匹配（LLM 截断时自动修正）
+  - Interactive 模式 5 个 bug 修复（EXCERPT locator_kind / key_facts 校验 / json 代码块 / prompt 强化）
+  - 报告质量改进（归一化说明 / 规模风险兜底 / 费率表动态列）
+  - 34 个单元测试，全量回归 901 passed
+  - e2e 测试设计（5 年年报端到端验证 + interactive 手动测试）
 - **Phase 7.2 新增功能**（2026-07-27 完成）：
   - 推翻 Phase 7 routing context 预取，统一走 LLM 工具调用路径
   - 扩展路由 alias 覆盖（fund_manager, fund_type, investment_strategy, risk_return, conclusion）
