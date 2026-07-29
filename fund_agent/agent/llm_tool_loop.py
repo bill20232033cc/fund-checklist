@@ -320,12 +320,13 @@ class LlmToolLoopRunner:
         self._aggregate_handler = aggregate_handler
         self._budget = budget
 
-    def run(self, *, document_id: str, query: str) -> AgentRunResult:
+    def run(self, *, document_id: str, query: str, scene: str = "ask") -> AgentRunResult:
         """运行 injected LLM 工具调用循环。
 
         参数:
             document_id: public reading tools 使用的内容身份。
             query: 用户查询。
+            scene: 调用场景（"ask"/"interactive"/"generate"），影响 citation 校验策略。
 
         返回:
             AgentRunResult；成功时 answer/citations 通过 evidence/citation 校验。
@@ -359,7 +360,7 @@ class LlmToolLoopRunner:
 
             step = chat_response.step
             if isinstance(step, FinalAnswer):
-                return _final_result(step, tuple(tool_results), tuple(trace), token_usage=total_usage)
+                return _final_result(step, tuple(tool_results), tuple(trace), token_usage=total_usage, scene=scene)
             if isinstance(step, ToolCall):
                 call_key = _dedup_key(step)
                 if call_key in seen_calls:
@@ -377,7 +378,7 @@ class LlmToolLoopRunner:
 
         return _force_answer_from_evidence(tuple(trace), tuple(tool_results), token_usage=total_usage)
 
-    def run_stream(self, *, document_id: str, query: str) -> Iterator[StreamEvent]:
+    def run_stream(self, *, document_id: str, query: str, scene: str = "ask") -> Iterator[StreamEvent]:
         """运行 LLM 工具调用循环并产出 StreamEvent 流。
 
         tool call/result → TOOL_EVENT
@@ -429,7 +430,7 @@ class LlmToolLoopRunner:
 
             step = chat_response.step
             if isinstance(step, FinalAnswer):
-                final = _final_result(step, tuple(tool_results), tuple(trace), token_usage=total_usage)
+                final = _final_result(step, tuple(tool_results), tuple(trace), token_usage=total_usage, scene=scene)
                 if final.failure is not None:
                     yield StreamEvent(
                         type=StreamEventType.ERROR,
@@ -663,15 +664,29 @@ def _final_result(
     trace: tuple[ToolTraceEntry, ...],
     *,
     token_usage: TokenUsage | None = None,
+    scene: str = "ask",
 ) -> AgentRunResult:
-    """校验最终回答证据与 citation 后构造 AgentRunResult。"""
+    """校验最终回答证据与 citation 后构造 AgentRunResult。
 
-    # 投资建议检测（fail-closed）
+    scene == "interactive" 时跳过 evidence + citation 校验（方案 E），
+    仅保留投资建议关键词检测。
+    """
+
+    # 投资建议检测（fail-closed，所有 scene 生效）
     # "建议关注"、"需持续跟踪" 不触发
     answer_text = final_answer.answer
     for keyword in _INVESTMENT_ADVICE_KEYWORDS:
         if keyword in answer_text:
             return _failed_result(trace, FailureCode.UNAVAILABLE, _INVESTMENT_ADVICE_MESSAGE, token_usage=token_usage)
+
+    if scene == "interactive":
+        return AgentRunResult(
+            answer=final_answer.answer,
+            citations=tuple(_public_citation(citation) for citation in final_answer.citations),
+            tool_trace=trace,
+            failure=None,
+            token_usage=token_usage,
+        )
 
     evidence_texts = tuple(result.evidence_text for result in tool_results if result.evidence_text.strip())
     if not evidence_texts:

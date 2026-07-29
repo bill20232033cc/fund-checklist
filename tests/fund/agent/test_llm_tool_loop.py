@@ -1159,3 +1159,173 @@ class TestDocumentIdMatches:
     def test_mismatch_partial(self):
         """部分重叠但不是前缀关系 → 不匹配。"""
         assert _document_id_matches("abc-2024-report", "abc-2025-report") is False
+
+
+# ── Phase 7.4: interactive scene citation 校验放宽（方案 E）─────────────────
+
+
+class TestInteractiveSceneCitationRelaxation:
+    """interactive scene 跳过 citation + evidence 校验，保留投资建议检测。"""
+
+    def test_interactive_skips_citation_and_evidence_check(self, tmp_path: Path) -> None:
+        """interactive scene: 无工具调用 + 无 citation → 仍然成功返回。"""
+        runner = LlmToolLoopRunner(
+            tool_service=_service(tmp_path),
+            llm_client=FakeLlmClient([
+                FinalAnswer(
+                    answer="你好！有什么可以帮助你的？",
+                    citations=(),
+                    key_facts=(),
+                ),
+            ]),
+        )
+
+        result = runner.run(
+            document_id=_identity().document_id,
+            query="你好",
+            scene="interactive",
+        )
+
+        assert result.failure is None
+        assert "你好" in result.answer
+
+    def test_interactive_skips_citation_check_with_tools(self, tmp_path: Path) -> None:
+        """interactive scene: 有工具调用但缺 citation → 仍然成功。"""
+        runner = LlmToolLoopRunner(
+            tool_service=_service(tmp_path),
+            llm_client=FakeLlmClient([
+                ToolCall(
+                    tool_name=ToolName.SEARCH_DOCUMENT,
+                    document_id=_identity().document_id,
+                    query="基金经理",
+                ),
+                lambda results: ToolCall(
+                    tool_name=ToolName.READ_SECTION,
+                    document_id=_identity().document_id,
+                    section_ref=_section_ref_from_search(results),
+                ),
+                FinalAnswer(
+                    answer="基金经理张明负责本基金投资管理。",
+                    citations=(),  # 缺少 citation
+                    key_facts=("张明",),
+                ),
+            ]),
+        )
+
+        result = runner.run(
+            document_id=_identity().document_id,
+            query="基金经理是谁？",
+            scene="interactive",
+        )
+
+        assert result.failure is None
+        assert "张明" in result.answer
+
+    def test_interactive_still_blocks_investment_advice(self, tmp_path: Path) -> None:
+        """interactive scene: 投资建议关键词仍然 fail-closed。"""
+        runner = LlmToolLoopRunner(
+            tool_service=_service(tmp_path),
+            llm_client=FakeLlmClient([
+                FinalAnswer(
+                    answer="建议买入该基金，目标价5元。",
+                    citations=(),
+                    key_facts=(),
+                ),
+            ]),
+        )
+
+        result = runner.run(
+            document_id=_identity().document_id,
+            query="这个基金怎么样？",
+            scene="interactive",
+        )
+
+        assert isinstance(result.failure, ToolFailure)
+        assert result.failure.code is FailureCode.UNAVAILABLE
+        assert "投资建议" in result.failure.message
+
+    def test_ask_scene_still_enforces_citation(self, tmp_path: Path) -> None:
+        """默认 ask scene: 有工具证据但缺 citation → fail-closed。"""
+        runner = LlmToolLoopRunner(
+            tool_service=_service(tmp_path),
+            llm_client=FakeLlmClient([
+                ToolCall(
+                    tool_name=ToolName.SEARCH_DOCUMENT,
+                    document_id=_identity().document_id,
+                    query="基金经理",
+                ),
+                lambda results: ToolCall(
+                    tool_name=ToolName.READ_SECTION,
+                    document_id=_identity().document_id,
+                    section_ref=_section_ref_from_search(results),
+                ),
+                FinalAnswer(
+                    answer="基金经理张明负责本基金投资管理。",
+                    citations=(),  # 缺少 citation
+                    key_facts=("张明",),
+                ),
+            ]),
+        )
+
+        result = runner.run(
+            document_id=_identity().document_id,
+            query="基金经理是谁？",
+        )
+
+        assert isinstance(result.failure, ToolFailure)
+        assert result.failure.code is FailureCode.UNAVAILABLE
+        assert "citation" in result.failure.message
+
+    def test_ask_scene_still_enforces_evidence(self, tmp_path: Path) -> None:
+        """默认 ask scene: 无工具调用直接回答 → fail-closed（缺 evidence）。"""
+        runner = LlmToolLoopRunner(
+            tool_service=_service(tmp_path),
+            llm_client=FakeLlmClient([
+                FinalAnswer(
+                    answer="基金经理是张明。",
+                    citations=(),
+                    key_facts=("张明",),
+                ),
+            ]),
+        )
+
+        result = runner.run(
+            document_id=_identity().document_id,
+            query="基金经理是谁？",
+        )
+
+        assert isinstance(result.failure, ToolFailure)
+        assert result.failure.code is FailureCode.UNAVAILABLE
+
+    def test_interactive_preserves_llm_provided_citations(self, tmp_path: Path) -> None:
+        """interactive scene: LLM 提供的 citation 被保留在结果中。"""
+        runner = LlmToolLoopRunner(
+            tool_service=_service(tmp_path),
+            llm_client=FakeLlmClient([
+                ToolCall(
+                    tool_name=ToolName.SEARCH_DOCUMENT,
+                    document_id=_identity().document_id,
+                    query="基金经理",
+                ),
+                lambda results: ToolCall(
+                    tool_name=ToolName.READ_SECTION,
+                    document_id=_identity().document_id,
+                    section_ref=_section_ref_from_search(results),
+                ),
+                lambda results: FinalAnswer(
+                    answer="基金经理张明负责本基金投资管理。",
+                    citations=results[-1].citations,
+                    key_facts=("张明",),
+                ),
+            ]),
+        )
+
+        result = runner.run(
+            document_id=_identity().document_id,
+            query="基金经理是谁？",
+            scene="interactive",
+        )
+
+        assert result.failure is None
+        assert len(result.citations) == 1
+        assert result.citations[0].locator.section_ref == "section-0000"

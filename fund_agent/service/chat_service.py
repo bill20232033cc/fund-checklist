@@ -198,7 +198,7 @@ class ChatService:
                 elif hasattr(self._scene_config, "runtime"):
                     max_steps = self._scene_config.runtime.max_iterations
                 runner = self._runner_factory(llm_client, self._tool_service or _empty_tool_service(), max_steps=max_steps)
-                agent_result = runner.run(document_id=document_id, query=user_text)
+                agent_result = runner.run(document_id=document_id, query=user_text, scene=self._scene_config.scene)
             except Exception:
                 return ChatTurnResponse(answer="LLM 服务暂不可用，请稍后重试。")
 
