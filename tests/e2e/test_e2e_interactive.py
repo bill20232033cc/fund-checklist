@@ -5,9 +5,7 @@
 - Rich Table 格式化
 - --label 会话恢复
 
-已知问题（2026-07-27）：
-- interactive 模式受 ask 链路 bug 影响（"LLM 最终回答缺少受控 citation"）
-- 当前标记为 xfail，待 bug 修复后启用
+Phase 7.4 已修复 interactive 模式 citation 校验问题（方案 E）
 """
 
 from __future__ import annotations
@@ -24,10 +22,6 @@ from tests.e2e.conftest import (
 )
 
 
-@pytest.mark.xfail(
-    reason="已知 bug: LLM 返回 '最终回答缺少受控 citation'",
-    strict=False,
-)
 class TestInteractiveMultiTurn:
     """场景 2：多轮对话上下文记忆。"""
 
@@ -49,10 +43,6 @@ class TestInteractiveMultiTurn:
         assert "您可以追问" in stdout, "缺少追问建议"
 
 
-@pytest.mark.xfail(
-    reason="已知 bug: LLM 返回 '最终回答缺少受控 citation'",
-    strict=False,
-)
 class TestRichTable:
     """场景 3：Rich Table 格式化。"""
 
@@ -72,10 +62,6 @@ class TestRichTable:
         assert has_rich, "输出中未检测到 Rich Table 字符"
 
 
-@pytest.mark.xfail(
-    reason="已知 bug: LLM 返回 '最终回答缺少受控 citation'",
-    strict=False,
-)
 class TestLabelRestore:
     """场景 4：--label 会话恢复。"""
 
