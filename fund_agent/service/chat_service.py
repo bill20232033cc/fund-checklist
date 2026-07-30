@@ -203,7 +203,13 @@ class ChatService:
                 return ChatTurnResponse(answer="LLM 服务暂不可用，请稍后重试。")
 
         if agent_result.failure is not None:
-            return ChatTurnResponse(answer=f"LLM 处理失败：{agent_result.failure.message}")
+            return ChatTurnResponse(
+                answer=f"LLM 处理失败：{agent_result.failure.message}",
+                tool_trace=tuple(
+                    f"{entry.tool_name}({entry.status})"
+                    for entry in agent_result.tool_trace
+                ) if agent_result.tool_trace else (),
+            )
 
         answer = agent_result.answer
 
