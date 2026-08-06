@@ -144,6 +144,66 @@ def test_programmatic_auditor_detects_placeholders() -> None:
     assert len(p3_violations) > 0
 
 
+def test_data_table_ch2_marks_missing_performance_cells_not_fee_fill() -> None:
+    """性能字段缺失时单元格显式标「缺失」，禁止用相邻费率列补空。"""
+    from fund_agent.service.chapter_generator import generate_data_table
+    from fund_agent.service.models import FeeRateItem
+
+    performance = {
+        2021: {"nav_growth_rate": "17.80%", "benchmark_return_rate": "10.33%", "excess_return": "7.47%"},
+        2022: {"nav_growth_rate": "2.72%", "benchmark_return_rate": "-1.70%", "excess_return": "4.42%"},
+        2023: {"nav_growth_rate": "10.71%", "benchmark_return_rate": "6.18%", "excess_return": "4.53%"},
+    }
+    fees = {
+        year: (
+            FeeRateItem(fee_name="基金管理费", rate="0.50%"),
+            FeeRateItem(fee_name="基金托管费", rate="0.10%"),
+            FeeRateItem(fee_name="销售服务费C类", rate="0.25%"),
+            FeeRateItem(fee_name="销售服务费A类", rate="不收取"),
+        )
+        for year in (2021, 2022, 2023, 2024, 2025)
+    }
+
+    table = generate_data_table(2, "007466", "华泰柏瑞中证红利低波ETF联接", 2025, performance, {}, {}, fees)
+
+    # 业绩缺失年份行显式标「缺失」，不写相邻费率值
+    assert "| 2024 | 缺失 | 缺失 | 缺失 |" in table
+    assert "| 2025 | 缺失 | 缺失 | 缺失 |" in table
+    assert "| 2024 | 0.50% | 0.10% | 0.25% | 不收取 |" in table
+    assert "| 2025 | 0.50% | 0.10% | 0.25% | 不收取 |" in table
+
+
+def test_data_table_renders_holdings_source_note_for_concentration() -> None:
+    """关联 ETF 持仓源：Ch3/Ch6 集中度与持仓表格标注来源。"""
+    from fund_agent.service.chapter_generator import generate_data_table
+    from fund_agent.service.models import ChapterEvidence, HoldingExtraction
+
+    holdings = {
+        2025: tuple(
+            HoldingExtraction(
+                rank=i,
+                stock_code=f"600000{i}",
+                stock_name=f"标的股{i}",
+                quantity="1000",
+                fair_value="10000.00",
+                percentage=pct,
+            )
+            for i, pct in enumerate(
+                ("10.00%", "8.00%", "7.00%", "6.00%", "5.00%", "4.00%", "3.00%", "2.00%", "1.00%", "1.00%"),
+                start=1,
+            )
+        )
+    }
+    evidence = ChapterEvidence(holdings_source_note="来源：标的 ETF 512890 年报")
+
+    ch3 = generate_data_table(3, "007466", "华泰柏瑞中证红利低波ETF联接", 2025, {}, holdings, {}, {}, evidence=evidence)
+    ch6 = generate_data_table(6, "007466", "华泰柏瑞中证红利低波ETF联接", 2025, {}, holdings, {}, {}, evidence=evidence)
+
+    assert "**持仓集中度数据来源**：来源：标的 ETF 512890 年报" in ch3
+    assert "| 2025 | 36.00 | 47.00 | 10.00 | 标的股1 |" in ch3
+    assert "2025年前五大持仓集中度: 36.00%（来源：标的 ETF 512890 年报）" in ch6
+
+
 # ============================================================
 # AuditViolation / AuditDecision 测试
 # ============================================================
@@ -319,6 +379,11 @@ class FakeLlmClient:
     def __init__(self, response: str) -> None:
         self._response = response
         self.calls: list[dict[str, str]] = []
+
+    def clone(self) -> "FakeLlmClient":
+        """返回独立记录调用序列的同配置新实例。"""
+
+        return FakeLlmClient(self._response)
 
     def generate_text(self, *, system_prompt: str, user_prompt: str, temperature: float = 0) -> str:
         self.calls.append({"system_prompt": system_prompt, "user_prompt": user_prompt})

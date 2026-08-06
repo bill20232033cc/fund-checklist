@@ -15,6 +15,7 @@ from fund_agent.service.session_models import (
     EpisodeSummary,
     PinnedState,
     Session,
+    ToolCallSummary,
     Turn,
 )
 
@@ -183,6 +184,17 @@ class SessionStore:
                     "content": t.content,
                     "citations": list(t.citations),
                     "tool_trace": list(t.tool_trace),
+                    "tool_calls": [
+                        {
+                            "tool_name": tc.tool_name,
+                            "arguments_display": tc.arguments_display,
+                            "success": tc.success,
+                            "failure_code": str(tc.failure_code) if tc.failure_code else None,
+                        }
+                        for tc in t.tool_calls
+                    ],
+                    "original_content": t.original_content,
+                    "blocked_terms": list(t.blocked_terms),
                     "timestamp": t.timestamp,
                 }
                 for t in session.turns
@@ -219,6 +231,17 @@ class SessionStore:
                 content=t.get("content", ""),
                 citations=tuple(t.get("citations", [])),
                 tool_trace=tuple(t.get("tool_trace", [])),
+                tool_calls=tuple(
+                    ToolCallSummary(
+                        tool_name=tc.get("tool_name", ""),
+                        arguments_display=tc.get("arguments_display", ""),
+                        success=tc.get("success", True),
+                        failure_code=tc.get("failure_code"),
+                    )
+                    for tc in t.get("tool_calls", [])
+                ),
+                original_content=t.get("original_content"),
+                blocked_terms=tuple(t.get("blocked_terms", [])),
                 timestamp=t.get("timestamp", ""),
             )
             for t in data.get("turns", [])

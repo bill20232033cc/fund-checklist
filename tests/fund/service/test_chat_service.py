@@ -5,6 +5,8 @@
 - 多轮上下文传递：近期 turns 保留在 session
 - 投资建议拦截：LLM 回答含建议关键词 → 拒绝
 - Session 更新：turn 追加、updated_at 刷新
+- 失败轮：成对落盘（user + assistant），tool_trace / tool_calls 保留
+- 被拦截回答：原始回答与触发词在 session 与 response 中保留
 - 空输入/空白输入边界
 """
 
@@ -18,7 +20,7 @@ from fund_agent.agent.llm_tool_loop import (
     FinalAnswer,
     TokenUsage,
 )
-from fund_agent.agent.tool_loop import AgentRunResult
+from fund_agent.agent.tool_loop import AgentRunResult, ToolTraceEntry
 from fund_agent.fund.document_tools.constants import FailureCode
 from fund_agent.fund.document_tools.models import Citation, ToolFailure
 from fund_agent.host.session_store import SessionStore
@@ -28,7 +30,7 @@ from fund_agent.service.chat_service import (
     ChatTurnResponse,
 )
 from fund_agent.service.prompt_composer import PromptComposer
-from fund_agent.service.scene_config import ASK_SCENE_CONFIG
+from fund_agent.service.scene_config import ASK_SCENE_CONFIG, INTERACTIVE_SCENE_CONFIG
 from fund_agent.service.session_models import PinnedState, Session, ToolCallSummary, Turn
 
 
@@ -62,6 +64,54 @@ def _make_agent_result(answer: str) -> AgentRunResult:
         tool_trace=(),
         failure=None,
     )
+
+
+class _RecordingRunner:
+    """记录 run() 参数的假 runner，返回固定成功 AgentRunResult。"""
+
+    def __init__(self, llm_client=None, tool_service=None, max_steps: int = 8) -> None:
+        """初始化并保存注入对象。"""
+
+        self.llm_client = llm_client
+        self.tool_service = tool_service
+        self.max_steps = max_steps
+        self.calls: list[dict] = []
+
+    def run(
+        self,
+        *,
+        document_id: str,
+        query: str,
+        scene: str = "ask",
+        candidate_queries: tuple[str, ...] | None = None,
+    ) -> AgentRunResult:
+        """记录调用参数并返回固定成功结果。"""
+
+        self.calls.append(
+            {
+                "document_id": document_id,
+                "query": query,
+                "scene": scene,
+                "candidate_queries": candidate_queries,
+            }
+        )
+        return _make_agent_result("根据年报，基金经理持有本基金。")
+
+
+class _RecordingSessionStore(SessionStore):
+    """记录每次 save 的 Session，用于校验磁盘不序列化的完整 Turn 字段。"""
+
+    def __init__(self, root: Path) -> None:
+        """初始化并记录保存历史。"""
+
+        super().__init__(root)
+        self.saved_sessions: list[Session] = []
+
+    def save(self, session: Session) -> None:
+        """保存并记录副本。"""
+
+        self.saved_sessions.append(session)
+        super().save(session)
 
 
 def _template_dir() -> Path:
@@ -148,6 +198,89 @@ class TestChatTurn:
         assert result.investment_advice_detected is True
         assert "不支持" in result.answer or "投资建议" in result.answer
 
+    def test_quoted_expected_return_rate_not_blocked(self, service: ChatService, session_store: SessionStore):
+        """引用年报术语 预期收益率 不触发第二道投资建议守卫。"""
+        session = self._create_session(session_store)
+        answer = "年报披露本基金的预期收益率为 8%，风险收益特征为混合型。"
+
+        result = service.chat_turn(
+            ChatTurnRequest(session_id=session.session_id, user_text="年报中的预期收益率是多少？"),
+            agent_result=_make_agent_result(answer),
+        )
+
+        assert result.investment_advice_detected is False
+        assert result.answer == answer
+
+    def test_quoted_investment_strategy_text_not_blocked(self, service: ChatService, session_store: SessionStore):
+        """引用年报投资策略原文（弱词处于引用上下文）不触发第二道守卫。"""
+        session = self._create_session(session_store)
+        answer = "年报投资策略原文：报告期内买入并持有优质股票，卖出部分债券兑现收益。"
+
+        result = service.chat_turn(
+            ChatTurnRequest(session_id=session.session_id, user_text="年报投资策略是什么？"),
+            agent_result=_make_agent_result(answer),
+        )
+
+        assert result.investment_advice_detected is False
+        assert result.answer == answer
+
+    def test_prediction_sentence_still_blocked(self, service: ChatService, session_store: SessionStore):
+        """预测句式 预期收益为 8% 在 chat_service 层仍被拦截。"""
+        session = self._create_session(session_store)
+
+        result = service.chat_turn(
+            ChatTurnRequest(session_id=session.session_id, user_text="预期收益会是多少？"),
+            agent_result=_make_agent_result("本基金未来一年的预期收益为 8%。"),
+        )
+
+        assert result.investment_advice_detected is True
+        assert "不支持" in result.answer or "投资建议" in result.answer
+
+    def test_decision_a_annual_report_facts_not_blocked(self, service: ChatService, session_store: SessionStore):
+        """决策 A：持仓/费率等年报事实性描述不被第二道守卫拦截。"""
+        session = self._create_session(session_store)
+        answer = (
+            "报告期内本基金增持了银行、减持了纺织服饰行业；"
+            "财务报表附注披露本期买入返售金融资产、卖出回购金融资产款；"
+            "期末前十大重仓股中本期买入 X、本期卖出 Y。"
+        )
+
+        result = service.chat_turn(
+            ChatTurnRequest(session_id=session.session_id, user_text="持仓和费率情况？"),
+            agent_result=_make_agent_result(answer),
+        )
+
+        assert result.investment_advice_detected is False
+        assert result.answer == answer
+
+    def test_decision_a_directive_context_still_blocked(self, service: ChatService, session_store: SessionStore):
+        """决策 A：弱词遇指令动词（如 值得持有应增持）仍被第二道守卫拦截。"""
+        session = self._create_session(session_store)
+
+        result = service.chat_turn(
+            ChatTurnRequest(session_id=session.session_id, user_text="这个基金怎么样？"),
+            agent_result=_make_agent_result("该基金值得持有，应增持。"),
+        )
+
+        assert result.investment_advice_detected is True
+        assert "不支持" in result.answer or "投资建议" in result.answer
+
+    def test_decision_a_bare_yingshi_facts_not_blocked(self, service: ChatService, session_store: SessionStore):
+        """修正：裸 应 不再命中指令动词（应付托管费/应主要投资于），第二道守卫放行。"""
+        session = self._create_session(session_store)
+        answer = (
+            "财务报表附注：本期应付托管费计入负债，买入返售金融资产；"
+            "基金合同载明应主要投资于股票资产。"
+        )
+
+        result = service.chat_turn(
+            ChatTurnRequest(session_id=session.session_id, user_text="费率与投资范围？"),
+            agent_result=_make_agent_result(answer),
+        )
+
+        assert result.investment_advice_detected is False
+        assert result.answer == answer
+
     def test_empty_user_text(self, service: ChatService, session_store: SessionStore):
         """空白用户输入 → 返回提示，不调用 LLM。"""
         session = self._create_session(session_store)
@@ -203,7 +336,7 @@ class TestChatTurn:
         assert result.answer is not None  # 应返回错误提示而非崩溃
 
     def test_failure_propagated_to_answer(self, service: ChatService, session_store: SessionStore):
-        """agent_result.failure 非 None 时 → 错误信息作为 answer 返回，而非空字符串。"""
+        """agent_result.failure 非 None 时 → 错误信息作为 answer 返回，失败轮成对落盘。"""
         session = self._create_session(session_store)
 
         failure = ToolFailure(code=FailureCode.UNAVAILABLE, message="LLM 最终回答缺少受控 citation")
@@ -216,9 +349,163 @@ class TestChatTurn:
 
         assert "LLM 处理失败" in result.answer
         assert "受控 citation" in result.answer
-        # 失败不应更新 session turns
+        # 失败轮同样成对落盘（user + assistant）
         updated = session_store.load(session.session_id)
-        assert len(updated.turns) == 0
+        assert len(updated.turns) == 2
+        assert updated.turns[0].role == "user"
+        assert updated.turns[1].role == "assistant"
+        assert "LLM 处理失败" in updated.turns[1].content
+
+    def test_failure_tool_trace_non_empty(self, service: ChatService, session_store: SessionStore):
+        """工具失败路径：ChatTurnResponse.tool_trace 非空且含失败分类，不依赖 status 字段。"""
+        session = self._create_session(session_store)
+
+        failure = ToolFailure(code=FailureCode.NOT_FOUND, message="章节不存在")
+        failed_result = AgentRunResult(
+            answer="",
+            citations=(),
+            tool_trace=(
+                ToolTraceEntry(
+                    tool_name="search_document",
+                    arguments={"query": "基金规模"},
+                    result_kind="success",
+                ),
+                ToolTraceEntry(
+                    tool_name="read_section",
+                    arguments={"section_ref": "sec-0001"},
+                    result_kind="failure",
+                    failure_code=FailureCode.NOT_FOUND,
+                ),
+            ),
+            failure=failure,
+        )
+
+        result = service.chat_turn(
+            ChatTurnRequest(session_id=session.session_id, user_text="基金规模是多大？"),
+            agent_result=failed_result,
+        )
+
+        assert result.tool_trace == (
+            "search_document(success)",
+            "read_section(failure:not_found)",
+        )
+        assert all(isinstance(item, str) for item in result.tool_trace)
+        # 失败轮成对落盘，tool_trace 在磁盘往返后可读
+        updated = session_store.load(session.session_id)
+        assert len(updated.turns) == 2
+        assert updated.turns[1].tool_trace == (
+            "search_document(success)",
+            "read_section(failure:not_found)",
+        )
+
+    def test_failure_provider_first_step_trace_empty(self, service: ChatService, session_store: SessionStore):
+        """provider 首轮失败（next_step 异常，trace 为空）→ tool_trace 为空但失败轮仍落盘。"""
+        session = self._create_session(session_store)
+
+        failure = ToolFailure(
+            code=FailureCode.LLM_MALFORMED_RESPONSE,
+            message="DeepSeek LLM provider response 不符合受控结构",
+        )
+        failed_result = AgentRunResult(answer="", citations=(), tool_trace=(), failure=failure)
+
+        result = service.chat_turn(
+            ChatTurnRequest(session_id=session.session_id, user_text="问题"),
+            agent_result=failed_result,
+        )
+
+        assert result.tool_trace == ()
+        updated = session_store.load(session.session_id)
+        assert len(updated.turns) == 2
+        assert updated.turns[1].tool_trace == ()
+
+    def test_failure_turn_tool_calls_retained_on_session(
+        self,
+        tmp_path: Path,
+        prompt_composer: PromptComposer,
+    ):
+        """失败轮 tool_calls 在保存的 Session 对象上保留（含失败分类）。"""
+        store = _RecordingSessionStore(tmp_path / "sessions")
+        service = ChatService(
+            session_store=store,
+            prompt_composer=prompt_composer,
+            scene_config=ASK_SCENE_CONFIG,
+        )
+        session = self._create_session(store)
+        failed_result = AgentRunResult(
+            answer="",
+            citations=(),
+            tool_trace=(
+                ToolTraceEntry(
+                    tool_name="read_section",
+                    arguments={"section_ref": "sec-0001"},
+                    result_kind="failure",
+                    failure_code=FailureCode.NOT_FOUND,
+                ),
+            ),
+            failure=ToolFailure(code=FailureCode.NOT_FOUND, message="章节不存在"),
+        )
+
+        service.chat_turn(
+            ChatTurnRequest(session_id=session.session_id, user_text="基金规模是多大？"),
+            agent_result=failed_result,
+        )
+
+        saved = store.saved_sessions[-1]
+        assert len(saved.turns) == 2
+        tool_calls = saved.turns[1].tool_calls
+        assert len(tool_calls) == 1
+        assert tool_calls[0].tool_name == "read_section"
+        assert tool_calls[0].success is False
+        assert tool_calls[0].failure_code == FailureCode.NOT_FOUND.value
+
+    def test_blocked_answer_original_and_terms_saved(
+        self,
+        tmp_path: Path,
+        prompt_composer: PromptComposer,
+    ):
+        """被拦截回答：session 保存原始回答与触发词，response 同步保留。"""
+        store = _RecordingSessionStore(tmp_path / "sessions")
+        service = ChatService(
+            session_store=store,
+            prompt_composer=prompt_composer,
+            scene_config=ASK_SCENE_CONFIG,
+        )
+        session = self._create_session(store)
+        original = "建议买入该基金，目标价5元。"
+
+        result = service.chat_turn(
+            ChatTurnRequest(session_id=session.session_id, user_text="这个基金怎么样？"),
+            agent_result=_make_agent_result(original),
+        )
+
+        assert result.investment_advice_detected is True
+        assert result.original_content == original
+        # 弱词「买入」是强词「建议买入」的子串，独立命中后同样收录（与 contains_investment_advice 同判据）
+        assert set(result.blocked_terms) == {"建议买入", "买入", "目标价"}
+        # session 中保存原始回答与触发词（最短命中词元）
+        saved = store.saved_sessions[-1]
+        assert len(saved.turns) == 2
+        assistant = saved.turns[1]
+        assert assistant.content == "抱歉，不支持涉及投资建议的问题。"
+        assert assistant.original_content == original
+        assert set(assistant.blocked_terms) == {"建议买入", "买入", "目标价"}
+        assert min(assistant.blocked_terms, key=len) == "买入"
+
+    def test_normal_answer_no_blocked_fields(self, service: ChatService, session_store: SessionStore):
+        """未拦截回答：original_content 为 None，blocked_terms 为空。"""
+        session = self._create_session(session_store)
+
+        result = service.chat_turn(
+            ChatTurnRequest(session_id=session.session_id, user_text="基金经理是谁？"),
+            agent_result=_make_agent_result("基金经理是张三，任期5年。"),
+        )
+
+        assert result.investment_advice_detected is False
+        assert result.original_content is None
+        assert result.blocked_terms == ()
+        updated = session_store.load(session.session_id)
+        assert updated.turns[1].original_content is None
+        assert updated.turns[1].blocked_terms == ()
 
     def test_success_no_failure(self, service: ChatService, session_store: SessionStore):
         """agent_result.failure 为 None → 正常返回 answer。"""
@@ -248,6 +535,130 @@ def _history_service(
         scene_config=ASK_SCENE_CONFIG,
         history_max_tokens=history_max_tokens,
     )
+
+
+class TestInteractiveQualityWiring:
+    """interactive 质量修复：候选词注入 + runner candidate_queries 接线。"""
+
+    @pytest.fixture
+    def session_store(self, tmp_path: Path) -> SessionStore:
+        return SessionStore(tmp_path / "sessions")
+
+    @pytest.fixture
+    def prompt_composer(self) -> PromptComposer:
+        return PromptComposer(template_dir=_template_dir())
+
+    def _create_session(self, store: SessionStore) -> Session:
+        """创建带 active_document_id 的 interactive 测试 session。"""
+        session = store.create(fund_code="004393")
+        ps = PinnedState(
+            fund_code="004393",
+            active_document_id="004393-2024-annual_report-abc123",
+            active_year=2024,
+        )
+        session = session.with_pinned_state(ps)
+        store.save(session)
+        return session
+
+    def test_candidate_queries_passed_to_runner(
+        self, session_store: SessionStore, prompt_composer: PromptComposer
+    ) -> None:
+        """chat_turn：manager_holdings 命中的查询把受控候选词传给 runner.run。"""
+
+        captured: list[_RecordingRunner] = []
+
+        def factory(llm_client, tool_service, max_steps: int = 8) -> _RecordingRunner:
+            runner = _RecordingRunner(llm_client, tool_service, max_steps=max_steps)
+            captured.append(runner)
+            return runner
+
+        service = ChatService(
+            session_store=session_store,
+            prompt_composer=prompt_composer,
+            scene_config=INTERACTIVE_SCENE_CONFIG,
+            runner_factory=factory,
+        )
+        session = self._create_session(session_store)
+
+        result = service.chat_turn(
+            ChatTurnRequest(session_id=session.session_id, user_text="基金经理持有本产品吗"),
+        )
+
+        assert result.answer == "根据年报，基金经理持有本基金。"
+        assert len(captured) == 1
+        call = captured[0].calls[0]
+        assert call["scene"] == "interactive"
+        assert call["query"] == "基金经理持有本产品吗"
+        assert call["candidate_queries"] is not None
+        assert "持有本基金" in call["candidate_queries"]
+
+    def test_candidate_queries_none_without_profile(
+        self, session_store: SessionStore, prompt_composer: PromptComposer
+    ) -> None:
+        """chat_turn：无 profile 命中的查询不传候选词（runner 只做空结果计数收敛）。"""
+
+        captured: list[_RecordingRunner] = []
+
+        def factory(llm_client, tool_service, max_steps: int = 8) -> _RecordingRunner:
+            runner = _RecordingRunner(llm_client, tool_service, max_steps=max_steps)
+            captured.append(runner)
+            return runner
+
+        service = ChatService(
+            session_store=session_store,
+            prompt_composer=prompt_composer,
+            scene_config=INTERACTIVE_SCENE_CONFIG,
+            runner_factory=factory,
+        )
+        session = self._create_session(session_store)
+
+        service.chat_turn(
+            ChatTurnRequest(session_id=session.session_id, user_text="基金经理是谁"),
+        )
+
+        assert captured[0].calls[0]["candidate_queries"] is None
+
+    def test_build_contributions_injects_retrieval_candidates(
+        self, session_store: SessionStore, prompt_composer: PromptComposer
+    ) -> None:
+        """_build_contributions：manager_holdings 命中时注入 retrieval 候选词 slot。"""
+
+        service = ChatService(
+            session_store=session_store,
+            prompt_composer=prompt_composer,
+            scene_config=INTERACTIVE_SCENE_CONFIG,
+        )
+        session = self._create_session(session_store)
+
+        contributions = service._build_contributions(
+            session,
+            document_id="004393-2024-annual_report-abc123",
+            user_query="基金经理持有本产品吗",
+        )
+
+        assert "retrieval" in contributions
+        assert "manager_holdings" in contributions["retrieval"]
+        assert "持有本基金" in contributions["retrieval"]
+
+    def test_build_contributions_skips_retrieval_without_profile(
+        self, session_store: SessionStore, prompt_composer: PromptComposer
+    ) -> None:
+        """_build_contributions：无 profile 命中的查询不注入 retrieval slot。"""
+
+        service = ChatService(
+            session_store=session_store,
+            prompt_composer=prompt_composer,
+            scene_config=INTERACTIVE_SCENE_CONFIG,
+        )
+        session = self._create_session(session_store)
+
+        contributions = service._build_contributions(
+            session,
+            document_id="004393-2024-annual_report-abc123",
+            user_query="基金经理是谁",
+        )
+
+        assert "retrieval" not in contributions
 
 
 class TestBuildHistoryContribution:
@@ -418,3 +829,76 @@ class TestEstimateTokenCount:
         # "你好world" = 2 中文 + 5 英文 = 2*1.5 + 5/4 = 3 + 1.25 = 4.25 → 4
         tokens = service._estimate_token_count("你好world")
         assert tokens == 4
+
+
+# ── Runtime contribution 的 active_document_id 注入 ─────────────────────
+
+
+class TestBuildContributionsRuntimeDocumentId:
+    """_build_contributions runtime contribution 的 active_document_id 注入测试。"""
+
+    @pytest.fixture
+    def session_store(self, tmp_path: Path) -> SessionStore:
+        return SessionStore(tmp_path / "sessions")
+
+    @pytest.fixture
+    def prompt_composer(self) -> PromptComposer:
+        return PromptComposer(template_dir=_template_dir())
+
+    def _service(self, session_store: SessionStore, prompt_composer: PromptComposer) -> ChatService:
+        return ChatService(
+            session_store=session_store,
+            prompt_composer=prompt_composer,
+            scene_config=ASK_SCENE_CONFIG,
+        )
+
+    def test_runtime_includes_pinned_document_id(
+        self, session_store: SessionStore, prompt_composer: PromptComposer
+    ) -> None:
+        """session.pinned_state.active_document_id 必须注入 runtime contribution。"""
+        service = self._service(session_store, prompt_composer)
+        session = session_store.create(fund_code="011649")
+        ps = PinnedState(
+            fund_code="011649",
+            active_document_id="011649-2025-annual_report-abc123",
+            active_year=2025,
+        )
+        session = session.with_pinned_state(ps)
+        session_store.save(session)
+
+        contributions = service._build_contributions(session)
+
+        assert "011649-2025-annual_report-abc123" in contributions["runtime"]
+
+    def test_runtime_prefers_current_turn_document_id(
+        self, session_store: SessionStore, prompt_composer: PromptComposer
+    ) -> None:
+        """本轮已确定的 document_id 优先于 pinned_state。"""
+        service = self._service(session_store, prompt_composer)
+        session = session_store.create(fund_code="011649")
+        ps = PinnedState(
+            fund_code="011649",
+            active_document_id="011649-2025-annual_report-pinned",
+            active_year=2025,
+        )
+        session = session.with_pinned_state(ps)
+        session_store.save(session)
+
+        contributions = service._build_contributions(
+            session,
+            document_id="011649-2024-annual_report-current",
+        )
+
+        assert "011649-2024-annual_report-current" in contributions["runtime"]
+        assert "011649-2025-annual_report-pinned" not in contributions["runtime"]
+
+    def test_runtime_omits_document_id_when_unset(
+        self, session_store: SessionStore, prompt_composer: PromptComposer
+    ) -> None:
+        """pinned_state 与当前轮都无 document_id 时 runtime 不含文档行。"""
+        service = self._service(session_store, prompt_composer)
+        session = session_store.create(fund_code="011649")
+
+        contributions = service._build_contributions(session)
+
+        assert "document_id" not in contributions["runtime"]

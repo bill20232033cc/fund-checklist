@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import io
 import importlib
+import hashlib
 import json
 from importlib.metadata import entry_points
 from pathlib import Path
 
 import pytest
 
-from fund_agent.agent import AgentRunResult, ToolTraceEntry
+from fund_agent.agent import AgentRunResult, ChatResponse, FinalAnswer, ToolCall, ToolTraceEntry
 from fund_agent.cli.main import (
     CLASSIFIED_FAILURE_EXIT_CODE,
     SUCCESS_EXIT_CODE,
@@ -19,7 +20,7 @@ from fund_agent.cli.main import (
     build_parser,
     run_cli,
 )
-from fund_agent.fund.document_tools.constants import DOCLING_JSON_SUFFIX, FailureCode, LocatorKind, ToolName
+from fund_agent.fund.document_tools.constants import DOCLING_JSON_SUFFIX, FailureCode, LocatorKind, PDF_FILENAME, ToolName
 from fund_agent.fund.document_tools.errors import DocumentToolError
 from fund_agent.fund.document_tools.models import Citation, Locator, ToolFailure
 from fund_agent.fund.document_tools.persistent_repository import CATALOG_FILENAME
@@ -199,7 +200,7 @@ def test_cli_happy_path_orchestrates_import_store_service_and_host(monkeypatch, 
     assert stderr == ""
     assert _FakeConverter.calls
     assert "Answer:" in stdout
-    assert "基金管理人" in stdout
+    assert "基金经理" in stdout
     assert "Citations:" in stdout
     assert "Trace:" in stdout
     assert "search_document success" in stdout
@@ -446,7 +447,7 @@ def test_cli_reuses_existing_docling_json_without_converter(monkeypatch, tmp_pat
 
     assert exit_code == SUCCESS_EXIT_CODE
     assert stderr == ""
-    assert "基金管理人" in stdout
+    assert "基金经理" in stdout
 
 
 def test_cli_classified_failure_outputs_code_and_exit_2(tmp_path: Path) -> None:
@@ -661,6 +662,44 @@ def _write_catalog(work_dir: Path, entries: list[dict[str, object]]) -> None:
         "schema_version": 1,
         "reports": reports,
     }, ensure_ascii=False), encoding="utf-8")
+
+
+def _write_fix_report_store(work_dir: Path) -> None:
+    """写入 fix 测试可加载的 catalog + blob + Docling JSON store。"""
+
+    document_id = "004393-2024-annual_report-0123456789abcdef"
+    pdf_bytes = b"%PDF-1.4\n% fix store pdf\n%%EOF\n"
+    blob_path = work_dir / "pdf_blobs" / document_id / PDF_FILENAME
+    blob_path.parent.mkdir(parents=True, exist_ok=True)
+    blob_path.write_bytes(pdf_bytes)
+    fingerprint = hashlib.sha256(pdf_bytes).hexdigest()
+
+    json_path = work_dir / "docling_json" / document_id / f"{document_id}{DOCLING_JSON_SUFFIX}"
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(json.dumps(_docling_payload(), ensure_ascii=False), encoding="utf-8")
+
+    catalog = {
+        "schema_version": 1,
+        "reports": {
+            document_id: {
+                "schema_version": 1,
+                "document_id": document_id,
+                "identity": {
+                    "fund_code": "004393",
+                    "fund_name": "安信企业价值优选混合型证券投资基金",
+                    "year": 2024,
+                    "report_type": "annual_report",
+                    "source_kind": "local_pdf",
+                    "content_fingerprint": fingerprint,
+                    "document_id": document_id,
+                },
+                "stored_blob_ref": f"local_pdf:{document_id}",
+                "docling_json_ref": f"docling_json:{document_id}",
+            },
+        },
+    }
+    catalog_path = work_dir / CATALOG_FILENAME
+    catalog_path.write_text(json.dumps(catalog, ensure_ascii=False), encoding="utf-8")
 
 
 def test_multi_year_parser_accepts_valid_args() -> None:
@@ -1747,6 +1786,39 @@ def test_audit_parser_accepts_valid_args() -> None:
     assert args.year == 2024
 
 
+def test_generate_parser_accepts_holdings_source_args() -> None:
+    """generate 子命令必须接受关联持仓源参数并透传到 request。"""
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "generate",
+        "--fund-code", "007466",
+        "--fund-name", "华泰柏瑞中证红利低波ETF联接",
+        "--year", "2025",
+        "--holdings-source-fund", "512890",
+        "--holdings-source-workdir", ".fund_checklist_512890",
+    ])
+
+    assert args.command == "generate"
+    assert args.holdings_source_fund == "512890"
+    assert str(args.holdings_source_workdir) == ".fund_checklist_512890"
+
+
+def test_generate_parser_defaults_holdings_source_empty() -> None:
+    """generate 未指定关联持仓源时保持缺省空值。"""
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "generate",
+        "--fund-code", "007466",
+        "--fund-name", "华泰柏瑞中证红利低波ETF联接",
+        "--year", "2025",
+    ])
+
+    assert args.holdings_source_fund == ""
+    assert args.holdings_source_workdir is None
+
+
 def test_audit_exits_2_when_no_matching_report(tmp_path: Path) -> None:
     """catalog 中无匹配年报时 audit 必须返回 exit 2。"""
 
@@ -1999,6 +2071,96 @@ def test_generate_parser_accepts_valid_args() -> None:
     assert args.year == 2024
     assert args.years == "2022,2023,2024"
     assert args.output_format == "json"
+
+
+def test_generate_parser_accepts_concurrency() -> None:
+    """generate parser 必须接受 --concurrency 1..8。"""
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "generate",
+        "--fund-code", "004393",
+        "--fund-name", "安信企业价值优选混合型证券投资基金",
+        "--year", "2024",
+        "--concurrency", "4",
+    ])
+
+    assert args.command == "generate"
+    assert args.concurrency == 4
+
+
+@pytest.mark.parametrize("bad", ["0", "9"])
+def test_generate_concurrency_out_of_range_fails(monkeypatch, tmp_path: Path, bad: str) -> None:
+    """--concurrency 越界（1..8 之外）必须返回 classified failure。"""
+
+    exit_code, stdout, stderr = _run([
+        "generate",
+        "--fund-code", "004393",
+        "--fund-name", "安信企业价值优选混合型证券投资基金",
+        "--year", "2024",
+        "--concurrency", bad,
+    ])
+
+    assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
+    assert "1..8" in stderr
+
+
+def test_generate_concurrency_passthrough_with_llm(monkeypatch, tmp_path: Path) -> None:
+    """--llm 时 --concurrency 必须透传到 GenerateReportRequest。"""
+
+    from fund_agent.service import GenerateReportResult
+
+    captured: dict[str, int | None] = {}
+
+    class _FakeService:
+        def generate_report(self, request, llm_client=None):
+            captured["chapter_concurrency"] = request.chapter_concurrency
+            return GenerateReportResult(
+                failure=ToolFailure(code=FailureCode.NOT_FOUND, message="未找到年报数据"),
+            )
+
+    monkeypatch.setattr(cli_module, "FundReadingService", _FakeService)
+
+    exit_code, stdout, stderr = _run([
+        "generate",
+        "--fund-code", "004393",
+        "--fund-name", "安信企业价值优选混合型证券投资基金",
+        "--year", "2024",
+        "--llm",
+        "--concurrency", "4",
+    ])
+
+    assert captured["chapter_concurrency"] == 4
+    assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
+
+
+def test_generate_concurrency_ignored_without_llm(monkeypatch, tmp_path: Path) -> None:
+    """模板模式（无 --llm）时 --concurrency 被忽略并提示。"""
+
+    from fund_agent.service import GenerateReportResult
+
+    captured: dict[str, int | None] = {}
+
+    class _FakeService:
+        def generate_report(self, request, llm_client=None):
+            captured["chapter_concurrency"] = request.chapter_concurrency
+            return GenerateReportResult(
+                failure=ToolFailure(code=FailureCode.NOT_FOUND, message="未找到年报数据"),
+            )
+
+    monkeypatch.setattr(cli_module, "FundReadingService", _FakeService)
+
+    exit_code, stdout, stderr = _run([
+        "generate",
+        "--fund-code", "004393",
+        "--fund-name", "安信企业价值优选混合型证券投资基金",
+        "--year", "2024",
+        "--concurrency", "4",
+    ])
+
+    assert captured["chapter_concurrency"] is None
+    assert "仅 --llm 模式生效" in stderr
+    assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
 
 
 def test_generate_exits_2_when_no_data(monkeypatch, tmp_path: Path) -> None:
@@ -2348,6 +2510,11 @@ def test_generate_cli_real_pdf_smoke_writes_report_and_audit(monkeypatch, tmp_pa
     assert REAL_SMOKE_PDF.is_file(), "Slice 17C real-smoke PDF is required"
 
     class _FakeDeepSeekLlmClient:
+        def clone(self) -> "_FakeDeepSeekLlmClient":
+            """返回同配置的新实例（并发 worker 独立实例）。"""
+
+            return _FakeDeepSeekLlmClient()
+
         def generate_text(self, *, system_prompt: str, user_prompt: str, temperature: float = 0) -> str:
             if "审计" in system_prompt or "audit" in system_prompt.lower():
                 return '{"score": 99, "violations": []}'
@@ -2415,7 +2582,7 @@ def test_generate_cli_real_pdf_smoke_writes_report_and_audit(monkeypatch, tmp_pa
 
 
 def test_fix_chapter(tmp_path: Path, monkeypatch) -> None:
-    """fix --chapter 3 只修复 Ch3，exit code 0，输出包含修复统计。"""
+    """fix --chapter 3 --llm 只修复 Ch3，exit code 0，输出包含修复统计。"""
 
     work_dir = tmp_path / "work"
     reports_dir = work_dir / "reports"
@@ -2440,35 +2607,63 @@ def test_fix_chapter(tmp_path: Path, monkeypatch) -> None:
     report_path = reports_dir / "004393-2024-analysis.md"
     report_path.write_text(md_content, encoding="utf-8")
 
-    _write_catalog(work_dir, [
-        {"document_id": "doc-2024", "year": 2024, "fund_code": "004393"},
-    ])
+    # 构造真实可加载的 document store，使 FIX scene 的 reading tools 可取证
+    _write_fix_report_store(work_dir)
 
-    captured_content: list[str] = []
+    recorded_prompts: list[str] = []
 
-    def _mock_fix(chapter_content, *, audit_feedback="", chapter_contract="", document_id=""):
-        captured_content.append(chapter_content)
-        return chapter_content.replace("[待补充]", "[已补充]").replace("[数据缺失]", "")
+    class _FakeFixLlmClient:
+        """仿 test_generate_cli_real_pdf_smoke 的 fake LLM（含 clone）。"""
 
-    monkeypatch.setattr(
-        "fund_agent.service.chapter_generator._fix_chapter_placeholders",
-        _mock_fix,
-    )
+        def __init__(self, *, temperature: float = 0) -> None:
+            self.temperature = temperature
+
+        def clone(self) -> "_FakeFixLlmClient":
+            """返回同配置的新实例。"""
+
+            return _FakeFixLlmClient(temperature=self.temperature)
+
+        def next_step(self, *, document_id: str, query: str, tool_results, remaining_budget=None):
+            """先用 read_section 取证，再返回补强后的章节正文。"""
+
+            recorded_prompts.append(query)
+            if not tool_results:
+                return ChatResponse(
+                    step=ToolCall(
+                        tool_name=ToolName.READ_SECTION,
+                        document_id=document_id,
+                        section_ref="section-0000",
+                    )
+                )
+            body = query.split("## 原始章节内容\n\n", 1)[1].split("\n\n## 审计反馈", 1)[0]
+            strengthened = body.replace("[待补充]", "[已补充]").replace("[数据缺失]", "")
+            return ChatResponse(
+                step=FinalAnswer(
+                    answer=strengthened,
+                    citations=tool_results[-1].citations,
+                    key_facts=(),
+                )
+            )
+
+    monkeypatch.setattr(cli_module, "DeepSeekLlmClient", _FakeFixLlmClient)
 
     exit_code, stdout, stderr = _run([
         "fix",
         "--fund-code", "004393",
         "--chapter", "3",
+        "--llm",
         "--work-dir", str(work_dir),
     ])
 
     assert exit_code == SUCCESS_EXIT_CODE, stderr
     assert "补强占位符: 2" in stdout
     assert "保留占位符: 0" in stdout
-    assert len(captured_content) == 1
-    assert "Ch3 content" in captured_content[0]
-    assert "Ch1 content" not in captured_content[0]
-    assert "Ch4 content" not in captured_content[0]
+    assert any("Ch3 content" in prompt for prompt in recorded_prompts)
+    assert not any("Ch1 content" in prompt for prompt in recorded_prompts)
+    assert not any("Ch4 content" in prompt for prompt in recorded_prompts)
+    updated = report_path.read_text(encoding="utf-8")
+    assert "[已补充]" in updated
+    assert "[数据缺失]" not in updated
 
 
 # ── repair 子命令测试 ──────────────────────────────────────────────────
@@ -3340,3 +3535,53 @@ class TestPhase72Smoke:
         help_text = parser.format_help()
         for cmd in ("repair", "regenerate", "fix", "interactive", "generate"):
             assert cmd in help_text, f"'{cmd}' 未出现在 --help 中"
+
+
+def test_interactive_precheck_shares_decision_a_source(tmp_path: Path) -> None:
+    """main.py 用户输入预检与 runner 终答守卫同一判据（决策 A 单一真源）。"""
+
+    from unittest import mock
+
+    from fund_agent.service.chat_service import ChatService, ChatTurnResponse
+
+    work_dir = tmp_path / "work"
+    _write_catalog(work_dir, [
+        {"document_id": "doc-2024", "year": 2024, "fund_code": "004393"},
+    ])
+    ok_response = ChatTurnResponse(answer="好的。")
+
+    # 决策 A 事实性描述（放行）：预检不提示
+    stdout_fact = io.StringIO()
+    with mock.patch("sys.stdin", io.StringIO("\n报告期内本基金增持了银行。\nexit\n")), mock.patch.object(
+        ChatService, "chat_turn", return_value=ok_response
+    ):
+        run_cli(
+            ["interactive", "--fund-code", "004393", "--work-dir", str(work_dir)],
+            stdout=stdout_fact,
+            stderr=io.StringIO(),
+        )
+    assert "投资建议关键词" not in stdout_fact.getvalue()
+
+    # 决策 A 指令性表述（拦截）：预检提示
+    stdout_directive = io.StringIO()
+    with mock.patch("sys.stdin", io.StringIO("\n当前适合买入该基金。\nexit\n")), mock.patch.object(
+        ChatService, "chat_turn", return_value=ok_response
+    ):
+        run_cli(
+            ["interactive", "--fund-code", "004393", "--work-dir", str(work_dir)],
+            stdout=stdout_directive,
+            stderr=io.StringIO(),
+        )
+    assert "投资建议关键词" in stdout_directive.getvalue()
+
+    # 修正后：裸 应（应主要投资于）不再命中指令动词 → 预检不提示
+    stdout_yingshi = io.StringIO()
+    with mock.patch("sys.stdin", io.StringIO("\n基金合同载明应主要投资于股票资产。\nexit\n")), mock.patch.object(
+        ChatService, "chat_turn", return_value=ok_response
+    ):
+        run_cli(
+            ["interactive", "--fund-code", "004393", "--work-dir", str(work_dir)],
+            stdout=stdout_yingshi,
+            stderr=io.StringIO(),
+        )
+    assert "投资建议关键词" not in stdout_yingshi.getvalue()

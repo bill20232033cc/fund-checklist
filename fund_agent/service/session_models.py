@@ -63,6 +63,9 @@ class Turn:
         citations: assistant 回答的 citation 引用列表。
         tool_trace: 工具调用轨迹摘要。
         tool_calls: 结构化工具调用摘要列表。
+        original_content: 被投资建议检测拦截前的原始回答；未拦截时为 None。
+        blocked_terms: 触发投资建议拦截的词元（按文本首次命中顺序）；
+            未拦截时为空元组。
         timestamp: ISO 8601 时间戳。
     """
 
@@ -71,6 +74,8 @@ class Turn:
     citations: tuple[str, ...] = ()
     tool_trace: tuple[str, ...] = ()
     tool_calls: tuple[ToolCallSummary, ...] = ()
+    original_content: str | None = None
+    blocked_terms: tuple[str, ...] = ()
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 

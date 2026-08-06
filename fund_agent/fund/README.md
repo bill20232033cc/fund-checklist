@@ -12,6 +12,8 @@
 - `DoclingConverter` 使用 `docling.document_converter.DocumentConverter.convert()` 把受控 PDF bytes 转成 Docling JSON，并把输出写到调用方指定的 tmp/cache 根目录。
 - `DoclingDocumentStore` 只从 Docling JSON 暴露受控 section、table、search、locator、citation 模型，不暴露 raw JSON、本地 PDF path 或 cache path。
 - `search_document` 的检索投影覆盖 section text、table caption 和 `DEFAULT_TABLE_MAX_ROWS` 内的 bounded table rows；table-backed result 返回 `table_ref`、table locator、citation 和受控 `match_kind`。
+- `search_document` 对 query 与正文/表格行先做空白归一化（`re.sub` 去空白）再计数，命中后返回原文摘录；表头碎片（如 `份额净值 增长率①`）可命中 `净值增长率`。
+- `list_tables` 的 caption 为空或仅含页码/单位噪声（如 `第 N 页 共 M 页`、`单位：人民币元`）时，回填所在章节标题作为 evidence。
 - `match_kind` 取值固定为 `section_text`、`table_caption`、`table_row`；row 命中摘录只返回命中行的有界文本，不返回整表。
 - parser contract 当前使用 Docling JSON 顶层 `texts[]` 和 `tables[]`：章节来自 `texts[].label == "section_header"`，正文来自 `texts[].text`，locator 来自 `self_ref` 与 `prov[].page_no/bbox`，表格来自 `tables[].data.table_cells[]`。
 - parser health 要求存在可读文本、章节或全文替代索引，以及可检索文本；表格可为空。

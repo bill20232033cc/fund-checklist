@@ -127,9 +127,9 @@ class TestInteractiveSceneConfig:
         """interactive scene temperature 更高（0.7）。"""
         assert INTERACTIVE_SCENE_CONFIG.model.temperature == 0.7
 
-    def test_max_iterations_20(self):
-        """interactive scene 允许多达 20 次迭代。"""
-        assert INTERACTIVE_SCENE_CONFIG.runtime.max_iterations == 20
+    def test_max_iterations_12(self):
+        """interactive scene 迭代上限为 12（2026-08-05 裁决，配合空结果强制收敛）。"""
+        assert INTERACTIVE_SCENE_CONFIG.runtime.max_iterations == 12
 
     def test_five_fragments(self):
         """interactive scene 比 ask 多 1 个 fragment（共 5 个）。"""
@@ -146,10 +146,11 @@ class TestInteractiveSceneConfig:
         assert "aggregate_multi_year_annual_performance" in INTERACTIVE_SCENE_CONFIG.allowed_tools
 
     def test_context_slots_declared(self):
-        """interactive 声明了 runtime、fund_context、memory 三个 slot。"""
+        """interactive 声明了 runtime、fund_context、memory、retrieval 等 slot。"""
         assert "runtime" in INTERACTIVE_SCENE_CONFIG.context_slots
         assert "fund_context" in INTERACTIVE_SCENE_CONFIG.context_slots
         assert "memory" in INTERACTIVE_SCENE_CONFIG.context_slots
+        assert "retrieval" in INTERACTIVE_SCENE_CONFIG.context_slots
 
     def test_has_history_slot(self):
         """interactive scene 的 context_slots 包含 history。"""
@@ -165,6 +166,54 @@ class TestInteractiveSceneConfig:
 def _prompts_dir() -> Path:
     """Return the real prompts/ template directory."""
     return Path(__file__).resolve().parents[3] / "fund_agent" / "service" / "prompts"
+
+
+class TestPromptGuidanceContent:
+    """S4 prompt 引导内容测试（真实 fragment 组合后断言硬规则存在）。"""
+
+    @pytest.fixture
+    def composer(self) -> PromptComposer:
+        """使用真实 prompts 目录的 PromptComposer。"""
+
+        return PromptComposer(template_dir=_prompts_dir())
+
+    def _compose(self, composer: PromptComposer, scene_config: SceneConfig) -> str:
+        """组合 scene 的 system message。"""
+
+        return composer.compose_from_scene(scene_config, contributions={}).system_message
+
+    def test_interactive_no_fact_rule_hard(self, composer: PromptComposer):
+        """interactive：观点类回答只陈述客观事实、拒绝判断、禁建议预测措辞。"""
+
+        message = self._compose(composer, INTERACTIVE_SCENE_CONFIG)
+        assert "禁止发起空搜索" in message
+        assert "必须直接返回 JSON" in message
+        assert "中性表述" in message
+        assert "只陈述年报客观事实" in message
+        assert "无法给出判断" in message
+        assert "操作建议措辞" in message
+        assert "禁止预测未来收益或市场走势" in message
+        assert "示例" in message
+
+    def test_interactive_empty_search_budget_rule(self, composer: PromptComposer):
+        """interactive：连续 2 次无命中即停止搜索，不得耗尽预算。"""
+
+        message = self._compose(composer, INTERACTIVE_SCENE_CONFIG)
+        assert "连续 2 次无命中" in message
+        assert "未找到相关数据" in message
+        assert "耗尽预算" in message
+
+    def test_ask_no_fact_and_ref_copy_rules(self, composer: PromptComposer):
+        """ask：中性表述/拒绝判断/禁预测 + 连续 2 次无命中即停 + ref 复制。"""
+
+        message = self._compose(composer, ASK_SCENE_CONFIG)
+        assert "禁止发起空搜索" in message
+        assert "中性表述" in message
+        assert "只陈述年报客观事实" in message
+        assert "无法给出判断" in message
+        assert "禁止预测未来收益或市场走势" in message
+        assert "连续 2 次无命中" in message
+        assert "必须从 search_document / list_tables 结果中复制" in message
 
 
 # ── Fix Scene Config ─────────────────────────────────────────────

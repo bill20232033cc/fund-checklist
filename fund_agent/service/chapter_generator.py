@@ -94,6 +94,8 @@ LLM_ANALYSIS_PROMPTS: dict[int, str] = {
         "- 分析超额收益(A=R-B)的趋势：是结构性的还是阶段性的\n"
         "- 判断超额收益是否为正且稳定\n"
         "- 用定性描述（如'上升''下降''稳定''由正转负'），不要重复数字\n"
+        "- 数据表中标注为「缺失」的单元格表示年报未披露对应业绩字段；禁止用其他列数据"
+        "（如费率列）或推算值补空，分析时声明该年份数据缺失\n"
         "- 可以引用数据表中的数字，但不得编造数据表中不存在的数字"
     ),
     3: (
@@ -268,15 +270,15 @@ def generate_data_table(
         product_def = compute_product_definition(fund_name, fund_code, fund_manager)
 
         latest = performance.get(report_year, {})
-        latest_nav = latest.get("nav_growth_rate", "N/A")
-        latest_bench = latest.get("benchmark_return_rate", "N/A")
-        latest_excess = latest.get("excess_return", "N/A")
+        latest_nav = latest.get("nav_growth_rate", "缺失")
+        latest_bench = latest.get("benchmark_return_rate", "缺失")
+        latest_excess = latest.get("excess_return", "缺失")
 
         # 计算多年超额收益趋势
         excess_trend = ""
         excess_years = sorted(performance.keys())
         if len(excess_years) >= 2:
-            excesses = [performance[y].get("excess_return", "N/A") for y in excess_years]
+            excesses = [performance[y].get("excess_return", "缺失") for y in excess_years]
             excess_trend = ", ".join(f"{y}年:{e}" for y, e in zip(excess_years, excesses))
 
         # 最新费率
@@ -367,12 +369,14 @@ def generate_data_table(
             "| 年份 | 净值增长率(R) | 基准收益率(B) | 超额收益(A=R-B) |",
             "|------|-------------|-------------|----------------|",
         ])
-        for year in sorted(performance.keys()):
-            p = performance[year]
+        # 性能年份与费率年份取并集：业绩缺失年份显式标「缺失」，
+        # 避免 LLM 组装时把相邻费率列值错位补进业绩列。
+        for year in sorted(set(performance.keys()) | set(fees.keys())):
+            p = performance.get(year, {})
             lines.append(
-                f"| {year} | {p.get('nav_growth_rate', 'N/A')} | "
-                f"{p.get('benchmark_return_rate', 'N/A')} | "
-                f"{p.get('excess_return', 'N/A')} |"
+                f"| {year} | {p.get('nav_growth_rate', '缺失')} | "
+                f"{p.get('benchmark_return_rate', '缺失')} | "
+                f"{p.get('excess_return', '缺失')} |"
             )
         # 费率作为成本C（动态列：展示所有提取到的费率类型）
         lines.extend(["", "## 成本数据(C)", ""])
@@ -430,6 +434,8 @@ def generate_data_table(
             lines.extend(["", "**数据完整性声明**：基金经理信息未提取成功。以下仅展示持仓行为数据，无法进行言行一致性分析。", ""])
         # 持仓变化作为实际行为
         lines.extend(["", "## 实际持仓行为"])
+        if evidence is not None and evidence.holdings_source_note:
+            lines.extend(["", f"**持仓数据来源**：{evidence.holdings_source_note}", ""])
         for year in sorted(holdings.keys()):
             lines.append(f"\n### {year} 年前十大持仓")
             lines.append("| 排名 | 股票代码 | 股票名称 | 占净值比 |")
@@ -439,6 +445,8 @@ def generate_data_table(
 
         # 预计算持仓集中度指标（避免 LLM 自行计算触发 hallucination）
         lines.extend(["", "## 持仓集中度（预计算）", ""])
+        if evidence is not None and evidence.holdings_source_note:
+            lines.extend([f"**持仓集中度数据来源**：{evidence.holdings_source_note}", ""])
         lines.append("| 年份 | 前五大合计(%) | 前十大合计(%) | 第一大重仓(%) | 第一大重仓股票 |")
         lines.append("|------|-------------|-------------|-------------|--------------|")
         for year in sorted(holdings.keys()):
@@ -474,7 +482,7 @@ def generate_data_table(
                 lines.extend(['| 年份 | 净值增长率 | 基准收益率 |', '|------|-----------|-----------|'])
                 for year in sorted(performance.keys()):
                     p = performance[year]
-                    lines.append(f'| {year} | {p.get("nav_growth_rate", "N/A")} | {p.get("benchmark_return_rate", "N/A")} |')
+                    lines.append(f'| {year} | {p.get("nav_growth_rate", "缺失")} | {p.get("benchmark_return_rate", "缺失")} |')
             base_content = '\n'.join(lines)
         else:
             base_content = "## 投资者获得感\n\n投资者实际收益数据暂不可用，详见原始年报。"
@@ -684,14 +692,19 @@ def generate_data_table(
         # 持仓集中度
         for year in sorted(holdings.keys()):
             top5_pct = sum(_safe_float_pct(h.percentage) for h in holdings[year][:5])
-            lines.append(f"\n{year}年前五大持仓集中度: {top5_pct:.2f}%")
+            source_suffix = (
+                f"（{evidence.holdings_source_note}）"
+                if evidence is not None and evidence.holdings_source_note
+                else ""
+            )
+            lines.append(f"\n{year}年前五大持仓集中度: {top5_pct:.2f}%{source_suffix}")
         # 业绩波动
         lines.extend(["", "## 业绩波动"])
         lines.append("| 年份 | 净值增长率 | 超额收益 |")
         lines.append("|------|-----------|---------|")
         for year in sorted(performance.keys()):
             p = performance[year]
-            lines.append(f"| {year} | {p.get('nav_growth_rate', 'N/A')} | {p.get('excess_return', 'N/A')} |")
+            lines.append(f"| {year} | {p.get('nav_growth_rate', '缺失')} | {p.get('excess_return', '缺失')} |")
 
         # 被动基金：三类特有风险数据
         if is_passive:
@@ -782,8 +795,8 @@ def generate_data_table(
         lines = [
             "## 判断依据数据",
             "",
-            f"- 最新净值增长率: {latest.get('nav_growth_rate', 'N/A')}",
-            f"- 最新超额收益: {latest.get('excess_return', 'N/A')}",
+            f"- 最新净值增长率: {latest.get('nav_growth_rate', '缺失')}",
+            f"- 最新超额收益: {latest.get('excess_return', '缺失')}",
         ]
         if fund_manager:
             lines.append(f"- 基金经理: {fund_manager.name}（从业{fund_manager.years_of_service}）")
@@ -867,6 +880,8 @@ def generate_evidence_section(
             if cit_lines:
                 lines.append("**持仓数据来源**：")
                 lines.extend(cit_lines)
+        if evidence.holdings_source_note:
+            lines.append(f"**持仓来源说明**：{evidence.holdings_source_note}")
 
     if chapter_id in (2, 5, 7):  # 费率相关
         if evidence.fee_citations:

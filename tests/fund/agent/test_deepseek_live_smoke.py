@@ -301,10 +301,11 @@ def test_live_smoke_retries_at_most_once_and_fails_closed() -> None:
     assert len(transport.requests) == 6
 
 
-def test_live_smoke_malformed_provider_response_fails_without_retry() -> None:
-    """provider response 不可解析时必须 fail，不用 retry 掩盖解析错误。"""
+def test_live_smoke_malformed_provider_response_fails_after_bounded_retry() -> None:
+    """provider response 不可解析时有界重试 1 次，仍不可解析则 fail-closed（不掩盖解析错误）。"""
 
-    transport = QueueTransport([DeepSeekChatResponse(status_code=200, body="{not-json")])
+    malformed = DeepSeekChatResponse(status_code=200, body="{not-json")
+    transport = QueueTransport([malformed, malformed])
     result, attempts = _run_live_smoke(
         env={_LIVE_OPT_IN_ENV: "1", _DEEPSEEK_API_KEY_ENV: "unit-test-key"},
         transport=transport,
@@ -312,7 +313,10 @@ def test_live_smoke_malformed_provider_response_fails_without_retry() -> None:
 
     assert isinstance(result.failure, ToolFailure)
     assert result.failure.code is FailureCode.LLM_MALFORMED_RESPONSE
+    # S6 契约：1 次 smoke 迭代内 next_step 对 malformed 重试 1 次 → 2 次 transport 请求；
+    # attempts 为 smoke 迭代计数（malformed 非 unavailable，首轮即 break，恒为 1）
     assert attempts == 1
+    assert len(transport.requests) == 2
 
 
 def test_live_smoke_does_not_leak_api_key_or_write_raw_response_artifact() -> None:

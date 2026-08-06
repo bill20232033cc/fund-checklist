@@ -38,6 +38,8 @@ PDF
 
 已实现的 CLI 入口：`read` / `multi-year` / `import` / `holdings` / `download` / `allocation` / `fees` / `audit` / `deep-audit` / `generate` / `ask` / `interactive` / `repair` / `regenerate` / `fix`。
 
+`generate --format pdf` 的渲染走引擎 fallback 链：`xelatex` → Chrome headless（pandoc md→HTML + 内嵌打印 CSS → `--print-to-pdf`，A4 794×1123）→ 回退 Markdown + warning；pandoc/xelatex/Chrome 均 `shutil.which` 前置探测，打印 CSS 为原创资产（详见 design.md §6.9），不依赖 LaTeX 发行版。
+
 验收约束（适用于所有阶段）：
 - 不接受仅 Service / ToolService 层测试；任何阶段的验收必须包含 Host / Agent loop 或 CLI 端到端 smoke。
 
@@ -77,6 +79,8 @@ Phase 7.2 已裁决（2026-07-27），✅ 已完成（2026-07-27）。交互体�
 - 扩展 alias 覆盖；Rich 输出格式化；多轮对话增强 ✅
 - 详见 `docs/implementation-control.md` Phase 7.2 节
 
+Phase 7.2 fix 场景补接线（2026-08-05，Mimo review ACCEPTED）：`fix` CLI 已接入 `FIX_SCENE_CONFIG` → ChatService（`PinnedState.user_constraints` 透传 chapter_content/audit_feedback/chapter_contract，workdir tool_service，`--llm`）；修复此前 `_run_fix_command` 惰性导入已移除符号导致的运行断链。测试数据源（`test_docling_conversion.py` / `tests/README.md` smoke 命令）统一为 `基金年报/011649_易方达逆向投资混合_2025_annual_report.pdf`（含 2021-2025 五年完整年报）。
+
 Phase 7.3 已完成（2026-07-29）。对话历史注入 LLM context（方案 B — Prompt 层编织）：
 - **方案 B 优化设计**：`docs/phase7.3-option-b-optimization.md`（DS 二审有条件通过）
 - **核心变更**：ToolCallSummary + history contribution 注入 system prompt + truncate_turns + temperature 透传修复（5 处）+ document_id 前缀匹配
@@ -84,7 +88,26 @@ Phase 7.3 已完成（2026-07-29）。对话历史注入 LLM context（方案 B 
 - **失败模式缓解**：9 项（FM1-FM9），详见优化设计文档
 - **Bug 修复**：5 处 temperature 未透传（deepseek_llm.py / chat_service.py / extraction.py / main.py）+ document_id 前缀匹配（llm_tool_loop.py）
 - **DS 二审裁决**：有条件通过（已处理全部 3 项）
+Phase 7.4 已实现（2026-08-02）：interactive e2e 失败修复 S0-S7 全部 ACCEPTED，opt-in live e2e 11/11 通过（0 失败 / 0 误拦截）：
+- **失败自愈**：工具失败（ToolFailure）回喂 LLM 作为下一轮输入（可修正 section_ref/工具名/document_id），重复失败调用去重短路；provider 畸形响应仍 fail-closed，不回喂。
+- **失败轮可观测性**：失败轮成对持久化进 session（含 tool_calls/tool_trace）；被投资建议拦截的回答保留原文与触发词；`--enable-tool-trace` 可显示失败路径工具调用（注意 e276ff3 曾误用不存在的 `entry.status` 字段，实现以 `result_kind`/`failure_code` 为准）。
+- **tool call 容错**：`document_id` 缺失由 runner 用 expected 补全；工具名仅格式归一化（去空白/尾部括号参数）后白名单匹配，不做语义映射。
+- **prompt 硬规则**：无事实目标问题直接 final answer；空搜索最多换 1 次词后声明未找到；section_ref/table_ref 一律复制不猜测。
+- **投资建议判据（决策 A）**：弱词（买入/卖出/增持/减持）在 ±100 字符窗口内遇指令动词（建议/应当/可考虑/适合/值得持有/应买入/应卖出/应增持/应减持）拦截；否则窗口内含年报事实性上下文词（策略/报告期内/期末/持仓/重仓/股票投资明细/财务报表附注/买入返售/卖出回购/基金合同 等）放行；否则 fail-closed 兜底。强指令词与预期收益预测句式始终 fail-closed；main.py 用户输入预检已合一到 `llm_tool_loop.contains_investment_advice`（单一真源）。指令动词不使用单字「应」（会误命中 应付/应计）。
+- **provider malformed 有界重试**：DeepSeek response 不可解析时最多重试 1 次（stream + 非 stream），重试后仍 fail-closed；不回喂。
+- **interactive 终答守卫改写重试**：final answer 因投资建议关键词被拦时最多重答 1 次（重答仍过同一守卫）；ask/generate 不重试。
+- 计划与 goal 产物：`.sisyphus/plans/interactive-e2e-fix-20260802.md`、`.sisyphus/goals/phase7.4-goal.md`、`.sisyphus/plans/phase7.4-s3-caliber-proposal.md`（均经 Mimo review ACCEPTED）。
 - 禁止 Service / UI / Host / 展示层 / LLM prompt 直接消费 raw PDF、raw Docling JSON、PDF cache path、本地路径、URL secret 或 parser private payload。
+
+interactive 问答质量语义（2026-08-05，Mimo review ACCEPTED）：受控检索路由新增 `manager_holdings` profile（9.4 持有本基金；规模/份额/基准/超额/十大持仓 profile 排后续）；search 连续 2 次 0 命中由 runner 强制收敛（有 profile 自动候选词重试最多 1 轮），候选词注入在 Service 层、收敛执行在 Agent 层（runner 不 import service）；终答保持 JSON 契约 + runner 解包，answer 与 evidence 连续重叠 ≥40 字符或 >800 字时有界重答 1 次；interactive `max_iterations` = 12；方案 E（跳过 evidence/citation 校验）不变。
+
+Phase 7.5 已裁决（2026-08-05）：generate 报告生成章节级并发（设计经 Mimo review ACCEPTED，实现完成，待 controller review）：
+- **并发语义**：A 前置串行 → B Ch1-6 并行（写→审计→重写闭环在 worker 内）→ C 决策串行 → D Ch0/Ch7 并行收尾；B/D 之间强制 join；输出按 chapter_id 0..7 稳定组装，warnings 按章排序。
+- **并发上限 lane**：`chapter_concurrency`（CLI `--concurrency` → request 字段 → env `FUND_CHECKLIST_CHAPTER_CONCURRENCY` → 默认 4，范围 1..8；1 = 串行等价）；Service 层唯一解析点；client 无 `clone()` 时回退串行 + warning。
+- **每 worker 独立 LLM client**：`DeepSeekLlmClient.clone()`（独立 `_cumulative_usage`）；章节闭环内 3 处 `self._llm_client` 引用（LlmAuditor / ChapterRepairer / `_generate_chapter_content`）显式下传局部 client。
+- **线程安全硬约束**：worker 禁止直接 print（进度输出必须经主线程）；`_process_states` 按章 key + Lock；ArtifactStore 按章分文件唯一 writer；共享输入全阶段只读。
+- **边界**：不引入 dayu runtime/代码/async 事件循环（DeepSeek 调用为同步 `generate_text`）；复制 Dayu 代码需先过 license gate；不改 `search_document` / Service reading tools 公共契约；不触碰 Phase 7.4 与 F1.1 未提交区域。
+- 设计产物：`.sisyphus/plans/phase7.5-chapter-concurrency-design.md`（Mimo review ACCEPTED）；命名 Phase 7.5，备选 Slice 14D。
 - Dayu 只能作为架构参考和能力来源；禁止直接引入 `dayu-agent`、`dayu.host`、`dayu.engine` 作为生产 runtime。
 - 复制或改写 Dayu 代码必须先经过 license/compliance gate。
 - Docling 为当前 production path：PDF 通过 integrity check 后进入 `DoclingConverter`，Docling JSON 通过 parser_health 后进入 `DoclingDocumentStore`。

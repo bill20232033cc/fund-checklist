@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import asdict, dataclass, replace
 from typing import Protocol, TypeAlias
@@ -49,6 +51,18 @@ _MAX_TABLE_ROWS = 8
 _MAX_EVIDENCE_CHARS = 4096
 _EVIDENCE_HEAD_CHARS = 3072
 _EVIDENCE_TAIL_CHARS = 1024
+# interactive 空结果强制收敛：search 连续 2 次 0 命中后不再等待模型。
+_INTERACTIVE_EMPTY_SEARCH_CONVERGE_ANSWER = "未找到相关数据"
+_INTERACTIVE_EMPTY_SEARCH_CONVERGE_LIMIT = 2
+# interactive 终答质量：原文粘贴检测（连续重叠 ≥40 字符）与摘要截断（前 200 字）。
+_INTERACTIVE_FINAL_ANSWER_MAX_CHARS = 800
+_INTERACTIVE_FINAL_ANSWER_TARGET_CHARS = 200
+_INTERACTIVE_EVIDENCE_OVERLAP_MIN_CHARS = 40
+_INTERACTIVE_SUMMARY_TRUNCATE_NOTE = "\n\n（内容过长，已截断为前 200 字摘要）"
+_INTERACTIVE_QUALITY_RETRY_MESSAGE = (
+    "你的上一条回答粘贴了工具返回原文或超过 200 字，"
+    "请用自己的话概括年报事实，首次回答不超过 200 字。"
+)
 _TOOL_NOT_ALLOWED_MESSAGE = "LLM 工具调用不被允许"
 _TOOL_ARGUMENT_MESSAGE = "LLM 工具调用参数不完整"
 _NO_EVIDENCE_MESSAGE = "LLM 最终回答缺少受控工具证据"
@@ -56,14 +70,132 @@ _MISSING_CITATION_MESSAGE = "LLM 最终回答缺少受控 citation"
 _UNSUPPORTED_FACT_MESSAGE = "LLM 最终回答包含未由工具结果支持的关键事实"
 _STEP_LIMIT_MESSAGE = "LLM 工具调用超过限制"
 _UNAVAILABLE_MESSAGE = "LLM 工具循环暂不可用"
-_INVESTMENT_ADVICE_KEYWORDS: frozenset[str] = frozenset(
+# 强指令词：无论是否处于引用上下文都 fail-closed。
+_INVESTMENT_ADVICE_STRONG_KEYWORDS: frozenset[str] = frozenset(
     {
-        "买入", "卖出", "建议买入", "建议卖出", "建议加仓", "建议减仓",
+        "建议买入", "建议卖出", "建议加仓", "建议减仓",
         "推荐买入", "推荐卖出", "强烈建议", "强烈推荐", "强烈买入", "强烈卖出",
-        "增持", "减持", "目标价", "预期收益", "预计涨幅", "预期回报",
+        "目标价", "预期收益", "预计涨幅", "预期回报",
     }
 )
+# 弱指令词：出现在年报引用上下文（50 字符窗口内含引用关键词）时豁免。
+_INVESTMENT_ADVICE_QUOTE_EXEMPT_KEYWORDS: frozenset[str] = frozenset(
+    {"买入", "卖出", "增持", "减持"}
+)
+_INVESTMENT_ADVICE_KEYWORDS: frozenset[str] = (
+    _INVESTMENT_ADVICE_STRONG_KEYWORDS | _INVESTMENT_ADVICE_QUOTE_EXEMPT_KEYWORDS
+)
+# 事实性上下文词（决策 A）：弱词处于这些词 ±100 字符窗口内且无指令动词时视为年报事实描述。
+_INVESTMENT_ADVICE_QUOTE_CONTEXT_KEYWORDS: tuple[str, ...] = (
+    "策略", "宣称", "原文", "摘录", "运作分析",
+    "报告期内", "期末", "持仓", "重仓", "股票投资明细",
+    "投资范围", "财务报表附注", "买入返售", "卖出回购", "基金合同",
+)
+_INVESTMENT_ADVICE_QUOTE_CONTEXT_WINDOW_CHARS = 100
+# 指令动词（决策 A）：弱词窗口内出现任一指令动词时优先判定为操作建议。
+# 使用复合指令形式，不用裸 应（避免误命中 应付/应计/应主要投资于 等年报事实表述）。
+_INVESTMENT_ADVICE_DIRECTIVE_KEYWORDS: tuple[str, ...] = (
+    "建议", "应当", "可考虑", "适合", "值得持有",
+    "应买入", "应卖出", "应增持", "应减持",
+)
 _INVESTMENT_ADVICE_MESSAGE = "LLM 最终回答包含投资建议关键词"
+_INVESTMENT_ADVICE_PREDICTION_KEYWORD = "预期收益"
+# 精确匹配预测句式：负向断言排除年报标准术语 预期收益率 / 预期收益及预期风险。
+_INVESTMENT_ADVICE_PREDICTION_PATTERN = re.compile(r"预期收益(?!率|及)")
+
+
+def contains_investment_advice(text: str) -> bool:
+    """统一投资建议检测（B1 决策 A 单一真源，runner 与 chat_service 共用）。
+
+    强指令词（建议买入/强烈推荐/目标价等；预期收益 精确匹配预测句式，
+    排除年报术语 预期收益率 / 预期收益及预期风险）命中即拦截；
+    弱指令词（买入/卖出/增持/减持）按决策 A 判定：
+    - 出现处 ±100 字符窗口内含指令动词（建议/应当/可考虑/适合/值得持有/应买入/应卖出/应增持/应减持）→ 拦截；
+    - 否则窗口内含事实性上下文词（策略/报告期内/持仓/重仓/财务报表附注/基金合同 等）→ 放行；
+    - 否则 → 拦截（fail-closed 兜底）。
+
+    参数:
+        text: 待检测文本。
+
+    返回:
+        判定为投资建议时返回 True，否则 False。
+    """
+
+    for keyword in _INVESTMENT_ADVICE_STRONG_KEYWORDS:
+        if keyword == _INVESTMENT_ADVICE_PREDICTION_KEYWORD:
+            matched = _INVESTMENT_ADVICE_PREDICTION_PATTERN.search(text) is not None
+        else:
+            matched = keyword in text
+        if matched:
+            return True
+    for keyword in _INVESTMENT_ADVICE_QUOTE_EXEMPT_KEYWORDS:
+        start = 0
+        while True:
+            kw_idx = text.find(keyword, start)
+            if kw_idx < 0:
+                break
+            context_start = max(0, kw_idx - _INVESTMENT_ADVICE_QUOTE_CONTEXT_WINDOW_CHARS)
+            context_end = min(
+                len(text),
+                kw_idx + len(keyword) + _INVESTMENT_ADVICE_QUOTE_CONTEXT_WINDOW_CHARS,
+            )
+            context_window = text[context_start:context_end]
+            if any(dk in context_window for dk in _INVESTMENT_ADVICE_DIRECTIVE_KEYWORDS):
+                return True  # 弱词 + 指令动词 → 操作建议
+            if any(ck in context_window for ck in _INVESTMENT_ADVICE_QUOTE_CONTEXT_KEYWORDS):
+                start = kw_idx + len(keyword)  # 年报事实描述 → 放行该出现处
+                continue
+            return True  # 无事实上下文词 → fail-closed 兜底拦截
+    return False
+
+
+def matched_investment_advice_terms(text: str) -> tuple[str, ...]:
+    """返回 text 中命中的投资建议词元（与 contains_investment_advice 同判据，决策 A）。
+
+    强指令词命中即收录；弱指令词在出现处窗口内含指令动词、或窗口内无事实性
+    上下文词时收录（与 contains_investment_advice 的拦截条件一致）；
+    结果按文本首次命中顺序排列，同一词元只收录一次。
+    判定与 contains_investment_advice 保持一致：
+    bool(matched_investment_advice_terms(text)) == contains_investment_advice(text)。
+
+    参数:
+        text: 待检测文本。
+
+    返回:
+        命中词元元组；无命中时为空元组。
+    """
+
+    hits: list[tuple[int, str]] = []
+    for keyword in _INVESTMENT_ADVICE_STRONG_KEYWORDS:
+        if keyword == _INVESTMENT_ADVICE_PREDICTION_KEYWORD:
+            match = _INVESTMENT_ADVICE_PREDICTION_PATTERN.search(text)
+            if match is not None:
+                hits.append((match.start(), keyword))
+        else:
+            index = text.find(keyword)
+            if index >= 0:
+                hits.append((index, keyword))
+    for keyword in _INVESTMENT_ADVICE_QUOTE_EXEMPT_KEYWORDS:
+        start = 0
+        while True:
+            kw_idx = text.find(keyword, start)
+            if kw_idx < 0:
+                break
+            context_start = max(0, kw_idx - _INVESTMENT_ADVICE_QUOTE_CONTEXT_WINDOW_CHARS)
+            context_end = min(
+                len(text),
+                kw_idx + len(keyword) + _INVESTMENT_ADVICE_QUOTE_CONTEXT_WINDOW_CHARS,
+            )
+            context_window = text[context_start:context_end]
+            if any(dk in context_window for dk in _INVESTMENT_ADVICE_DIRECTIVE_KEYWORDS):
+                hits.append((kw_idx, keyword))
+                break  # 指令动词上下文 → 该弱词命中
+            if not any(ck in context_window for ck in _INVESTMENT_ADVICE_QUOTE_CONTEXT_KEYWORDS):
+                hits.append((kw_idx, keyword))
+                break  # 无事实上下文词 → 该弱词命中
+            start = kw_idx + len(keyword)
+    hits.sort(key=lambda item: (item[0], item[1]))
+    return tuple(keyword for _, keyword in hits)
 
 
 @dataclass(frozen=True)
@@ -167,10 +299,11 @@ class ToolResult:
     """返回给 injected LLM client 的受控工具结果。
 
     参数:
-        tool_name: 成功调用的工具名。
-        result: public reading tool 返回的受控数据模型。
-        citations: 从 result 中提取的 citation 元组。
-        evidence_text: 从 result 中提取的有界文本证据。
+        tool_name: 成功调用的工具名；失败反馈条目为被拒绝/失败的请求工具名。
+        result: public reading tool 返回的受控数据模型；失败反馈条目为 None。
+        citations: 从 result 中提取的 citation 元组；失败反馈条目为空。
+        evidence_text: 从 result 中提取的有界文本证据；失败反馈条目为空字符串。
+        failure: 工具失败分类与安全消息；成功时为 None。
 
     返回:
         不包含 raw PDF、raw Docling JSON、本地路径或 private loader 字段的结果对象。
@@ -179,10 +312,11 @@ class ToolResult:
         本模型不抛出业务异常。
     """
 
-    tool_name: ToolName
-    result: ControlledToolOutput
-    citations: tuple[Citation, ...]
-    evidence_text: str
+    tool_name: ToolName | str
+    result: ControlledToolOutput | None = None
+    citations: tuple[Citation, ...] = ()
+    evidence_text: str = ""
+    failure: ToolFailure | None = None
 
 
 @dataclass(frozen=True)
@@ -320,13 +454,22 @@ class LlmToolLoopRunner:
         self._aggregate_handler = aggregate_handler
         self._budget = budget
 
-    def run(self, *, document_id: str, query: str, scene: str = "ask") -> AgentRunResult:
+    def run(
+        self,
+        *,
+        document_id: str,
+        query: str,
+        scene: str = "ask",
+        candidate_queries: tuple[str, ...] | None = None,
+    ) -> AgentRunResult:
         """运行 injected LLM 工具调用循环。
 
         参数:
             document_id: public reading tools 使用的内容身份。
             query: 用户查询。
             scene: 调用场景（"ask"/"interactive"/"generate"），影响 citation 校验策略。
+            candidate_queries: 受控候选检索词（Service 层路由注入，interactive 场景
+                空结果时 runner 自动重试；runner 不 import service，只消费该列表）。
 
         返回:
             AgentRunResult；成功时 answer/citations 通过 evidence/citation 校验。
@@ -340,6 +483,9 @@ class LlmToolLoopRunner:
         seen_calls: dict[tuple, ToolResult] = {}
         total_usage = TokenUsage()
         budget = self._budget
+        empty_search_count = 0
+        auto_retry_rounds_used = False
+        used_search_queries: set[str] = set()
         for i in range(self._max_steps):
             try:
                 chat_response = self._llm_client.next_step(
@@ -360,25 +506,100 @@ class LlmToolLoopRunner:
 
             step = chat_response.step
             if isinstance(step, FinalAnswer):
-                return _final_result(step, tuple(tool_results), tuple(trace), token_usage=total_usage, scene=scene)
+                if scene == "interactive":
+                    step = _unwrap_final_answer_envelope(step)
+                final = _final_result(step, tuple(tool_results), tuple(trace), token_usage=total_usage, scene=scene)
+                if scene == "interactive":
+                    final = self._apply_interactive_final_guards(
+                        final=final,
+                        document_id=document_id,
+                        query=query,
+                        tool_results=tool_results,
+                        trace=trace,
+                        total_usage=total_usage,
+                        budget=budget,
+                        scene=scene,
+                    )
+                return final
             if isinstance(step, ToolCall):
                 call_key = _dedup_key(step)
                 if call_key in seen_calls:
                     tool_results.append(seen_calls[call_key])
+                    if scene == "interactive" and _coerce_tool_name(step.tool_name) is ToolName.SEARCH_DOCUMENT:
+                        cached = seen_calls[call_key]
+                        if _is_empty_search_result(cached):
+                            empty_search_count += 1
+                            if empty_search_count >= _INTERACTIVE_EMPTY_SEARCH_CONVERGE_LIMIT:
+                                return _empty_search_converged_result(tuple(trace), token_usage=total_usage)
+                        else:
+                            empty_search_count = 0
                     continue
                 tool_result = self._invoke_tool_call(step, expected_document_id=document_id, trace=trace)
                 if isinstance(tool_result, ToolFailure):
-                    return _failed_result(tuple(trace), tool_result.code, tool_result.message, token_usage=total_usage)
+                    # 失败回喂：转为带 failure 标记的 ToolResult，不终止整轮
+                    tool_result = _failure_tool_result(step, tool_result)
+                    tool_results.append(tool_result)
+                    seen_calls[call_key] = tool_result
+                    if budget is not None:
+                        tool_results = _cap_tool_results(tool_results, budget)
+                    continue
                 tool_results.append(tool_result)
                 seen_calls[call_key] = tool_result
                 if budget is not None:
                     tool_results = _cap_tool_results(tool_results, budget)
+                if scene == "interactive" and _coerce_tool_name(step.tool_name) is ToolName.SEARCH_DOCUMENT:
+                    search_query = step.query or ""
+                    used_search_queries.add(search_query)
+                    if _is_empty_search_result(tool_result):
+                        empty_search_count += 1
+                        if (
+                            not auto_retry_rounds_used
+                            and candidate_queries
+                            and empty_search_count < _INTERACTIVE_EMPTY_SEARCH_CONVERGE_LIMIT
+                        ):
+                            next_candidate = _next_auto_retry_query(
+                                candidate_queries, used_search_queries, query
+                            )
+                            if next_candidate is not None:
+                                auto_call = ToolCall(
+                                    tool_name=ToolName.SEARCH_DOCUMENT,
+                                    document_id=document_id,
+                                    query=next_candidate,
+                                    max_results=step.max_results,
+                                )
+                                auto_key = _dedup_key(auto_call)
+                                auto_result = self._invoke_tool_call(
+                                    auto_call, expected_document_id=document_id, trace=trace
+                                )
+                                if isinstance(auto_result, ToolFailure):
+                                    auto_result = _failure_tool_result(auto_call, auto_result)
+                                tool_results.append(auto_result)
+                                seen_calls[auto_key] = auto_result
+                                if budget is not None:
+                                    tool_results = _cap_tool_results(tool_results, budget)
+                                used_search_queries.add(next_candidate)
+                                auto_retry_rounds_used = True
+                                if _is_empty_search_result(auto_result):
+                                    empty_search_count += 1
+                                else:
+                                    empty_search_count = 0
+                        if empty_search_count >= _INTERACTIVE_EMPTY_SEARCH_CONVERGE_LIMIT:
+                            return _empty_search_converged_result(tuple(trace), token_usage=total_usage)
+                    else:
+                        empty_search_count = 0
                 continue
             return _failed_result(tuple(trace), FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE, token_usage=total_usage)
 
         return _force_answer_from_evidence(tuple(trace), tuple(tool_results), token_usage=total_usage)
 
-    def run_stream(self, *, document_id: str, query: str, scene: str = "ask") -> Iterator[StreamEvent]:
+    def run_stream(
+        self,
+        *,
+        document_id: str,
+        query: str,
+        scene: str = "ask",
+        candidate_queries: tuple[str, ...] | None = None,
+    ) -> Iterator[StreamEvent]:
         """运行 LLM 工具调用循环并产出 StreamEvent 流。
 
         tool call/result → TOOL_EVENT
@@ -400,6 +621,9 @@ class LlmToolLoopRunner:
         seen_calls: dict[tuple, ToolResult] = {}
         total_usage = TokenUsage()
         budget = self._budget
+        empty_search_count = 0
+        auto_retry_rounds_used = False
+        used_search_queries: set[str] = set()
         for i in range(self._max_steps):
             try:
                 chat_response = self._llm_client.next_step(
@@ -430,7 +654,20 @@ class LlmToolLoopRunner:
 
             step = chat_response.step
             if isinstance(step, FinalAnswer):
+                if scene == "interactive":
+                    step = _unwrap_final_answer_envelope(step)
                 final = _final_result(step, tuple(tool_results), tuple(trace), token_usage=total_usage, scene=scene)
+                if scene == "interactive":
+                    final = self._apply_interactive_final_guards(
+                        final=final,
+                        document_id=document_id,
+                        query=query,
+                        tool_results=tool_results,
+                        trace=trace,
+                        total_usage=total_usage,
+                        budget=budget,
+                        scene=scene,
+                    )
                 if final.failure is not None:
                     yield StreamEvent(
                         type=StreamEventType.ERROR,
@@ -469,6 +706,15 @@ class LlmToolLoopRunner:
                 call_key = _dedup_key(step)
                 if call_key in seen_calls:
                     tool_results.append(seen_calls[call_key])
+                    if scene == "interactive" and _coerce_tool_name(step.tool_name) is ToolName.SEARCH_DOCUMENT:
+                        cached = seen_calls[call_key]
+                        if _is_empty_search_result(cached):
+                            empty_search_count += 1
+                            if empty_search_count >= _INTERACTIVE_EMPTY_SEARCH_CONVERGE_LIMIT:
+                                yield from _empty_search_converged_events(trace, seq)
+                                return
+                        else:
+                            empty_search_count = 0
                     continue
                 yield StreamEvent(
                     type=StreamEventType.TOOL_EVENT,
@@ -478,12 +724,24 @@ class LlmToolLoopRunner:
                 seq += 1
                 tool_result = self._invoke_tool_call(step, expected_document_id=document_id, trace=trace)
                 if isinstance(tool_result, ToolFailure):
+                    # 失败回喂：发 TOOL_EVENT(result) 并继续循环，不在此处发 ERROR
+                    tool_result = _failure_tool_result(step, tool_result)
+                    tool_results.append(tool_result)
+                    seen_calls[call_key] = tool_result
+                    if budget is not None:
+                        tool_results = _cap_tool_results(tool_results, budget)
                     yield StreamEvent(
-                        type=StreamEventType.ERROR,
-                        payload={"code": tool_result.code.value, "message": tool_result.message},
+                        type=StreamEventType.TOOL_EVENT,
+                        payload={
+                            "phase": "result",
+                            "tool_name": str(tool_result.tool_name),
+                            "failure_code": tool_result.failure.code.value,
+                            "message": tool_result.failure.message,
+                        },
                         sequence=seq,
                     )
-                    return
+                    seq += 1
+                    continue
                 tool_results.append(tool_result)
                 seen_calls[call_key] = tool_result
                 if budget is not None:
@@ -499,6 +757,76 @@ class LlmToolLoopRunner:
                     sequence=seq,
                 )
                 seq += 1
+                if scene == "interactive" and _coerce_tool_name(step.tool_name) is ToolName.SEARCH_DOCUMENT:
+                    search_query = step.query or ""
+                    used_search_queries.add(search_query)
+                    if _is_empty_search_result(tool_result):
+                        empty_search_count += 1
+                        if (
+                            not auto_retry_rounds_used
+                            and candidate_queries
+                            and empty_search_count < _INTERACTIVE_EMPTY_SEARCH_CONVERGE_LIMIT
+                        ):
+                            next_candidate = _next_auto_retry_query(
+                                candidate_queries, used_search_queries, query
+                            )
+                            if next_candidate is not None:
+                                auto_call = ToolCall(
+                                    tool_name=ToolName.SEARCH_DOCUMENT,
+                                    document_id=document_id,
+                                    query=next_candidate,
+                                    max_results=step.max_results,
+                                )
+                                auto_key = _dedup_key(auto_call)
+                                yield StreamEvent(
+                                    type=StreamEventType.TOOL_EVENT,
+                                    payload={"phase": "call", "tool_name": str(auto_call.tool_name)},
+                                    sequence=seq,
+                                )
+                                seq += 1
+                                auto_result = self._invoke_tool_call(
+                                    auto_call, expected_document_id=document_id, trace=trace
+                                )
+                                if isinstance(auto_result, ToolFailure):
+                                    auto_result = _failure_tool_result(auto_call, auto_result)
+                                tool_results.append(auto_result)
+                                seen_calls[auto_key] = auto_result
+                                if budget is not None:
+                                    tool_results = _cap_tool_results(tool_results, budget)
+                                used_search_queries.add(next_candidate)
+                                auto_retry_rounds_used = True
+                                if auto_result.failure is not None:
+                                    yield StreamEvent(
+                                        type=StreamEventType.TOOL_EVENT,
+                                        payload={
+                                            "phase": "result",
+                                            "tool_name": str(auto_result.tool_name),
+                                            "failure_code": auto_result.failure.code.value,
+                                            "message": auto_result.failure.message,
+                                        },
+                                        sequence=seq,
+                                    )
+                                else:
+                                    yield StreamEvent(
+                                        type=StreamEventType.TOOL_EVENT,
+                                        payload={
+                                            "phase": "result",
+                                            "tool_name": str(auto_result.tool_name),
+                                            "citation_count": len(auto_result.citations),
+                                            "evidence_length": len(auto_result.evidence_text),
+                                        },
+                                        sequence=seq,
+                                    )
+                                seq += 1
+                                if _is_empty_search_result(auto_result):
+                                    empty_search_count += 1
+                                else:
+                                    empty_search_count = 0
+                        if empty_search_count >= _INTERACTIVE_EMPTY_SEARCH_CONVERGE_LIMIT:
+                            yield from _empty_search_converged_events(trace, seq)
+                            return
+                    else:
+                        empty_search_count = 0
                 continue
 
             yield StreamEvent(
@@ -540,6 +868,194 @@ class LlmToolLoopRunner:
                 sequence=seq,
             )
 
+    def _retry_final_answer_advice_guard(
+        self,
+        *,
+        document_id: str,
+        query: str,
+        tool_results: list[ToolResult],
+        trace: list[ToolTraceEntry],
+        total_usage: TokenUsage,
+        budget: ContextBudgetState | None,
+        scene: str,
+        original: AgentRunResult,
+    ) -> AgentRunResult:
+        """interactive 终答投资建议守卫失败时最多重试 1 次（query 追加纠正指令）。
+
+        仅 scene == "interactive" 且失败消息为投资建议关键词命中时调用；
+        用同 document_id / 同 tool_results、query 追加纠正指令重新调用 next_step，
+        新 FinalAnswer 仍走同一 _final_result 守卫。重试通过则返回新结果；
+        重试后仍失败、重试未产出 FinalAnswer 或 next_step 异常时返回原失败结果
+        （fail-closed，不改变其它失败类型语义）。
+
+        参数:
+            document_id: public reading tools 使用的内容身份。
+            query: 原用户查询。
+            tool_results: 已收集的工具结果（成功与失败回喂条目）。
+            trace: 工具调用轨迹。
+            total_usage: 已累计 token 用量。
+            budget: 上下文预算状态；None 时不做预算消费。
+            scene: 调用场景（仅 interactive 触发）。
+            original: 守卫失败的原 AgentRunResult。
+
+        返回:
+            重试成功的新 AgentRunResult；否则返回 original。
+        """
+
+        retry_query = (
+            f"{query}\n\n你的上一条回答被判定为包含投资建议措辞，"
+            "请只陈述年报客观事实，以中性表述重新回答。"
+        )
+        try:
+            chat_response = self._llm_client.next_step(
+                document_id=document_id,
+                query=retry_query,
+                tool_results=tuple(tool_results),
+                remaining_budget=max(0, self._max_steps - 1),
+            )
+        except Exception:
+            return original
+        if chat_response.usage is not None:
+            total_usage += chat_response.usage
+            if budget is not None:
+                budget = budget.consume(chat_response.usage.total_tokens)
+        retry_step = chat_response.step
+        if not isinstance(retry_step, FinalAnswer):
+            return original
+        retry_step = _unwrap_final_answer_envelope(retry_step)
+        retried = _final_result(
+            retry_step,
+            tuple(tool_results),
+            tuple(trace),
+            token_usage=total_usage,
+            scene=scene,
+        )
+        if retried.failure is not None:
+            return original
+        return retried
+
+    def _apply_interactive_final_guards(
+        self,
+        *,
+        final: AgentRunResult,
+        document_id: str,
+        query: str,
+        tool_results: list[ToolResult],
+        trace: list[ToolTraceEntry],
+        total_usage: TokenUsage,
+        budget: ContextBudgetState | None,
+        scene: str,
+    ) -> AgentRunResult:
+        """interactive 终答守卫：投资建议有界重答 + 原文粘贴/超长有界重答 + 摘要截断。
+
+        投资建议守卫失败时最多重试 1 次（既有语义，重试仍失败则 fail-closed）；
+        原文粘贴（answer 与任一 evidence 连续重叠 ≥40 字符）或 answer >800 字时
+        最多重答 1 次，重答后仍超标则截断为前 200 字摘要格式。
+
+        参数:
+            final: 已过 _final_result 的终答结果（interactive 方案 E，无证据校验）。
+            document_id: public reading tools 使用的内容身份。
+            query: 原用户查询。
+            tool_results: 已收集的工具结果。
+            trace: 工具调用轨迹。
+            total_usage: 已累计 token 用量。
+            budget: 上下文预算状态；None 时不做预算消费。
+            scene: 调用场景（仅 interactive 触发）。
+
+        返回:
+            通过守卫的 AgentRunResult；守卫失败时 fail-closed。
+        """
+
+        if final.failure is not None and final.failure.message == _INVESTMENT_ADVICE_MESSAGE:
+            final = self._retry_final_answer_advice_guard(
+                document_id=document_id,
+                query=query,
+                tool_results=tool_results,
+                trace=trace,
+                total_usage=total_usage,
+                budget=budget,
+                scene=scene,
+                original=final,
+            )
+            if final.failure is not None:
+                return final
+        if final.failure is not None:
+            return final
+
+        if not _violates_final_answer_quality(final.answer, tool_results):
+            return final
+
+        retried = self._retry_final_answer_quality_guard(
+            document_id=document_id,
+            query=query,
+            tool_results=tool_results,
+            trace=trace,
+            total_usage=total_usage,
+            budget=budget,
+            scene=scene,
+        )
+        if retried.failure is not None:
+            return retried
+        if _violates_final_answer_quality(retried.answer, tool_results):
+            return replace(retried, answer=_truncate_final_answer_summary(retried.answer))
+        return retried
+
+    def _retry_final_answer_quality_guard(
+        self,
+        *,
+        document_id: str,
+        query: str,
+        tool_results: list[ToolResult],
+        trace: list[ToolTraceEntry],
+        total_usage: TokenUsage,
+        budget: ContextBudgetState | None,
+        scene: str,
+    ) -> AgentRunResult:
+        """interactive 终答原文粘贴/超长守卫：最多重答 1 次（query 追加纠正指令）。
+
+        用同 document_id / 同 tool_results、query 追加纠正指令重新调用 next_step，
+        新 FinalAnswer 仍走同一 JSON 信封解包、_final_result 守卫与原文粘贴检测。
+        重答未产出 FinalAnswer 或 next_step 异常时返回 fail-closed 失败结果。
+
+        参数:
+            document_id: public reading tools 使用的内容身份。
+            query: 原用户查询。
+            tool_results: 已收集的工具结果。
+            trace: 工具调用轨迹。
+            total_usage: 已累计 token 用量。
+            budget: 上下文预算状态；None 时不做预算消费。
+            scene: 调用场景（仅 interactive 触发）。
+
+        返回:
+            重答后的 AgentRunResult（仍可能触发截断或 fail-closed）。
+        """
+
+        retry_query = f"{query}\n\n{_INTERACTIVE_QUALITY_RETRY_MESSAGE}"
+        try:
+            chat_response = self._llm_client.next_step(
+                document_id=document_id,
+                query=retry_query,
+                tool_results=tuple(tool_results),
+                remaining_budget=max(0, self._max_steps - 1),
+            )
+        except Exception:
+            return _failed_result(tuple(trace), FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE, token_usage=total_usage)
+        if chat_response.usage is not None:
+            total_usage += chat_response.usage
+            if budget is not None:
+                budget = budget.consume(chat_response.usage.total_tokens)
+        retry_step = chat_response.step
+        if not isinstance(retry_step, FinalAnswer):
+            return _failed_result(tuple(trace), FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE, token_usage=total_usage)
+        retry_step = _unwrap_final_answer_envelope(retry_step)
+        return _final_result(
+            retry_step,
+            tuple(tool_results),
+            tuple(trace),
+            token_usage=total_usage,
+            scene=scene,
+        )
+
     @staticmethod
     def wrap_results_for_llm(
         results: tuple[ToolResult, ...],
@@ -560,9 +1076,15 @@ class LlmToolLoopRunner:
         """
         projected: list[dict] = []
         for r in results:
-            envelope = ToolResultEnvelope.success(
-                value={"tool_name": r.tool_name.value, "evidence": r.evidence_text},
-            )
+            if r.failure is not None:
+                envelope = ToolResultEnvelope.error(
+                    code=r.failure.code.value,
+                    message=r.failure.message,
+                )
+            else:
+                envelope = ToolResultEnvelope.success(
+                    value={"tool_name": str(r.tool_name), "evidence": r.evidence_text},
+                )
             projected.append(project_for_llm(envelope, budget=budget))
         return projected
 
@@ -582,12 +1104,13 @@ class LlmToolLoopRunner:
         if tool_name is None or tool_name not in ALLOWED_LLM_TOOL_NAMES:
             trace.append(_trace_entry(call.tool_name, trace_arguments, "failure", FailureCode.UNAVAILABLE))
             return ToolFailure(code=FailureCode.UNAVAILABLE, message=_TOOL_NOT_ALLOWED_MESSAGE)
-        if (
-            tool_name is not ToolName.AGGREGATE_MULTI_YEAR_ANNUAL_PERFORMANCE
-            and not _document_id_matches(call.document_id, expected_document_id)
-        ):
-            trace.append(_trace_entry(tool_name, trace_arguments, "failure", FailureCode.UNAVAILABLE))
-            return ToolFailure(code=FailureCode.UNAVAILABLE, message=_TOOL_NOT_ALLOWED_MESSAGE)
+        if tool_name is not ToolName.AGGREGATE_MULTI_YEAR_ANNUAL_PERFORMANCE:
+            # document_id 缺失/空字符串时用 expected 补全；aggregate 维持既有豁免
+            if not call.document_id:
+                call = replace(call, document_id=expected_document_id)
+            if not _document_id_matches(call.document_id, expected_document_id):
+                trace.append(_trace_entry(tool_name, trace_arguments, "failure", FailureCode.UNAVAILABLE))
+                return ToolFailure(code=FailureCode.UNAVAILABLE, message=_TOOL_NOT_ALLOWED_MESSAGE)
 
         result = self._call_allowed_tool(tool_name, call, aggregate_handler=self._aggregate_handler)
         if isinstance(result, ToolFailure):
@@ -658,6 +1181,207 @@ class LlmToolLoopRunner:
 
 
 
+def _is_empty_search_result(result: ToolResult) -> bool:
+    """判断 search_document 结果是否为 0 命中（成功但无 evidence/citation）。"""
+
+    return not result.citations and not result.evidence_text.strip()
+
+
+def _next_auto_retry_query(
+    candidates: tuple[str, ...],
+    used_queries: set[str],
+    original_query: str,
+) -> str | None:
+    """返回下一个未尝试的受控候选检索词，优先非原始 query 的受控词。"""
+
+    for candidate in candidates:
+        if candidate != original_query and candidate not in used_queries:
+            return candidate
+    for candidate in candidates:
+        if candidate not in used_queries:
+            return candidate
+    return None
+
+
+def _empty_search_converged_result(
+    trace: tuple[ToolTraceEntry, ...],
+    *,
+    token_usage: TokenUsage | None = None,
+) -> AgentRunResult:
+    """interactive 连续空结果强制收敛：返回「未找到相关数据」final（不依赖模型）。"""
+
+    return AgentRunResult(
+        answer=_INTERACTIVE_EMPTY_SEARCH_CONVERGE_ANSWER,
+        citations=(),
+        tool_trace=trace,
+        failure=None,
+        token_usage=token_usage,
+    )
+
+
+def _empty_search_converged_events(
+    trace: tuple[ToolTraceEntry, ...],
+    seq: int,
+) -> Iterator[StreamEvent]:
+    """interactive 空结果强制收敛的 StreamEvent 序列（CONTENT_DELTA + METADATA + DONE）。"""
+
+    yield StreamEvent(
+        type=StreamEventType.CONTENT_DELTA,
+        payload=_INTERACTIVE_EMPTY_SEARCH_CONVERGE_ANSWER,
+        sequence=seq,
+    )
+    yield StreamEvent(
+        type=StreamEventType.METADATA,
+        payload={"citations": [], "tool_trace_count": len(trace)},
+        sequence=seq + 1,
+    )
+    yield StreamEvent(type=StreamEventType.DONE, payload=None, sequence=seq + 2)
+
+
+def _has_long_evidence_overlap(answer: str, evidence: str) -> bool:
+    """判断 answer 与 evidence 是否存在 ≥40 字符连续重叠（原文粘贴检测）。"""
+
+    min_chars = _INTERACTIVE_EVIDENCE_OVERLAP_MIN_CHARS
+    if len(answer) < min_chars:
+        return False
+    limit = len(answer) - min_chars + 1
+    return any(answer[start : start + min_chars] in evidence for start in range(limit))
+
+
+def _violates_final_answer_quality(
+    answer: str,
+    tool_results: list[ToolResult] | tuple[ToolResult, ...],
+) -> bool:
+    """interactive 终答质量违规：answer >800 字或与任一 evidence 连续重叠 ≥40 字符。"""
+
+    if len(answer) > _INTERACTIVE_FINAL_ANSWER_MAX_CHARS:
+        return True
+    return any(
+        result.evidence_text and _has_long_evidence_overlap(answer, result.evidence_text)
+        for result in tool_results
+    )
+
+
+def _truncate_final_answer_summary(answer: str) -> str:
+    """终答仍超标时截断为摘要格式（前 200 字 + 省略说明）。"""
+
+    if len(answer) <= _INTERACTIVE_FINAL_ANSWER_TARGET_CHARS:
+        return answer
+    return answer[:_INTERACTIVE_FINAL_ANSWER_TARGET_CHARS] + _INTERACTIVE_SUMMARY_TRUNCATE_NOTE
+
+
+def _optional_envelope_str(payload: dict, key: str) -> str | None:
+    """从终答 JSON 信封取可选字符串字段；非空字符串才返回。"""
+
+    value = payload.get(key)
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
+def _optional_envelope_int(payload: dict, key: str) -> int | None:
+    """从终答 JSON 信封取可选整数字段；bool 视为无效。"""
+
+    value = payload.get(key)
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return None
+
+
+def _locator_from_envelope(payload: object) -> Locator | None:
+    """从终答 JSON 信封解析 locator；结构不完整时返回 None。"""
+
+    if not isinstance(payload, dict):
+        return None
+    try:
+        return Locator(
+            document_id=str(payload["document_id"]),
+            locator_kind=LocatorKind(str(payload["locator_kind"])),
+            section_ref=_optional_envelope_str(payload, "section_ref"),
+            table_ref=_optional_envelope_str(payload, "table_ref"),
+            page_no=_optional_envelope_int(payload, "page_no"),
+            page_range=None,
+            internal_ref=None,
+            internal_ref_available=False,
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _citations_from_envelope(payload: dict) -> tuple[Citation, ...]:
+    """从终答 JSON 信封解析 citation（尽力而为，跳过无法还原的条目）。"""
+
+    raw = payload.get("citations")
+    if not isinstance(raw, list):
+        return ()
+    citations: list[Citation] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        locator = _locator_from_envelope(item.get("locator"))
+        if locator is None:
+            continue
+        try:
+            citations.append(
+                Citation(
+                    document_id=str(item["document_id"]),
+                    fund_code=str(item["fund_code"]),
+                    fund_name=str(item["fund_name"]),
+                    year=int(item["year"]),
+                    report_type=str(item["report_type"]),
+                    locator=locator,
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    return tuple(citations)
+
+
+def _key_facts_from_envelope(payload: dict) -> tuple[str, ...]:
+    """从终答 JSON 信封解析 key_facts（尽力而为，只收非空标量）。"""
+
+    raw = payload.get("key_facts")
+    if not isinstance(raw, list):
+        return ()
+    return tuple(
+        str(item)
+        for item in raw
+        if isinstance(item, (str, int, float)) and str(item).strip()
+    )
+
+
+def _unwrap_final_answer_envelope(final_answer: FinalAnswer) -> FinalAnswer:
+    """interactive 终答 JSON 信封解包（answer 为 JSON 且含 answer 字段时提取展示文本）。
+
+    模型有时把整段 JSON 信封写进 answer（纯 JSON 或 ```json 代码块），
+    此处兜底：提取 answer 字段作为展示文本，citations/key_facts 解析后保留在
+    FinalAnswer（citations 随后随 AgentRunResult 落盘）。
+    """
+
+    content = final_answer.answer.strip()
+    if not content:
+        return final_answer
+    candidate = content
+    if content.startswith("```"):
+        match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", content, re.DOTALL)
+        if match:
+            candidate = match.group(1).strip()
+    try:
+        payload = json.loads(candidate)
+    except json.JSONDecodeError:
+        return final_answer
+    if not isinstance(payload, dict):
+        return final_answer
+    answer_value = payload.get("answer")
+    if not isinstance(answer_value, str) or not answer_value.strip():
+        return final_answer
+    citations = final_answer.citations or _citations_from_envelope(payload)
+    key_facts = final_answer.key_facts or _key_facts_from_envelope(payload)
+    return FinalAnswer(answer=answer_value.strip(), citations=citations, key_facts=key_facts)
+
+
 def _final_result(
     final_answer: FinalAnswer,
     tool_results: tuple[ToolResult, ...],
@@ -673,11 +1397,11 @@ def _final_result(
     """
 
     # 投资建议检测（fail-closed，所有 scene 生效）
-    # "建议关注"、"需持续跟踪" 不触发
+    # "建议关注"、"需持续跟踪" 不触发；
+    # 强词正则与弱词引用上下文豁免逻辑见 contains_investment_advice（单一真源）。
     answer_text = final_answer.answer
-    for keyword in _INVESTMENT_ADVICE_KEYWORDS:
-        if keyword in answer_text:
-            return _failed_result(trace, FailureCode.UNAVAILABLE, _INVESTMENT_ADVICE_MESSAGE, token_usage=token_usage)
+    if contains_investment_advice(answer_text):
+        return _failed_result(trace, FailureCode.UNAVAILABLE, _INVESTMENT_ADVICE_MESSAGE, token_usage=token_usage)
 
     if scene == "interactive":
         return AgentRunResult(
@@ -798,12 +1522,31 @@ def _table_evidence_text(table: TableContent) -> str:
 
 
 def _coerce_tool_name(tool_name: ToolName | str) -> ToolName | None:
-    """把 LLM 输出的工具名转换为已知 ToolName。"""
+    """把 LLM 输出的工具名转换为已知 ToolName（仅格式归一化，不做语义映射）。
+
+    归一化规则（有界）：
+    - 去除首尾空白；
+    - 去除尾部括号参数（如 `search_document(max_results=5)` -> `search_document`）。
+    仍不匹配已知工具名时返回 None，由调用方按未知工具 fail-closed；
+    禁止做语义级别名映射（如 "search" -> search_document），防止静默扩大工具面。
+
+    参数:
+        tool_name: LLM 请求的工具名。
+
+    返回:
+        已知 ToolName；未知工具名返回 None。
+    """
 
     if isinstance(tool_name, ToolName):
         return tool_name
+    raw = str(tool_name).strip()
+    if raw.endswith(")") and "(" in raw:
+        # 只去除紧贴名称的尾部括号参数段
+        raw = raw[: raw.find("(")].strip()
+    if not raw:
+        return None
     try:
-        return ToolName(str(tool_name))
+        return ToolName(raw)
     except ValueError:
         return None
 
@@ -947,7 +1690,8 @@ def _cap_tool_results(
     result: list[ToolResult] = []
     for r in tool_results:
         allocated = max(0, int(len(r.evidence_text) * remaining / total_chars))
-        if allocated >= len(r.evidence_text):
+        if r.failure is not None or allocated >= len(r.evidence_text):
+            # 失败反馈条目原样保留（evidence 为空且不可截断）
             result.append(r)
         elif allocated > 0:
             result.append(
@@ -959,6 +1703,27 @@ def _cap_tool_results(
                 )
             )
     return result
+
+
+def _failure_tool_result(call: ToolCall, failure: ToolFailure) -> ToolResult:
+    """把 ToolFailure 转换为带 failure 标记的 ToolResult（失败回喂，不终止整轮）。
+
+    参数:
+        call: 触发失败的 LLM 工具请求。
+        failure: 工具失败分类与安全消息。
+
+    返回:
+        failure 非 None、无 evidence/citation 的 ToolResult；工具名取已归一化
+        结果，未知工具保留原始请求名。
+    """
+
+    return ToolResult(
+        tool_name=_coerce_tool_name(call.tool_name) or str(call.tool_name),
+        result=None,
+        citations=(),
+        evidence_text="",
+        failure=failure,
+    )
 
 
 def _force_answer_from_evidence(

@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+from concurrent.futures import ALL_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -1832,12 +1834,52 @@ class ReportGenerationCoordinator:
         self,
         llm_client: Any,
         work_dir: Path,
+        chapter_concurrency: int = 1,
     ) -> None:
-        """初始化协调器。"""
+        """初始化协调器。
+
+        参数:
+            llm_client: LLM 客户端。
+            work_dir: 工作目录。
+            chapter_concurrency: 章节生成并发上限（1..8）；1 为完全串行等价；
+                生产并发由 Service 解析层显式传入。
+
+        异常:
+            并发数不在 1..8 范围内时抛 ValueError。
+        """
+
+        if not 1 <= chapter_concurrency <= 8:
+            raise ValueError(f"chapter_concurrency 必须在 1..8 范围内，收到 {chapter_concurrency}")
         self._llm_client = llm_client
         self._work_dir = work_dir
         self._artifact_store = ArtifactStore(work_dir)
         self._process_states: dict[int, ChapterProcessState] = {}
+        self._states_lock = threading.Lock()
+        self._chapter_concurrency = chapter_concurrency
+
+    def _set_state(self, chapter_id: int, state: ChapterProcessState) -> None:
+        """线程安全写入单章过程状态。
+
+        参数:
+            chapter_id: 章节编号。
+            state: 章节过程状态。
+        """
+
+        with self._states_lock:
+            self._process_states[chapter_id] = state
+
+    def _get_state(self, chapter_id: int) -> ChapterProcessState | None:
+        """线程安全读取单章过程状态。
+
+        参数:
+            chapter_id: 章节编号。
+
+        返回:
+            章节过程状态；尚未初始化时返回 None。
+        """
+
+        with self._states_lock:
+            return self._process_states.get(chapter_id)
 
     def generate_report(
         self,
@@ -1888,85 +1930,183 @@ class ReportGenerationCoordinator:
             )
             global_numbers.update(re.findall(r'\d+\.?\d*', dt.replace(',', '')))
 
-        # 1. 生成 Ch1-6
-        for chapter_id in range(1, 7):
-            content = self._generate_and_audit_chapter(
-                chapter_id=chapter_id,
-                fund_code=fund_code,
-                fund_name=fund_name,
-                report_year=report_year,
-                performance=performance,
-                holdings=holdings,
-                allocation=allocation,
-                fees=fees,
-                fund_manager=fund_manager,
-                scale_info=scale_info,
-                evidence=evidence,
-                signal_judgment=signal_judgment,
-                global_allowed_numbers=global_numbers,
-                fund_type=fund_type,
-            )
-            if content:
-                chapter_contents[chapter_id] = content
-            else:
-                warnings.append(f"Ch{chapter_id} 生成失败")
+        # 并发上限：client 不支持 clone() 时回退串行（行为与现状完全等价）
+        effective_concurrency = self._chapter_concurrency
+        if effective_concurrency > 1 and not hasattr(self._llm_client, "clone"):
+            effective_concurrency = 1
+            warnings.append("LLM client 不支持并发克隆，已回退串行")
 
-        # 2. 检查 Ch1-6 是否全部通过（含数据不足时的降级通过）
-        all_passed = all(
-            self._process_states.get(cid, ChapterProcessState(chapter_id=cid)).status in ("passed", "passed_with_degradation")
-            for cid in range(1, 7)
-        )
+        # 阶段 A/B/C/D 复用同一 executor；B 与 D 之间强制 join，
+        # 保证 Ch0/Ch7 永远读到 Ch1-6 的最终内容。
+        with ThreadPoolExecutor(
+            max_workers=effective_concurrency,
+            thread_name_prefix="report-chapter",
+        ) as executor:
+            # 1. 阶段 B：并行生成 Ch1-6（每章完整 write→audit→rewrite 闭环）
+            b_futures = {
+                cid: executor.submit(
+                    self._run_chapter_worker,
+                    chapter_id=cid,
+                    template_client=self._llm_client,
+                    use_worker_clone=effective_concurrency > 1,
+                    fund_code=fund_code,
+                    fund_name=fund_name,
+                    report_year=report_year,
+                    performance=performance,
+                    holdings=holdings,
+                    allocation=allocation,
+                    fees=fees,
+                    fund_manager=fund_manager,
+                    scale_info=scale_info,
+                    evidence=evidence,
+                    signal_judgment=signal_judgment,
+                    global_allowed_numbers=global_numbers,
+                    fund_type=fund_type,
+                )
+                for cid in range(1, 7)
+            }
+            wait(list(b_futures.values()), return_when=ALL_COMPLETED)
+            for cid in range(1, 7):
+                chapter_id, content, _state, chapter_warnings = b_futures[cid].result()
+                if content:
+                    chapter_contents[chapter_id] = content
+                warnings.extend(chapter_warnings)
 
-        if not all_passed:
-            warnings.append("Ch1-6 未全部通过，Ch0+Ch7 使用模板生成")
-            # 使用模板生成 Ch0+Ch7
-            chapter_contents[0] = self._generate_template_chapter(
-                chapter_id=0,
-                fund_name=fund_name,
-                report_year=report_year,
-                performance=performance,
-                evidence=evidence,
-                fund_code=fund_code,
-                fund_manager=fund_manager,
-                scale_info=scale_info,
-                signal_judgment=signal_judgment,
+            # 2. 阶段 C：检查 Ch1-6 是否全部通过（含数据不足时的降级通过）
+            all_passed = all(
+                (self._get_state(cid) or ChapterProcessState(chapter_id=cid)).status
+                in ("passed", "passed_with_degradation")
+                for cid in range(1, 7)
             )
-            chapter_contents[7] = self._generate_template_chapter(
-                chapter_id=7,
-                fund_name=fund_name,
-                report_year=report_year,
-                performance=performance,
-                evidence=evidence,
-                fund_code=fund_code,
-                fund_manager=fund_manager,
-                scale_info=scale_info,
-                signal_judgment=signal_judgment,
-            )
-            return chapter_contents, warnings
 
-        # 3. Ch1-6 全部通过，生成 Ch0+Ch7
-        for chapter_id in [0, 7]:
-            content = self._generate_and_audit_chapter(
-                chapter_id=chapter_id,
-                fund_code=fund_code,
-                fund_name=fund_name,
-                report_year=report_year,
-                performance=performance,
-                holdings=holdings,
-                allocation=allocation,
-                fees=fees,
-                fund_manager=fund_manager,
-                scale_info=scale_info,
-                use_chapter_summaries=True,
-                chapter_summaries={cid: chapter_contents.get(cid, "") for cid in range(1, 7)},
-                signal_judgment=signal_judgment,
-            )
-            if content:
-                chapter_contents[chapter_id] = content
-            else:
-                warnings.append(f"Ch{chapter_id} 生成失败")
+            if not all_passed:
+                warnings.append("Ch1-6 未全部通过，Ch0+Ch7 使用模板生成")
+                # 使用模板生成 Ch0+Ch7
+                chapter_contents[0] = self._generate_template_chapter(
+                    chapter_id=0,
+                    fund_name=fund_name,
+                    report_year=report_year,
+                    performance=performance,
+                    evidence=evidence,
+                    fund_code=fund_code,
+                    fund_manager=fund_manager,
+                    scale_info=scale_info,
+                    signal_judgment=signal_judgment,
+                )
+                chapter_contents[7] = self._generate_template_chapter(
+                    chapter_id=7,
+                    fund_name=fund_name,
+                    report_year=report_year,
+                    performance=performance,
+                    evidence=evidence,
+                    fund_code=fund_code,
+                    fund_manager=fund_manager,
+                    scale_info=scale_info,
+                    signal_judgment=signal_judgment,
+                )
+                return chapter_contents, warnings
+
+            # 3. 阶段 D：Ch1-6 全部通过，并行生成 Ch0+Ch7
+            d_futures = {
+                cid: executor.submit(
+                    self._run_chapter_worker,
+                    chapter_id=cid,
+                    template_client=self._llm_client,
+                    use_worker_clone=effective_concurrency > 1,
+                    fund_code=fund_code,
+                    fund_name=fund_name,
+                    report_year=report_year,
+                    performance=performance,
+                    holdings=holdings,
+                    allocation=allocation,
+                    fees=fees,
+                    fund_manager=fund_manager,
+                    scale_info=scale_info,
+                    evidence=evidence,
+                    signal_judgment=signal_judgment,
+                    global_allowed_numbers=global_numbers,
+                    fund_type=fund_type,
+                    use_chapter_summaries=True,
+                    chapter_summaries={cid: chapter_contents.get(cid, "") for cid in range(1, 7)},
+                )
+                for cid in (0, 7)
+            }
+            wait(list(d_futures.values()), return_when=ALL_COMPLETED)
+            for cid in (0, 7):
+                chapter_id, content, _state, chapter_warnings = d_futures[cid].result()
+                if content:
+                    chapter_contents[chapter_id] = content
+                warnings.extend(chapter_warnings)
 
         return chapter_contents, warnings
+
+    def _run_chapter_worker(
+        self,
+        chapter_id: int,
+        template_client: Any,
+        use_worker_clone: bool,
+        fund_code: str,
+        fund_name: str,
+        report_year: int,
+        performance: dict[int, dict[str, str]],
+        holdings: dict[int, tuple[Any, ...]],
+        allocation: dict[int, tuple[Any, ...]],
+        fees: dict[int, tuple[Any, ...]],
+        fund_manager: Any = None,
+        scale_info: Any = None,
+        evidence: Any = None,
+        signal_judgment: Any = None,
+        global_allowed_numbers: set[str] | None = None,
+        fund_type: str = "",
+        use_chapter_summaries: bool = False,
+        chapter_summaries: dict[int, str] | None = None,
+    ) -> tuple[int, str | None, ChapterProcessState, list[str]]:
+        """单章 worker：运行完整 write→audit→rewrite 闭环。
+
+        参数:
+            chapter_id: 章节编号。
+            template_client: LLM 模板客户端；use_worker_clone=True 时经 clone()
+                派生 worker 独立实例（usage 账本线程隔离）。
+            use_worker_clone: 是否使用 clone() 派生独立 client。
+            其余参数同 generate_report。
+
+        返回:
+            (chapter_id, 章节内容, 章节终态, 章节级 warning 列表)。
+            顶层异常收敛为失败章节（None + failed state + warning），
+            不向主线程抛出，保证单章失败不拖垮整批。
+        """
+
+        try:
+            llm_client = template_client.clone() if use_worker_clone else template_client
+            content = self._generate_and_audit_chapter(
+                chapter_id=chapter_id,
+                fund_code=fund_code,
+                fund_name=fund_name,
+                report_year=report_year,
+                performance=performance,
+                holdings=holdings,
+                allocation=allocation,
+                fees=fees,
+                fund_manager=fund_manager,
+                scale_info=scale_info,
+                evidence=evidence,
+                use_chapter_summaries=use_chapter_summaries,
+                chapter_summaries=chapter_summaries,
+                signal_judgment=signal_judgment,
+                global_allowed_numbers=global_allowed_numbers,
+                fund_type=fund_type,
+                llm_client=llm_client,
+            )
+            state = self._get_state(chapter_id) or ChapterProcessState(chapter_id=chapter_id)
+            if content is None:
+                return chapter_id, None, state, [f"Ch{chapter_id} 生成失败"]
+            return chapter_id, content, state, []
+        except Exception:
+            state = ChapterProcessState(chapter_id=chapter_id)
+            state.status = "failed"
+            state.record_event("generate_failed", {"chapter_id": chapter_id, "reason": "worker_unhandled_exception"})
+            self._set_state(chapter_id, state)
+            return chapter_id, None, state, [f"Ch{chapter_id} 生成失败"]
 
     def _generate_and_audit_chapter(
         self,
@@ -1986,11 +2126,14 @@ class ReportGenerationCoordinator:
         signal_judgment: Any = None,
         global_allowed_numbers: set[str] | None = None,
         fund_type: str = "",
+        llm_client: Any | None = None,
     ) -> str | None:
         """生成并审计单个章节。
 
         参数:
             chapter_id: 章节编号。
+            llm_client: 显式下传的 LLM 客户端；None 时使用协调器默认 client
+                （并发 worker 必须传入 clone() 后的独立实例）。
             其他参数同 generate_report。
 
         返回:
@@ -2011,12 +2154,13 @@ class ReportGenerationCoordinator:
                 signal_judgment=signal_judgment,
                 global_allowed_numbers=global_allowed_numbers,
                 fund_type=fund_type,
+                llm_client=llm_client,
             )
         except Exception:
             state = ChapterProcessState(chapter_id=chapter_id)
             state.status = "failed"
             state.record_event("generate_failed", {"chapter_id": chapter_id, "reason": "unhandled_exception"})
-            self._process_states[chapter_id] = state
+            self._set_state(chapter_id, state)
             return None
 
     def _generate_and_audit_chapter_inner(
@@ -2037,12 +2181,15 @@ class ReportGenerationCoordinator:
         chapter_summaries: dict[int, str] | None = None,
         signal_judgment: Any = None,
         fund_type: str = "",
+        llm_client: Any | None = None,
     ) -> str | None:
         """内部实现，由 _generate_and_audit_chapter 包装异常处理。"""
 
+        client = llm_client if llm_client is not None else self._llm_client
+
         # 初始化过程状态
         state = ChapterProcessState(chapter_id=chapter_id)
-        self._process_states[chapter_id] = state
+        self._set_state(chapter_id, state)
         contract = get_chapter_contract(chapter_id)
 
         if not contract:
@@ -2078,6 +2225,7 @@ class ReportGenerationCoordinator:
             use_chapter_summaries=use_chapter_summaries,
             chapter_summaries=chapter_summaries,
             global_allowed_numbers=global_allowed_numbers,
+            llm_client=client,
         )
 
         if not content:
@@ -2128,7 +2276,7 @@ class ReportGenerationCoordinator:
             prog_score, prog_violations = prog_auditor.audit()
 
             # LLM 审计
-            llm_auditor = LlmAuditor(self._llm_client, chapter_id, content, audit_data_table, contract)
+            llm_auditor = LlmAuditor(client, chapter_id, content, audit_data_table, contract)
             llm_score, llm_violations = llm_auditor.audit()
 
             # LLM 审计失败时降级为纯程序审计
@@ -2192,7 +2340,7 @@ class ReportGenerationCoordinator:
                 if state.can_patch():
                     state.patch_attempts += 1
                     repairer = ChapterRepairer(
-                        self._llm_client, chapter_id, content, data_table,
+                        client, chapter_id, content, data_table,
                         contract, all_violations,
                     )
                     plan = repairer.generate_repair_plan()
@@ -2212,6 +2360,7 @@ class ReportGenerationCoordinator:
                                 chapter_id, fund_code, fund_name, report_year,
                                 data_table, performance, holdings, allocation,
                                 fees, fund_manager, scale_info,
+                                llm_client=client,
                             )
                             state.record_event("regenerated", {
                                 "attempt": state.regenerate_attempts,
@@ -2224,6 +2373,7 @@ class ReportGenerationCoordinator:
                             chapter_id, fund_code, fund_name, report_year,
                             data_table, performance, holdings, allocation,
                             fees, fund_manager, scale_info,
+                            llm_client=client,
                         )
                         if regen:
                             content = regen
@@ -2239,6 +2389,7 @@ class ReportGenerationCoordinator:
                         chapter_id, fund_code, fund_name, report_year,
                         data_table, performance, holdings, allocation,
                         fees, fund_manager, scale_info,
+                        llm_client=client,
                     )
                     state.record_event("regenerated", {
                         "attempt": state.regenerate_attempts,
@@ -2292,8 +2443,11 @@ class ReportGenerationCoordinator:
         use_chapter_summaries: bool = False,
         chapter_summaries: dict[int, str] | None = None,
         global_allowed_numbers: set[str] | None = None,
+        llm_client: Any | None = None,
     ) -> str | None:
         """生成章节内容。"""
+
+        client = llm_client if llm_client is not None else self._llm_client
 
         from fund_agent.service.chapter_generator import LLM_ANALYSIS_PROMPTS, LLM_CHAPTER_SYSTEM_PROMPT
 
@@ -2333,7 +2487,7 @@ class ReportGenerationCoordinator:
         user_prompt = "\n".join(user_prompt_parts)
 
         try:
-            llm_analysis = self._llm_client.generate_text(
+            llm_analysis = client.generate_text(
                 system_prompt=LLM_CHAPTER_SYSTEM_PROMPT,
                 user_prompt=user_prompt,
             )
@@ -2372,6 +2526,7 @@ class ReportGenerationCoordinator:
         fees: dict[int, tuple[Any, ...]],
         fund_manager: Any = None,
         scale_info: Any = None,
+        llm_client: Any | None = None,
     ) -> str | None:
         """重新生成章节。"""
 
@@ -2387,6 +2542,7 @@ class ReportGenerationCoordinator:
             fees=fees,
             fund_manager=fund_manager,
             scale_info=scale_info,
+            llm_client=llm_client,
         )
 
     def _generate_template_chapter(
@@ -2521,4 +2677,5 @@ class ReportGenerationCoordinator:
 
     def get_process_states(self) -> dict[int, ChapterProcessState]:
         """获取所有章节的过程状态。"""
-        return dict(self._process_states)
+        with self._states_lock:
+            return dict(self._process_states)

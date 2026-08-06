@@ -1,0 +1,107 @@
+/* 基金分析报告打印样式（原创资产，2026-08-05）
+   仅用于 PDF 导出渲染：覆盖 pandoc gfm→html5 输出的基础排版，
+   不复制任何第三方/参考项目文件。 */
+
+@page {
+  size: A4;
+  margin: 18mm 16mm;
+}
+
+@media print {
+  html,
+  body {
+    width: auto;
+    margin: 0;
+    padding: 0;
+    background: #fff;
+    color: #1f2328;
+    font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+      "Noto Sans CJK SC", "Songti SC", serif;
+    font-size: 11pt;
+    line-height: 1.65;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    break-after: avoid;
+    page-break-after: avoid;
+    line-height: 1.3;
+    overflow-wrap: break-word;
+    word-break: break-word;
+  }
+
+  h1 {
+    font-size: 20pt;
+  }
+
+  h2 {
+    font-size: 16pt;
+    border-bottom: 1px solid #d0d7de;
+    padding-bottom: 4px;
+  }
+
+  h3 {
+    font-size: 13pt;
+  }
+
+  p,
+  li,
+  blockquote,
+  td,
+  th {
+    overflow-wrap: break-word;
+    word-break: break-word;
+  }
+
+  table {
+    table-layout: fixed;
+    width: 100%;
+    border-collapse: collapse;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+    font-size: 9.5pt;
+  }
+
+  th,
+  td {
+    border: 1px solid #d0d7de;
+    padding: 4px 6px;
+    vertical-align: top;
+  }
+
+  th {
+    background: #f6f8fa;
+    font-weight: 600;
+  }
+
+  pre,
+  code {
+    font-family: "SF Mono", Menlo, Consolas, "Courier New", monospace;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+  }
+
+  pre {
+    background: #f6f8fa;
+    border: 1px solid #d0d7de;
+    border-radius: 4px;
+    padding: 8px 10px;
+    font-size: 9pt;
+  }
+
+  blockquote {
+    margin: 8px 0;
+    padding: 4px 12px;
+    border-left: 4px solid #d0d7de;
+    color: #57606a;
+  }
+
+  img {
+    max-width: 100%;
+  }
+}

@@ -22,13 +22,15 @@ from fund_agent.agent.llm_tool_loop import (
     LlmToolLoopRunner,
     ToolCall,
     ToolResult,
+    contains_investment_advice,
+    matched_investment_advice_terms,
 )
 from fund_agent.agent.tool_loop import AgentRunResult
 from fund_agent.fund.document_tools.constants import ToolName
 from fund_agent.fund.document_tools.service import FundDocumentToolService
 
 from .chat_contract import ChatTurnContract
-from .investment_guard import contains_investment_advice
+from .extraction import _route_plan_for_query
 from .prompt_composer import PromptComposer
 from .session_models import EpisodeSummary, PinnedState, Session, ToolCallSummary, Turn
 from fund_agent.host.session_store import SessionStore
@@ -64,6 +66,8 @@ class ChatTurnResponse:
         tool_trace: 工具调用轨迹摘要。
         token_usage: 累计 token 用量信息。
         investment_advice_detected: 是否检测到投资建议。
+        original_content: 被拦截回答的原始文本；未拦截时为 None。
+        blocked_terms: 触发拦截的命中词元；未拦截时为空元组。
     """
 
     answer: str
@@ -71,6 +75,56 @@ class ChatTurnResponse:
     tool_trace: tuple[str, ...] = ()
     token_usage: dict[str, int] | None = None
     investment_advice_detected: bool = False
+    original_content: str | None = None
+    blocked_terms: tuple[str, ...] = ()
+
+
+def _tool_call_summaries(agent_result: AgentRunResult) -> tuple[ToolCallSummary, ...]:
+    """从 agent_result.tool_trace 构造 ToolCallSummary 元组。
+
+    参数:
+        agent_result: Agent 循环结果。
+
+    返回:
+        结构化工具调用摘要；无 trace 时为空元组。
+    """
+
+    if not agent_result.tool_trace:
+        return ()
+    return tuple(
+        ToolCallSummary(
+            tool_name=entry.tool_name,
+            arguments_display=str(entry.arguments)[:100] if entry.arguments else "",
+            success=entry.result_kind == "success",
+            failure_code=entry.failure_code if entry.result_kind != "success" else None,
+        )
+        for entry in agent_result.tool_trace
+    )
+
+
+def _tool_trace_summary(agent_result: AgentRunResult) -> tuple[str, ...]:
+    """从 agent_result.tool_trace 构造字符串摘要（失败轮专用）。
+
+    格式为 `tool_name(result_kind[:failure_code])`，复用 ToolTraceEntry 的
+    result_kind / failure_code 字段（该结构不存在 status 字段，禁止使用）。
+
+    参数:
+        agent_result: Agent 循环结果。
+
+    返回:
+        字符串元组；无 trace 时为空元组（如 provider 首轮失败）。
+    """
+
+    if not agent_result.tool_trace:
+        return ()
+    return tuple(
+        f"{str(entry.tool_name)}({entry.result_kind}"
+        + (f":{str(entry.failure_code)}" if entry.failure_code else "")
+        + ")"
+        if hasattr(entry, "tool_name")
+        else str(entry)
+        for entry in agent_result.tool_trace
+    )
 
 
 def _default_runner_factory(
@@ -163,7 +217,9 @@ class ChatService:
             return ChatTurnResponse(answer="未指定要查询的年报文档，请先选择年份。")
 
         # 3. 组装 system prompt（构建但仅在实际调用 LLM 时使用）
-        contributions = self._build_contributions(session)
+        contributions = self._build_contributions(
+            session, document_id=document_id, user_query=user_text
+        )
         composed = self._prompt_composer.compose_from_scene(
             self._scene_config, contributions=contributions
         )
@@ -198,32 +254,51 @@ class ChatService:
                 elif hasattr(self._scene_config, "runtime"):
                     max_steps = self._scene_config.runtime.max_iterations
                 runner = self._runner_factory(llm_client, self._tool_service or _empty_tool_service(), max_steps=max_steps)
-                agent_result = runner.run(document_id=document_id, query=user_text, scene=self._scene_config.scene)
+                # 受控检索路由在 Service 层（候选词随 scene context 注入），
+                # 收敛执行在 Agent 层：runner 不 import service，只接收候选词。
+                route_plan = _route_plan_for_query(user_text)
+                agent_result = runner.run(
+                    document_id=document_id,
+                    query=user_text,
+                    scene=self._scene_config.scene,
+                    candidate_queries=(
+                        route_plan.candidate_queries if route_plan.profile_name is not None else None
+                    ),
+                )
             except Exception:
                 return ChatTurnResponse(answer="LLM 服务暂不可用，请稍后重试。")
 
+        # 5. 失败轮：成对落盘（user + assistant），保留 tool_calls / tool_trace
         if agent_result.failure is not None:
-            return ChatTurnResponse(answer=f"LLM 处理失败：{agent_result.failure.message}")
+            failure_message = f"LLM 处理失败：{agent_result.failure.message}"
+            user_turn = Turn(role="user", content=user_text)
+            assistant_turn = Turn(
+                role="assistant",
+                content=failure_message,
+                tool_trace=_tool_trace_summary(agent_result),
+                tool_calls=_tool_call_summaries(agent_result),
+            )
+            session = session.add_turn(user_turn).add_turn(assistant_turn)
+            self._session_store.save(session)
+            return ChatTurnResponse(
+                answer=failure_message,
+                tool_trace=assistant_turn.tool_trace,
+            )
 
         answer = agent_result.answer
 
-        # 5. 投资建议检测（fail-closed）
+        # 6. 投资建议检测（fail-closed）
+        original_answer = answer
         investment_advice_detected = contains_investment_advice(answer)
+        blocked_terms: tuple[str, ...] = ()
         if investment_advice_detected:
+            blocked_terms = matched_investment_advice_terms(answer)
             answer = "抱歉，不支持涉及投资建议的问题。"
 
-        # 6. 更新 session
+        # 7. 更新 session
         user_turn = Turn(role="user", content=user_text)
 
-        tool_calls = tuple(
-            ToolCallSummary(
-                tool_name=entry.tool_name,
-                arguments_display=str(entry.arguments)[:100] if entry.arguments else "",
-                success=entry.result_kind == "success",
-                failure_code=entry.failure_code if entry.result_kind != "success" else None,
-            )
-            for entry in agent_result.tool_trace
-        ) if agent_result.tool_trace else ()
+        tool_calls = _tool_call_summaries(agent_result)
 
         assistant_turn = Turn(
             role="assistant",
@@ -237,11 +312,13 @@ class ChatService:
                 for e in agent_result.tool_trace
             ),
             tool_calls=tool_calls,
+            original_content=original_answer if investment_advice_detected else None,
+            blocked_terms=blocked_terms,
         )
         session = session.add_turn(user_turn).add_turn(assistant_turn)
         self._session_store.save(session)
 
-        # 7. 检查 Episode Summary 触发条件
+        # 8. 检查 Episode Summary 触发条件
         if self._enable_episode_summary:
             self._maybe_trigger_compaction(session)
 
@@ -250,6 +327,8 @@ class ChatService:
             citations=assistant_turn.citations,
             tool_trace=assistant_turn.tool_trace,
             investment_advice_detected=investment_advice_detected,
+            original_content=assistant_turn.original_content,
+            blocked_terms=assistant_turn.blocked_terms,
         )
 
     def _maybe_trigger_compaction(self, session: Session) -> None:
@@ -461,8 +540,23 @@ class ChatService:
         other_len = len(text) - cn_chars
         return int(cn_chars * 1.5 + other_len / 4)
 
-    def _build_contributions(self, session: Session) -> dict[str, str]:
-        """从 session 构建 prompt contributions。"""
+    def _build_contributions(
+        self,
+        session: Session,
+        document_id: str | None = None,
+        user_query: str | None = None,
+    ) -> dict[str, str]:
+        """从 session 构建 prompt contributions。
+
+        参数:
+            session: 当前会话。
+            document_id: 本轮已确定的 document_id；None 时回退
+                session.pinned_state.active_document_id。
+            user_query: 当前轮用户输入；非 None 时按受控检索路由注入候选检索词。
+
+        返回:
+            contributions 字典。
+        """
         contributions: dict[str, str] = {}
 
         ps = session.pinned_state
@@ -472,6 +566,9 @@ class ChatService:
             runtime_parts.append(f"- 当前基金代码: {ps.fund_code}")
         if ps.active_year is not None:
             runtime_parts.append(f"- 查看年份: {ps.active_year}")
+        active_document_id = document_id or ps.active_document_id
+        if active_document_id:
+            runtime_parts.append(f"- 当前文档 document_id: {active_document_id}")
         contributions["runtime"] = "\n".join(runtime_parts)
 
         # fund_context contribution
@@ -494,6 +591,18 @@ class ChatService:
         history_text = self._build_history_contribution(session)
         if history_text:
             contributions["history"] = history_text
+
+        # retrieval contribution：受控候选检索词注入（Service 层路由知识，
+        # 不参与 runner 收敛执行；收敛执行只消费 runner 收到的 candidate_queries）。
+        if user_query:
+            route_plan = _route_plan_for_query(user_query)
+            if route_plan.profile_name is not None:
+                candidates = "、".join(route_plan.candidate_queries)
+                contributions["retrieval"] = (
+                    "## 受控候选检索词\n"
+                    f"- 已识别披露主题: {route_plan.profile_name}\n"
+                    f"- 请优先按顺序尝试以下候选检索词（命中即可，不要自行改写）: {candidates}"
+                )
 
         return contributions
 

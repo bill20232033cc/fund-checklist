@@ -16,9 +16,11 @@ from fund_agent.agent import (
     DeepSeekLlmClient,
     DeepSeekTransportUnavailable,
     ExecutionOptions,
+    LlmClientFailure,
     LlmToolLoopRunner,
     StreamEvent,
     StreamEventType,
+    ToolCall,
 )
 from fund_agent.fund.document_tools.constants import FailureCode, LocatorKind, ReportType, SourceKind, ToolName
 from fund_agent.fund.document_tools.docling_store import DoclingDocumentStore
@@ -411,7 +413,7 @@ def test_deepseek_transport_auth_network_timeout_rate_limit_map_to_unavailable(
     "response",
     [
         DeepSeekChatResponse(status_code=200, body=json.dumps({"choices": [{"message": {"tool_calls": []}}]})),
-        _tool_call_response(ToolName.SEARCH_DOCUMENT.value, {"query": "基金经理"}),
+        _tool_call_response(ToolName.SEARCH_DOCUMENT.value, None),
         DeepSeekChatResponse(status_code=200, body=json.dumps({"choices": [{"message": {}}]})),
     ],
 )
@@ -419,9 +421,14 @@ def test_deepseek_content_none_or_tool_parse_failed_maps_to_llm_malformed_respon
     tmp_path: Path,
     response: DeepSeekChatResponse,
 ) -> None:
-    """content=None 或 tool call 解析失败必须映射为 llm_malformed_response。"""
+    """content=None 或 tool call 结构不可解析必须映射为 llm_malformed_response。
 
-    transport = QueueTransport([response])
+    注意：缺 document_id 已不再是 malformed（S2 由 runner 用 expected 补全），
+    因此该参数化只保留真正不可解析的结构。
+    """
+
+    # S6：malformed 有界重试 1 次 → 双响应才能稳定映射为 llm_malformed_response
+    transport = QueueTransport([response, response])
     runner = LlmToolLoopRunner(
         tool_service=_service(tmp_path),
         llm_client=DeepSeekLlmClient(transport=transport, env=_env()),
@@ -431,6 +438,118 @@ def test_deepseek_content_none_or_tool_parse_failed_maps_to_llm_malformed_respon
 
     assert isinstance(result.failure, ToolFailure)
     assert result.failure.code is FailureCode.LLM_MALFORMED_RESPONSE
+    assert len(transport.requests) == 2
+
+
+def _malformed_response() -> DeepSeekChatResponse:
+    """构造结构不可解析的 provider response（空 tool_calls → _parse_tool_call 失败）。"""
+
+    return DeepSeekChatResponse(
+        status_code=200,
+        body=json.dumps({"choices": [{"message": {"tool_calls": []}}]}),
+    )
+
+
+def test_deepseek_next_step_malformed_retried_once_then_success(tmp_path: Path) -> None:
+    """非流式：第一次响应 malformed、第二次有效 → next_step 成功，共发起 2 次请求。"""
+
+    transport = QueueTransport([
+        _malformed_response(),
+        _tool_call_response(ToolName.SEARCH_DOCUMENT.value, {"document_id": _DOCUMENT_ID, "query": "基金经理"}),
+    ])
+    client = DeepSeekLlmClient(transport=transport, env=_env(), options=ExecutionOptions(stream=False))
+
+    response = client.next_step(document_id=_DOCUMENT_ID, query="基金经理", tool_results=())
+
+    assert isinstance(response.step, ToolCall)
+    assert response.step.tool_name is ToolName.SEARCH_DOCUMENT
+    assert len(transport.requests) == 2
+
+
+def test_deepseek_next_step_double_malformed_raises_with_two_requests(tmp_path: Path) -> None:
+    """非流式：连续两次 malformed → 仍抛 LLM_MALFORMED_RESPONSE，且只发起 2 次请求。"""
+
+    transport = QueueTransport([_malformed_response(), _malformed_response()])
+    client = DeepSeekLlmClient(transport=transport, env=_env(), options=ExecutionOptions(stream=False))
+
+    with pytest.raises(LlmClientFailure) as excinfo:
+        client.next_step(document_id=_DOCUMENT_ID, query="基金经理", tool_results=())
+
+    assert excinfo.value.code is FailureCode.LLM_MALFORMED_RESPONSE
+    assert len(transport.requests) == 2
+
+
+def test_deepseek_next_step_stream_malformed_retried_once_then_success(tmp_path: Path) -> None:
+    """流式路径：第一次响应 malformed、第二次有效 → next_step 成功，共发起 2 次请求。"""
+
+    transport = QueueTransport([
+        _malformed_response(),
+        _tool_call_response(ToolName.SEARCH_DOCUMENT.value, {"document_id": _DOCUMENT_ID, "query": "基金经理"}),
+    ])
+    client = DeepSeekLlmClient(transport=transport, env=_env(), options=ExecutionOptions(stream=True))
+
+    response = client.next_step(document_id=_DOCUMENT_ID, query="基金经理", tool_results=())
+
+    assert isinstance(response.step, ToolCall)
+    assert response.step.tool_name is ToolName.SEARCH_DOCUMENT
+    assert len(transport.requests) == 2
+
+
+def test_deepseek_next_step_stream_double_malformed_raises_with_two_requests(tmp_path: Path) -> None:
+    """流式路径：连续两次 malformed → 仍抛 LLM_MALFORMED_RESPONSE，且只发起 2 次请求。"""
+
+    transport = QueueTransport([_malformed_response(), _malformed_response()])
+    client = DeepSeekLlmClient(transport=transport, env=_env(), options=ExecutionOptions(stream=True))
+
+    with pytest.raises(LlmClientFailure) as excinfo:
+        client.next_step(document_id=_DOCUMENT_ID, query="基金经理", tool_results=())
+
+    assert excinfo.value.code is FailureCode.LLM_MALFORMED_RESPONSE
+    assert len(transport.requests) == 2
+
+
+def test_deepseek_tool_call_missing_document_id_filled_by_runner(tmp_path: Path) -> None:
+    """provider tool call 缺 document_id：解析通过并由 runner 用 expected 补全。"""
+
+    class MissingDocumentIdTransport(QueueTransport):
+        """首次返回缺 document_id 的 search tool call，随后返回 read_section 与 final answer。"""
+
+        def send(self, request: DeepSeekChatRequest) -> DeepSeekChatResponse:
+            """按轮次返回 provider response。"""
+
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                return _tool_call_response(ToolName.SEARCH_DOCUMENT.value, {"query": "基金经理"})
+            if len(self.requests) == 2:
+                return _tool_call_response(
+                    ToolName.READ_SECTION.value,
+                    {"section_ref": "section-0000"},
+                )
+            return _final_response(
+                "基金经理张明负责本基金投资管理。",
+                _latest_citation_from_request(request),
+                ("张明",),
+            )
+
+    transport = MissingDocumentIdTransport([])
+    runner = LlmToolLoopRunner(
+        tool_service=_service(tmp_path),
+        llm_client=DeepSeekLlmClient(
+            transport=transport,
+            env=_env(),
+            options=ExecutionOptions(stream=False),
+        ),
+    )
+
+    result = runner.run(document_id=_DOCUMENT_ID, query="基金经理")
+
+    assert result.failure is None
+    assert result.answer == "基金经理张明负责本基金投资管理。"
+    assert tuple(entry.tool_name for entry in result.tool_trace) == (
+        ToolName.SEARCH_DOCUMENT,
+        ToolName.READ_SECTION,
+    )
+    assert len(transport.requests) == 3
 
 
 def test_deepseek_malformed_json_falls_back_to_markdown_answer(tmp_path: Path) -> None:

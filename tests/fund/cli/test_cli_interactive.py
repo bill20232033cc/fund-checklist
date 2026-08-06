@@ -19,7 +19,7 @@ import pytest
 
 from fund_agent.cli.main import build_parser, run_cli
 from fund_agent.service.chat_contract import ChatTurnContract
-from fund_agent.service.chat_service import ChatService, ChatTurnRequest
+from fund_agent.service.chat_service import ChatService, ChatTurnRequest, ChatTurnResponse
 from fund_agent.service.prompt_composer import PromptComposer
 from fund_agent.service.scene_config import INTERACTIVE_SCENE_CONFIG
 from fund_agent.agent.tool_loop import AgentRunResult
@@ -129,6 +129,66 @@ class TestInteractiveCommandExecution:
 
         output = stdout.getvalue()
         assert "011649" in output or exit_code is not None
+
+    def test_interactive_blocked_answer_displays_original_and_terms(self, tmp_path: Path):
+        """被拦截回答：CLI 展示拦截提示、被拦截原文与触发词。"""
+        self._write_fake_catalog(tmp_path)
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        original = "建议买入该基金，目标价5元。"
+        blocked = ChatTurnResponse(
+            answer="抱歉，不支持涉及投资建议的问题。",
+            investment_advice_detected=True,
+            original_content=original,
+            blocked_terms=("建议买入", "目标价"),
+        )
+
+        with mock.patch("sys.stdin", io.StringIO("\n这个基金怎么样？\nexit\n")), mock.patch.object(
+            ChatService, "chat_turn", return_value=blocked
+        ):
+            exit_code = run_cli(
+                ["interactive", "--fund-code", "011649", "--work-dir", str(tmp_path)],
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+        output = stdout.getvalue()
+        assert exit_code == 0
+        assert "[投资建议检测] 回答已拦截。" in output
+        assert "[被拦截原文]" in output
+        assert original in output
+        assert "[触发词]" in output
+        assert "建议买入" in output
+
+    def test_interactive_failure_trace_displayed_with_verbose(self, tmp_path: Path):
+        """--enable-tool-trace：失败轮工具 trace 在 CLI 展示。"""
+        self._write_fake_catalog(tmp_path)
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        failed = ChatTurnResponse(
+            answer="LLM 处理失败：章节不存在",
+            tool_trace=("search_document(success)", "read_section(failure:not_found)"),
+        )
+
+        with mock.patch("sys.stdin", io.StringIO("\n基金规模是多大？\nexit\n")), mock.patch.object(
+            ChatService, "chat_turn", return_value=failed
+        ):
+            exit_code = run_cli(
+                [
+                    "interactive",
+                    "--fund-code",
+                    "011649",
+                    "--work-dir",
+                    str(tmp_path),
+                    "--enable-tool-trace",
+                ],
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+        output = stdout.getvalue()
+        assert exit_code == 0
+        assert "[工具调用: search_document(success), read_section(failure:not_found)]" in output
 
 
 class TestReplCommandParsing:

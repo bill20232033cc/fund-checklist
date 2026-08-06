@@ -216,6 +216,15 @@ report / judgment contract
 - `AgentRunResult` 至少包含 `answer`、`citations`、`tool_trace`、`failure`。
 - `ToolTraceEntry` 至少包含 `tool_name`、`arguments`、`result_kind`、`failure_code`。
 - `search_document` 无命中时不猜测章节，返回 `AgentRunResult.failure`。
+- 已实现（2026-08-02，Phase 7.4，见 `.sisyphus/plans/interactive-e2e-fix-20260802.md`）：
+  - 工具失败（ToolFailure）回喂 LLM 作为下一轮输入，允许修正 section_ref / 工具名 / document_id；重复失败调用按 key 去重短路；终态失败（step 耗尽、终答守卫、provider 异常）仍 fail-closed。
+  - 失败轮在 session 中成对持久化（含 tool_trace 与 tool_calls）；被投资建议拦截的回答保留原文与触发词（磁盘往返可保留）。
+  - tool_trace 边界：工具失败路径 trace 非空；provider 首轮失败（next_step 内）trace 为空。
+  - `document_id` 缺失时由 runner 用 expected 补全；未知工具名先有界归一化（去空白、去尾部括号参数），仍未知才拒绝且 trace 保留原始名。
+  - prompt 硬规则：无事实检索目标问题直接 final answer；空搜索最多换 1 次查询词后声明未找到；section_ref/table_ref 一律从工具结果复制。
+  - 投资建议检测（决策 A）：弱词豁免窗口 ±100 字符，事实性上下文词 15 个；指令动词（建议/应当/可考虑/适合/值得持有/应买入/应卖出/应增持/应减持）拦截；无上下文词 fail-closed 兜底；指令动词不含裸「应」（避免误命中 应付/应计）；main.py 用户输入预检合一为单一真源。
+  - provider malformed 有界重试 1 次（stream + 非 stream；重试后仍 fail-closed，不回喂）。
+  - interactive 终答投资建议守卫有界改写重试 1 次（重答仍走同一守卫；ask/generate 不重试）。
 
 禁止：
 
@@ -520,6 +529,7 @@ Slice 6 非目标：
 
 - fallback 必须由失败分类显式驱动。
 - 不得用 fallback 掩盖 `schema_drift`、`identity_mismatch`、`integrity_error`。
+- 工具失败回喂不新增 failure code；`llm_malformed_response` 仍仅用于 provider response 结构不可解析。
 - parser health 至少验证：存在可读文本、章节或可替代章节索引、表格索引可安全为空但不能破坏章节读取。
 
 ## 6.5 审计管道架构概述
@@ -649,6 +659,78 @@ Slice 6 非目标：
 - 该章节是否处于数据不足状态
 - 触发了哪些降级规则
 - 最终评分及权重调整情况
+
+### 6.8 章节级并发（Phase 7.5）
+
+报告生成（`ReportGenerationCoordinator.generate_report`）的章节执行并发语义（2026-08-05 裁决，Mimo review ACCEPTED）：
+
+- 四阶段依赖顺序：A 前置串行（预生成 data_table + global_numbers，纯程序计算）→ B 中间并行（Ch1-6 各自完整「写→审计→重写」闭环，章间零依赖）→ C 决策串行（B 全部 join 后 all_passed 判定；不通过则 Ch0/Ch7 模板生成并提前返回）→ D 收尾并行（Ch0/Ch7 带 Ch1-6 内容摘要并行生成）。**B 与 D 之间必须完全 join**，保证 Ch0/Ch7 永远读到 Ch1-6 最终内容。
+- 并发机制：`ThreadPoolExecutor(max_workers=effective_concurrency)`，阶段 B/D 复用同一 executor；worker 运行完整单章闭环（等价 Dayu 单章 worker 模式，但 fc 不引入 async 事件循环，DeepSeek 调用为同步 `generate_text`）。
+- 每 worker 独立 `DeepSeekLlmClient`（`clone()`：同 transport/env/options/temperature，独立 `_cumulative_usage`）；章节闭环内 3 处 `self._llm_client` 引用（LlmAuditor / ChapterRepairer / `_generate_chapter_content`）显式下传局部 client。
+- 并发上限 lane：`chapter_concurrency`，生效优先级 CLI `--concurrency` → `GenerateReportRequest.chapter_concurrency` → env `FUND_CHECKLIST_CHAPTER_CONCURRENCY` → 默认 4（范围 1..8；`1` = 串行等价）。Service 层唯一解析点；client 无 `clone()` 时回退串行 + warning（不破坏既有 fake 测试）。
+- 线程安全边界：`_process_states` 按章分立 key + `threading.Lock` 防御；ArtifactStore 按章分文件、唯一 writer；共享输入（performance/holdings/allocation/fees/fund_manager/scale/evidence/signal/global_numbers/fund_type）全阶段只读；每章 data_table 在 worker 内独立重算，不缓存复用；warnings 由 worker 返回值带回、主线程按 chapter_id 排序；worker 禁止直接 print（未来进度输出必须经主线程）。
+- 失败语义：单章失败仅影响该章（worker 顶层兜异常 → None + failed state + warning），`passed` / `passed_with_degradation` / `audit_exhausted` 逐章判定不变；cancel 用 `executor.shutdown(wait=True, cancel_futures=True)` 收敛，不产生半报告文件。
+- 与 Dayu 的差异：不引入 dayu runtime/代码；不使用 async 事件循环；lane 命名独立（`chapter_concurrency`，`write_chapter` 仅为参考量级）；并发不改变每章 prompt 与 LLM 调用序列（仅执行顺序交错），输出按 chapter_id 0..7 稳定组装。
+
+### 6.9 报告输出渲染（PDF 引擎 fallback，2026-08-05 裁决）
+
+`_export_pdf` 的渲染语义（Mimo review ACCEPTED）：
+
+- 引擎 fallback 链（任一成功即返回 `(pdf_path, None)`）：① `xelatex` 可用 → pandoc `--pdf-engine=xelatex`（现行路径）；② `Chrome` 可用 → pandoc md→HTML（gfm→html5 standalone + 内嵌打印 CSS）→ Headless Chrome `--print-to-pdf`（A4 794×1123，`--no-pdf-header-footer`，timeout 120s）；③ 都不可用/都失败 → 回退 md + warning（返回签名 `(str, str|None)` 不变）。
+- Chrome 探测顺序：`PUPPETEER_EXECUTABLE_PATH` → PATH `google-chrome` → macOS 默认 `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`；pandoc 与 xelatex 均用 `shutil.which` 前置探测（避免无谓 subprocess 失败）。
+- 打印 CSS 为原创资产（`fund_agent/service/assets/report_print.css`，不复制 dayu 文件）：`@page A4` + `@media print`、中英文换行、表格/代码块防溢出；HTML 中间产物放临时目录，成功转 PDF 后清理。
+- 参考：dayu/render/render.py（md→HTML+打印 CSS→Chrome print-to-pdf）仅作架构参考，不引入其 runtime/代码。
+
+### 6.10 interactive 问答质量语义（检索路由 + 收敛 + 终答，2026-08-05 裁决）
+
+interactive 问答的检索与终答语义（Mimo review ACCEPTED，用户按推荐裁决）：
+
+- 受控检索路由：新增 `manager_holdings` profile（target：9.4 期末基金管理人的从业人员持有本基金；candidate_queries 覆盖 持有本基金 / 基金经理持有 / 期末基金管理人的从业人员持有本基金 / 基金经理持有本基金），复用 `_extract_manager_holding` 的 9.4 定位语义；该 profile 的候选词为 4 个，Service 候选上限（原始 query + 受控候选）同步调整为 5；规模、份额、基准收益率、超额收益率、十大持仓 等 profile 排后续 slice。
+- 空结果收敛契约：search 连续 2 次 0 命中（interactive）→ runner 强制收敛返回「未找到相关数据」，不依赖模型自觉；有 profile 且候选词未用尽时自动用候选词重试（最多 1 轮）。候选词注入在 Service 层（chat_service 基于 `_route_plan_for_query`），收敛执行在 Agent 层（runner 不 import service）。
+- 终答契约：保持「最终回答必须返回 JSON」；runner 解包（content 为 JSON 且含 answer 字段 → 提取 answer 展示，citations/key_facts 落盘）。原文粘贴检测：answer 与任一 evidence 连续重叠 ≥40 字符或 >800 字 → 有界重答 1 次，仍超标截断为摘要格式。
+- 预算：interactive `max_iterations` 20 → 12；interactive 方案 E（跳过 evidence/citation 校验）保持不变（Phase 7.4 已裁决口径）。
+
+### 6.11 业绩抽取 A/C 分段表 + 关联 ETF 持仓源（2026-08-06 裁决）
+
+业绩表与持仓源的语义（Mimo review ACCEPTED）：
+
+- **业绩表 A/C 分段支持**：3.2.1 份额净值增长率表可能按 A/C 份额拆成多表/分段表（C 类段无表头、A/C 合并表出现多个「过去一年」行，实测 007466 2024/2025）。抽取规则：①「过去一年」行唯一性按 `share_scope` 过滤（每个份额类别各取自己的过去一年行），不再要求单表内全局唯一；② 无表头部分表用同 section 相邻 A 类表头对齐列定位，定位失败才 not_found；③ 验收真值（007466 A 类过去一年）：2024 净值增长率 21.06% / 基准 17.00% / 超额 4.06%；2025 4.18% / 0.47% / 3.71%。
+- **报告数据表防错填**：性能字段缺失时单元格显式标「缺失」，禁止用相邻费率等其他列数据补空（实测 Ch2 曾把费率行 0.50/0.10/0.25/不收取 错填进 2024/2025 业绩列）。
+- **关联 ETF 持仓集中度**：ETF 联接基金（如 007466 → 标的 ETF 512890 红利低波ETF华泰柏瑞）的持仓集中度改从关联标的 ETF 年报 top-10 提取（`.fund_checklist_512890`，2021-2025 可用）；generate 新增可选关联源参数（如 `--holdings-source-fund 512890 --holdings-source-workdir .fund_checklist_512890`），Service 层解析，报告标注「来源：标的 ETF 512890 年报」；未指定时保持本基金持仓现状，不破坏既有调用方。
+
+### 6.12 QDII 持仓 fallback 语义（2026-08-06 裁决）
+
+主动/指数 QDII 基金前十大持仓抽取（Mimo review ACCEPTED）：
+
+- `search_document` 只匹配 `section.text`、不匹配 `section.title`（docling_store.py:510）；QDII 持仓章节标题「期末按公允价值…前十名股票投资明细」正文不含候选词 → equity query 0 命中。**不改 search_document public contract**。
+- 持仓抽取的 QDII fallback 分支（extraction.py:1408/1462）扩展为 `"QDII" in fund_name` 且基金类型非 bond/index_feeder 即进入：先 `_QDII_HOLDINGS_QUERY`，再 `_extract_qdii_holdings_from_tables` 直接扫描（表头适配已实现：公司名称→stock_name、证券代码→stock_code、占基金资产净值比例→percentage，extraction.py:6318-6342）。
+- 实测 519696 持仓表为跨页分裂表（2025 table-61 仅含第 1-5 名；2024 table-61 表头截断、数据行全在续表），直接扫描扩展为：表头被跨页截断时用续表首行碎片补齐（`_merge_qdii_header_fragments`），同章节跨页续表按列合并、跳过碎片行（首列非序号），直至 10 行；QDII 分支以直接扫描结果为准（query 路径可能只命中续表碎片行），query 路径仅作兜底。
+- `_holdings_column_indexes` 对双公司名称列优先中文列（公司名称（中文）→stock_name）；A 股 股票名称 列映射不变。
+- 验收样例（S1，2026-08-06）：519696（交银环球精选混合 QDII）2024/2025 top-10 各 10 行且 failure=None（2024 首行 腾讯控股/700 HK/3.33；2025 前三 腾讯控股/中国宏桥/中芯国际）。
+
+### 6.13 QDII 费率「管理人报酬」措辞（2026-08-06 裁决）
+
+费率抽取的措辞语义（Mimo review ACCEPTED）：
+
+- QDII 年报把管理费表述为「支付基金管理人的**管理人报酬**按前一日基金资产净值 X%…」（无「基金管理费」字样）；`_extract_fee_rates_from_agent_result` 主/回退路径以 `_FEE_RATE_MANAGEMENT_WORDINGS`（extraction.py:142 附近）中的「管理人报酬」作标题块查找别名，输出字段仍为 `基金管理费`；`_FeeRateExtractionSpec` 正则（extraction.py:442）已覆盖 `(?:管理费|管理人报酬)`，但多年度路径不走该 spec，已同步。注意「管理人报酬」**不进入** `_FEE_RATE_TITLES`：该元组同时喂 10B 三标题契约（`_fee_rate_segments`/`_fee_rate_section_citations`），直接追加会破坏 A 股既有路径，且会把「基金管理费」块截断在注文「管理人报酬按…」处。
+- 托管费 2023/2024 缺失（fee_queries 已含「基金托管费」）需逐年度 debug `search_document` → `_matched_disclosure_titles` 绑定（acceptable title family 映射）。
+- 验收真值：519696 五年管理费/托管费 = 2021-2024 1.80%/0.35%、2025 1.20%/0.20%。
+
+### 6.14 资产配置 asset_allocation 全表扫描 fallback（2026-08-06 裁决）
+
+资产配置抽取的 fallback 语义（Mimo review ACCEPTED）：
+
+- `search("期末基金资产组合情况")` 可能命中 caption 含查询词的**非资产配置表**（实测 519696-2023 命中 table-0059 估值表），而真正资产配置表（table-0060，表头 序号/项目/金额/占基金总资产的比例（%））caption 不含查询词 → citation 错绑后 asset_allocation 空。
+- `_extract_allocation_from_agent_result`（extraction.py:6601）在 citation 表循环后增加 asset_allocation 全表扫描 fallback（与既有 industry_allocation fallback 对称）：遍历 `list_tables`，`_is_asset_allocation_table` 命中则 `_parse_asset_allocation_table`，break。
+- 表结构判定/解析函数已就绪（`_is_asset_allocation_table`:6642、`_parse_asset_allocation_table`:6675），无需适配解析逻辑。
+
+### 6.15 持有本基金 9.2/9.4 回退口径（2026-08-06 裁决）
+
+`FundManagerInfo.holds_fund` 的抽取口径（Mimo review ACCEPTED）：
+
+- 9.4 基金经理持有区间表存在（如 163415 A类>100万份）→ `holds_fund` = 区间文本（既有语义，命中即 break 不回退）。
+- 9.4 区间表不存在（实测 519696-2025）→ 回退 9.2 从业人员整体持有（table-80「基金管理人所有从业人员持有本基金 7,312.84 份 / 0.01%」），口径标注**直接嵌入 holds_fund 字符串**（如「基金经理区间未披露；从业人员整体持有 7,312.84 份（0.01%）」），3 处渲染点（chapter_generator.py:418 / extraction.py:3720 / audit_pipeline.py:2621 的 `holds_fund or '未披露'`）零改动生效。
+- `FundManagerInfo.holds_fund` docstring（models.py:624）同步更新回退语义。
 
 
 ## 7. dayu 可迁移部分
@@ -885,6 +967,8 @@ Post-MVP 10C 裁决为 fee_rates value extraction contract：
 - 10C 可新增受控 extraction DTO 和 Service 方法 / use case；不得修改 `search_document` public contract，不得改变 Agent / Store / ToolService 职责边界。
 - 10C 暂不改变 CLI 默认输出格式；优先在 Service / tests 层验证结构化字段抽取，CLI 仍可保持 10B 的原文 answer / citation。
 - 10C 不接 LLM、embedding、外部搜索服务，不做开放语义理解、top-N rerank、歧义消解、template contract execution、chapter contract execution、自动报告或投资判断。
+- 2026-08-03 补充（fee_rates 聚合语义）：fee_rates contract 允许路由聚合全部三个 candidate query 的 success 结果（`aggregate_all_matches=True`），因为各 query 的确定性 answer 存在正文互补（销售服务费费率正文只出现在「销售服务费」query 的 answer）；聚合时按标题块去重（剥离「相关表格:」金额表块），citations 按 locator 去重合并；section citation 覆盖按 `section_ref` 去重统计，TABLE locator 携带的 `section_ref` 计入（table-0052 → section-0398 已验证）。该语义只作用于 fee_rates，holdings / performance 等契约保持标题去重聚合。
+- 2026-08-04 补充（百分比归一化 + 当期适用费率实现细则）：Docling 分块可能把 `1.50%` 切成 `1.  50%`（数字与小数点/百分号间出现空白），抽取前必须做百分比邻域归一化（`1.  50%` → `1.50%`），否则正则失配会误捕获相邻费率（163415-2022 管理费误取 0.25%）或返回 not_found（163415-2021 管理费）。费率沿革披露（「自 YYYY 年 M 月 D 日起…」）只取「自…起」之后的当期适用费率；无沿革文本时取该费率标题块内最后一个百分比（年报注文以当期费率结尾）。10C 路径 `_extract_fee_rate_fields` 已实现沿革选择（多匹配且含「自 YYYY」时取最后一个），多年度报告路径 `_extract_fee_rates_from_agent_result` 同步该语义。163415 五年度验收样例：管理费/托管费 2021 1.50%/0.25%、2022 1.50%/0.25%、2023 1.20%/0.20%、2024 1.20%/0.20%、2025 1.20%/0.20%；销售服务费 C 类仅 2025 披露 0.60%（其余年份无费率正文）。
 
 Slice 10C 已经 MiMo review `ACCEPTED`：
 
@@ -1672,4 +1756,3 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
   - Phase 5 范围定义（待裁决）
 
   **后续研究**：基金类型划分 + preferred_lens 设计（下一阶段）。
-

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -446,9 +447,10 @@ def _parse_tables(
             section_ref=section_ref,
             table_ref=table_ref,
         )
+        section_title = _section_title_for_ref(sections, section_ref)
         current = _ParsedTable(
             table_ref=table_ref,
-            caption=_table_caption(item, ref_text),
+            caption=_table_caption(item, ref_text, fallback_title=section_title),
             section_ref=section_ref,
             rows=rows,
             locator=locator,
@@ -501,10 +503,11 @@ def _section_search_candidates(
     """构造章节正文搜索候选。"""
 
     candidates: list[_SearchCandidate] = []
+    normalized_query = _whitespace_stripped(query)
     for section in sections:
         if within_section_ref is not None and section.section_ref != within_section_ref:
             continue
-        score = section.text.count(query)
+        score = _whitespace_stripped(section.text).count(normalized_query)
         if score <= 0:
             continue
         locator = Locator(
@@ -525,7 +528,7 @@ def _section_search_candidates(
                 section_ref=section.section_ref,
                 table_ref=None,
                 title=section.title,
-                excerpt=_excerpt(section.text, query, DEFAULT_SEARCH_EXCERPT_CHARS),
+                excerpt=_search_excerpt(section.text, query, DEFAULT_SEARCH_EXCERPT_CHARS),
                 locator=locator,
                 match_kind=SearchMatchKind.SECTION_TEXT,
             )
@@ -576,9 +579,10 @@ def _table_row_search_candidates(table: _ParsedTable, query: str) -> list[_Searc
     """构造有界表格行搜索候选，摘录只返回命中行。"""
 
     candidates: list[_SearchCandidate] = []
+    normalized_query = _whitespace_stripped(query)
     for row_index, row in enumerate(table.rows[:DEFAULT_TABLE_MAX_ROWS]):
         row_text = _table_row_text(row)
-        score = row_text.count(query)
+        score = _whitespace_stripped(row_text).count(normalized_query)
         if score <= 0:
             continue
         candidates.append(
@@ -588,7 +592,7 @@ def _table_row_search_candidates(table: _ParsedTable, query: str) -> list[_Searc
                 section_ref=table.section_ref or "",
                 table_ref=table.table_ref,
                 title=table.caption or f"表格 {table.table_ref}",
-                excerpt=_excerpt(row_text, query, DEFAULT_SEARCH_EXCERPT_CHARS),
+                excerpt=_search_excerpt(row_text, query, DEFAULT_SEARCH_EXCERPT_CHARS),
                 locator=table.locator,
                 match_kind=SearchMatchKind.TABLE_ROW,
             )
@@ -719,12 +723,48 @@ def _zero_based_int(value: object) -> int:
     return value
 
 
-def _table_caption(item: dict[str, object], ref_text: dict[str, str]) -> str | None:
-    """解析 captions[] 引用或直接文本，缺失时返回 None。"""
+_PAGE_NOISE_PATTERN = (
+    r"第\s*[0-9一二三四五六七八九十百千万]+\s*页"
+    r"(?:\s*共\s*[0-9一二三四五六七八九十百千万]+\s*页)?"
+)
+_UNIT_NOISE_PATTERN = r"单位\s*[：:]\s*(?:人民币元|人民币|元)"
+_NO_SEMANTIC_CAPTION_RE = re.compile(
+    rf"^(?:{_PAGE_NOISE_PATTERN}|{_UNIT_NOISE_PATTERN})"
+    rf"(?:\s+(?:{_PAGE_NOISE_PATTERN}|{_UNIT_NOISE_PATTERN}))*$"
+)
+
+
+def _is_semantic_caption(caption: str) -> bool:
+    """判断 caption 是否包含语义文本（非仅页码/单位噪声）。"""
+
+    return _NO_SEMANTIC_CAPTION_RE.match(caption.strip()) is None
+
+
+def _section_title_for_ref(
+    sections: tuple[_ParsedSection, ...],
+    section_ref: str | None,
+) -> str | None:
+    """按 section_ref 查找章节标题，缺失时返回 None。"""
+
+    if section_ref is None:
+        return None
+    for section in sections:
+        if section.section_ref == section_ref:
+            return section.title
+    return None
+
+
+def _table_caption(
+    item: dict[str, object],
+    ref_text: dict[str, str],
+    *,
+    fallback_title: str | None = None,
+) -> str | None:
+    """解析 captions[] 引用或直接文本；缺失或仅含无语义噪声时回填章节标题。"""
 
     captions = item.get("captions")
     if not isinstance(captions, list):
-        return None
+        return fallback_title
     values: list[str] = []
     for caption in captions:
         if isinstance(caption, dict) and isinstance(caption.get("$ref"), str):
@@ -737,7 +777,10 @@ def _table_caption(item: dict[str, object], ref_text: dict[str, str]) -> str | N
                 values.append(text)
         elif isinstance(caption, str) and caption.strip():
             values.append(caption.strip())
-    return " ".join(values) or None
+    caption_text = " ".join(values) or None
+    if caption_text is None or not _is_semantic_caption(caption_text):
+        return fallback_title
+    return caption_text
 
 
 def _section_ref_for_page(sections: tuple[_ParsedSection, ...], page_no: int | None) -> str | None:
@@ -908,3 +951,47 @@ def _excerpt(text: str, query: str, max_chars: int) -> str:
     start = max(index - half_window, 0)
     end = min(start + max_chars, len(text))
     return text[start:end]
+
+
+def _whitespace_stripped(text: str) -> str:
+    """去除所有空白字符，用于空白归一化匹配。"""
+
+    return re.sub(r"\s+", "", text)
+
+
+def _map_normalized_index(original: str, normalized_index: int) -> int:
+    """把去除空白后的字符下标映射回原文下标。
+
+    参数:
+        original: 原始文本。
+        normalized_index: 去除空白后文本中的字符下标。
+
+    返回:
+        对应原文下标；超出末尾时返回 len(original)。
+    """
+
+    cursor = 0
+    for original_index, char in enumerate(original):
+        if char.isspace():
+            continue
+        if cursor == normalized_index:
+            return original_index
+        cursor += 1
+    return len(original)
+
+
+def _search_excerpt(text: str, query: str, max_chars: int) -> str:
+    """构造搜索命中摘录：优先字面定位，其次按空白归一化定位原文。"""
+
+    if text.find(query) >= 0:
+        return _excerpt(text, query, max_chars)
+    normalized_text = _whitespace_stripped(text)
+    normalized_query = _whitespace_stripped(query)
+    index = normalized_text.find(normalized_query)
+    if index < 0:
+        return _bounded(text, max_chars)[0]
+    start = _map_normalized_index(text, index)
+    end = _map_normalized_index(text, index + len(normalized_query))
+    half_window = max(max_chars // 2, end - start)
+    begin = max(start - half_window, 0)
+    return text[begin : min(begin + max_chars, len(text))]

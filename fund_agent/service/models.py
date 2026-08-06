@@ -26,7 +26,25 @@ _ROUTE_RESULT_FAILURE: QueryRouteResultKind = "failure"
 
 @dataclass(frozen=True)
 class _DisclosureLocatorContract:
-    """Service 内部披露定位 registry contract。"""
+    """Service 内部披露定位 registry contract。
+
+    参数:
+        profile_name: 受控 profile 名称。
+        aliases: 用户 query 别名，用于命中 profile。
+        candidate_queries: 按顺序尝试的受控 candidate query。
+        acceptable_title_family: 可接受的披露标题族。
+        requires_table_citation: 是否要求 TABLE locator citation。
+        extraction_allowed: 是否允许抽取；registry 固定为 False。
+        aggregate_all_matches: 聚合语义开关；True 时路由聚合该 profile
+            全部 candidate success 结果（不做标题集合去重），仅 fee_rates
+            使用；其余契约默认 False，保持标题去重聚合。
+
+    返回:
+        不可变披露定位 contract。
+
+    异常:
+        本模型不执行 I/O，不抛出业务异常。
+    """
 
     profile_name: str
     aliases: tuple[str, ...]
@@ -34,6 +52,7 @@ class _DisclosureLocatorContract:
     acceptable_title_family: tuple[str, ...]
     requires_table_citation: bool
     extraction_allowed: bool
+    aggregate_all_matches: bool = False
 
 
 @dataclass(frozen=True)
@@ -602,7 +621,9 @@ class FundManagerInfo:
         tenure_start: 任职日期文本。
         years_of_service: 证券从业年限文本。
         investment_strategy: 投资策略描述（从§4.4.1提取）。
-        holds_fund: 基金经理持有本基金区间（如"10~50万份"）。
+        holds_fund: 基金经理持有本基金区间（如"10~50万份"）；无 9.4 区间表时
+            回退从业人员整体持有份额数（如"基金经理区间未披露；从业人员整体持有
+            7,312.84 份（0.01%）"）。
 
     返回:
         不可变基金经理信息 DTO。
@@ -931,6 +952,7 @@ class ChapterEvidence:
 
     参数:
         holdings_citations: 持仓数据 citation（按年份）。
+        holdings_source_note: 关联持仓源说明（如「来源：标的 ETF 512890 年报」）。
         fee_citations: 费率数据 citation（按年份）。
         allocation_citations: 资产配置 citation（按年份）。
         performance_citations: 业绩数据 citation（按年份）。
@@ -942,6 +964,7 @@ class ChapterEvidence:
     """
 
     holdings_citations: dict[int, Citation | None] = field(default_factory=dict)
+    holdings_source_note: str = ""
     fee_citations: dict[int, Citation | None] = field(default_factory=dict)
     allocation_citations: dict[int, Citation | None] = field(default_factory=dict)
     performance_citations: dict[int, Citation | None] = field(default_factory=dict)
@@ -960,6 +983,11 @@ class GenerateReportRequest:
         years: 需要的年度数据列表（默认 5 年）。
         work_dir: 受控工作目录。
         output_format: 输出格式（json / markdown / pdf）。
+        chapter_concurrency: 章节生成并发上限（1..8）；None 时由 Service 层
+            按 env FUND_CHECKLIST_CHAPTER_CONCURRENCY → 默认 4 解析；1 为串行等价。
+        holdings_source_fund: 可选关联持仓源基金代码（如 ETF 联接基金的标的 ETF 512890）；
+            指定后持仓集中度改从关联源提取。
+        holdings_source_workdir: 可选关联持仓源工作目录（如 .fund_checklist_512890）。
 
     返回:
         不可变请求 DTO。
@@ -971,6 +999,9 @@ class GenerateReportRequest:
     years: tuple[int, ...] | list[int] = ()
     work_dir: Path = Path(".fund_checklist")
     output_format: str = "json"
+    chapter_concurrency: int | None = None
+    holdings_source_fund: str = ""
+    holdings_source_workdir: Path | None = None
 
 
 @dataclass(frozen=True)

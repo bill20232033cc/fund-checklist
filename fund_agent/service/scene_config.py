@@ -96,9 +96,11 @@ _INTERACTIVE_FRAGMENTS = (
 INTERACTIVE_SCENE_CONFIG = SceneConfig(
     scene="interactive",
     fragments=_INTERACTIVE_FRAGMENTS,
-    context_slots=("runtime", "fund_context", "memory", "history"),
+    context_slots=("runtime", "fund_context", "memory", "history", "retrieval"),
     model=SceneModelSpec(default_name="deepseek-v4-pro", temperature=0.7),
-    runtime=SceneRuntimeSpec(max_iterations=20),
+    # 2026-08-05 裁决：interactive max_iterations 20 → 12，配合空结果强制收敛
+    # 防止模型过度探索（design.md §6.10）。
+    runtime=SceneRuntimeSpec(max_iterations=12),
     allowed_tools=(
         ToolName.SEARCH_DOCUMENT.value,
         ToolName.READ_SECTION.value,

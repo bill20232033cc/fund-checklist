@@ -17,7 +17,7 @@ from fund_agent.fund.document_tools.local_pdf_source import LocalPdfSourceProvid
 from fund_agent.fund.document_tools.models import PdfImportRequest, ReportIdentity
 
 
-SAMPLE_PDF = Path("基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf")
+SAMPLE_PDF = Path("基金年报/011649_易方达逆向投资混合_2025_annual_report.pdf")
 
 
 def _identity(document_id: str = "004393-2024-annual_report-testfingerprint") -> ReportIdentity:
@@ -47,9 +47,9 @@ def test_convert_local_pdf_writes_docling_json(tmp_path, monkeypatch) -> None:
     imported = provider.import_pdf(
         PdfImportRequest(
             path=SAMPLE_PDF,
-            fund_code="004393",
-            fund_name="安信企业价值优选混合型证券投资基金",
-            year=2024,
+            fund_code="011649",
+            fund_name="易方达逆向投资混合",
+            year=2025,
         )
     )
     pdf_bytes = provider.blob_store.read_pdf(imported.stored_blob_ref)

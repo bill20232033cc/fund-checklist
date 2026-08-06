@@ -249,6 +249,30 @@ class DeepSeekLlmClient:
         """返回会话累计 token 用量。"""
         return self._cumulative_usage
 
+    def clone(self) -> "DeepSeekLlmClient":
+        """创建与当前实例同配置但独立 usage 的新实例。
+
+        参数:
+            无。
+
+        返回:
+            新的 DeepSeekLlmClient；transport/env/timeout/options/system_prompt/
+            temperature 与原实例一致，_cumulative_usage 从零开始
+            （供章节级并发时每 worker 独立 usage 账本）。
+
+        异常:
+            无。
+        """
+
+        return DeepSeekLlmClient(
+            transport=self._transport,
+            env=self._env,
+            timeout_seconds=self._timeout_seconds,
+            options=self._options,
+            system_prompt=self._system_prompt,
+            temperature=self._temperature,
+        )
+
     def next_step(
         self,
         *,
@@ -261,6 +285,9 @@ class DeepSeekLlmClient:
 
         network error / 429 / timeout → 3 次指数退避重试（1s/2s/4s）。
         auth error（401/403）→ 不重试，立即 fail。
+        response 不可解析（llm_malformed_response，stream 与非 stream 两条路径）→
+        最多重试 1 次（重新发起一次新请求，不 sleep）；重试后仍 malformed 才抛
+        LlmClientFailure(LLM_MALFORMED_RESPONSE)，fail-closed 不变。
         stream 选项控制是否使用 SSE 传输；默认 True。
         """
 
@@ -292,43 +319,57 @@ class DeepSeekLlmClient:
             timeout_seconds=self._timeout_seconds,
         )
 
-        max_retries = 3
-        last_exc: Exception | None = None
-        for attempt in range(max_retries):
-            try:
-                if use_stream:
-                    lines = list(self._transport.send_stream(request))
-                    body = json.dumps(_collect_sse_full_response(iter(lines)), ensure_ascii=False)
-                    chat_response = _parse_response(body)
+        def _run_once() -> ChatResponse:
+            """单轮请求：unavailable 3 次退避重试，401/403 立即 fail。"""
+
+            max_retries = 3
+            last_exc: Exception | None = None
+            for attempt in range(max_retries):
+                try:
+                    if use_stream:
+                        lines = list(self._transport.send_stream(request))
+                        body = json.dumps(_collect_sse_full_response(iter(lines)), ensure_ascii=False)
+                        chat_response = _parse_response(body)
+                        if chat_response.usage:
+                            self._cumulative_usage += chat_response.usage
+                        return chat_response
+                    response = self._transport.send(request)
+                except DeepSeekTransportUnavailable as exc:
+                    if exc.status_code in (401, 403):
+                        raise LlmClientFailure(FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE) from exc
+                    last_exc = exc
+                    if attempt < max_retries - 1:
+                        _time.sleep(2**attempt)
+                    continue
+
+                if response.status_code in (401, 403):
+                    raise LlmClientFailure(FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE)
+                if 200 <= response.status_code < 300:
+                    chat_response = _parse_response(response.body)
                     if chat_response.usage:
                         self._cumulative_usage += chat_response.usage
                     return chat_response
-                response = self._transport.send(request)
-            except DeepSeekTransportUnavailable as exc:
-                if exc.status_code in (401, 403):
-                    raise LlmClientFailure(FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE) from exc
-                last_exc = exc
+                # 非 2xx → 重试
+                last_exc = LlmClientFailure(FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE)
                 if attempt < max_retries - 1:
                     _time.sleep(2**attempt)
-                continue
 
-            if response.status_code in (401, 403):
-                raise LlmClientFailure(FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE)
-            if 200 <= response.status_code < 300:
-                chat_response = _parse_response(response.body)
-                if chat_response.usage:
-                    self._cumulative_usage += chat_response.usage
-                return chat_response
-            # 非 2xx → 重试
-            last_exc = LlmClientFailure(FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE)
-            if attempt < max_retries - 1:
-                _time.sleep(2**attempt)
+            if isinstance(last_exc, DeepSeekTransportUnavailable):
+                raise LlmClientFailure(FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE) from last_exc
+            if last_exc is not None:
+                raise last_exc
+            raise LlmClientFailure(FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE)
 
-        if isinstance(last_exc, DeepSeekTransportUnavailable):
-            raise LlmClientFailure(FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE) from last_exc
-        if last_exc is not None:
-            raise last_exc
-        raise LlmClientFailure(FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE)
+        malformed_retries = 1
+        for malformed_attempt in range(malformed_retries + 1):
+            try:
+                return _run_once()
+            except LlmClientFailure as exc:
+                if exc.code is not FailureCode.LLM_MALFORMED_RESPONSE:
+                    raise
+                if malformed_attempt >= malformed_retries:
+                    raise
+                # provider 单次响应不可解析：重新发起一次新请求（最多 1 次，不 sleep）
 
     def next_step_stream(
         self,
@@ -518,17 +559,27 @@ def _safe_tool_result(
     *,
     remaining_budget: int | None = None,
 ) -> dict[str, Any]:
-    """将 runner ToolResult 经 ToolResult 信封包裹后投射为 LLM-facing dict。"""
+    """将 runner ToolResult 经 ToolResult 信封包裹后投射为 LLM-facing dict。
+
+    成功条目经 Envelope.success 包裹；失败反馈条目经 Envelope.error 包裹，
+    复用 project_for_llm 的 ok=False 投影（{"error": code, "message": message}）。
+    """
 
     from fund_agent.agent.tool_result import ToolResult as Envelope, project_for_llm
 
-    envelope = Envelope.success(
-        value={
-            "tool_name": result.tool_name.value,
-            "evidence_text": result.evidence_text,
-            "citations": [_safe_citation(citation) for citation in result.citations],
-        },
-    )
+    if result.failure is not None:
+        envelope = Envelope.error(
+            code=result.failure.code.value,
+            message=result.failure.message,
+        )
+    else:
+        envelope = Envelope.success(
+            value={
+                "tool_name": str(result.tool_name),
+                "evidence_text": result.evidence_text,
+                "citations": [_safe_citation(citation) for citation in result.citations],
+            },
+        )
     return project_for_llm(envelope, budget=remaining_budget)
 
 
@@ -646,14 +697,19 @@ def _extract_usage(payload: dict) -> TokenUsage | None:
 
 
 def _parse_tool_call(tool_calls: Any) -> ToolCall:
-    """解析 OpenAI-compatible tool_calls 中的第一个 tool call。"""
+    """解析 OpenAI-compatible tool_calls 中的第一个 tool call。
+
+    document_id 为可选字段（缺失/空字符串解析为空串），由 runner 在
+    _invoke_tool_call 用 expected_document_id 补全后再做前缀校验；
+    仅 JSON 结构不可解析或字段类型错误时才映射为 llm_malformed_response。
+    """
 
     try:
         first_call = tool_calls[0]
         function = first_call["function"]
         tool_name = function["name"]
         arguments = _parse_arguments(function["arguments"])
-        document_id = _required_str(arguments, "document_id")
+        document_id = _optional_str(arguments, "document_id") or ""
         known_keys = {
             "document_id", "query", "section_ref", "table_ref", "locator",
             "max_results", "max_chars", "max_rows",

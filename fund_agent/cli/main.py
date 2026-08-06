@@ -203,6 +203,9 @@ def build_parser() -> argparse.ArgumentParser:
     generate_parser.add_argument("--format", dest="output_format", default="json", choices=["json", "markdown", "pdf"])
     generate_parser.add_argument("--llm", action="store_true", default=False, help="使用 LLM 生成分析文本（需要 DEEPSEEK_API_KEY）")
     generate_parser.add_argument("--work-dir", default=Path(DEFAULT_WORK_DIR), type=Path)
+    generate_parser.add_argument("--concurrency", type=int, default=None, help="章节生成并发数（1-8，默认 4；仅 --llm 模式生效）")
+    generate_parser.add_argument("--holdings-source-fund", default="", help="关联持仓源基金代码（如 ETF 联接基金的标的 ETF 512890）")
+    generate_parser.add_argument("--holdings-source-workdir", default=None, type=Path, help="关联持仓源工作目录（如 .fund_checklist_512890）")
 
     ask_parser = subparsers.add_parser("ask")
     ask_parser.add_argument("question", help="用户问题")
@@ -223,6 +226,7 @@ def build_parser() -> argparse.ArgumentParser:
     fix_parser.add_argument("--fund-code", required=True, help="基金代码")
     fix_parser.add_argument("--chapter", required=True, type=int, help="要修复的章节号（1-8）")
     fix_parser.add_argument("--work-dir", default=Path(DEFAULT_WORK_DIR), type=Path)
+    fix_parser.add_argument("--llm", action="store_true", default=False, help="使用 LLM 执行占位符补强（需要 DEEPSEEK_API_KEY）")
 
     repair_parser = subparsers.add_parser("repair")
     repair_parser.add_argument("--fund-code", required=True, help="基金代码")
@@ -958,6 +962,13 @@ def _run_generate_command(args: argparse.Namespace, *, stdout: TextIO, stderr: T
     elif args.output_format != "json":
         stderr.write("⚠ 报告以模板模式生成（无 LLM 分析），使用 --llm 启用 AI 分析\n")
 
+    if getattr(args, "concurrency", None) is not None:
+        if not 1 <= args.concurrency <= 8:
+            stderr.write("错误：--concurrency 必须在 1..8 范围内。\n")
+            return CLASSIFIED_FAILURE_EXIT_CODE
+        if not getattr(args, "llm", False):
+            stderr.write("⚠ --concurrency 仅 --llm 模式生效，模板模式忽略。\n")
+
     result = service.generate_report(
         GenerateReportRequest(
             fund_code=args.fund_code,
@@ -966,6 +977,9 @@ def _run_generate_command(args: argparse.Namespace, *, stdout: TextIO, stderr: T
             years=years,
             work_dir=Path(args.work_dir),
             output_format=args.output_format,
+            chapter_concurrency=args.concurrency if getattr(args, "llm", False) else None,
+            holdings_source_fund=args.holdings_source_fund,
+            holdings_source_workdir=Path(args.holdings_source_workdir) if args.holdings_source_workdir else None,
         ),
         llm_client=llm_client,
     )
@@ -1101,7 +1115,8 @@ def _run_interactive_command(
     from fund_agent.service.chat_contract import ChatTurnContract
     from fund_agent.service.prompt_composer import PromptComposer
     from fund_agent.service.scene_config import INTERACTIVE_SCENE_CONFIG
-    from fund_agent.service.investment_guard import contains_investment_advice
+    # 用户输入预检与 runner 终答守卫、chat_service 第二道守卫共用 B1 单一真源
+    from fund_agent.agent.llm_tool_loop import contains_investment_advice
 
     template_dir = Path(__file__).parent.parent / "service" / "prompts"
     prompt_composer = PromptComposer(template_dir=template_dir)
@@ -1263,6 +1278,10 @@ def _run_interactive_command(
 
         if result.investment_advice_detected:
             print("[投资建议检测] 回答已拦截。", file=stdout)
+            if result.original_content:
+                print(f"[被拦截原文] {result.original_content[:200]}", file=stdout)
+            if result.blocked_terms:
+                print(f"[触发词] {', '.join(result.blocked_terms)}", file=stdout)
 
         # 使用 rich Markdown 渲染输出（--plain 保留原始文本）
         use_rich = not getattr(args, "plain", False)
@@ -1300,6 +1319,11 @@ def _extract_chapter_from_markdown(md_text: str, chapter_num: int) -> str | None
 
 def _run_fix_command(args: argparse.Namespace, *, stdout: TextIO, stderr: TextIO) -> int:
     """修复报告中指定章节的占位符。
+
+    Wire FIX_SCENE_CONFIG -> ChatTurnContract -> ChatService for scene-aware
+    context, injecting chapter content / audit feedback / chapter contract
+    through PinnedState.user_constraints（chat_service._build_contributions
+    透传 context slots），并用 chat_turn 的 answer 作为补强后章节正文。
 
     参数:
         args: argparse 解析出的 fix 参数。
@@ -1343,22 +1367,132 @@ def _run_fix_command(args: argparse.Namespace, *, stdout: TextIO, stderr: TextIO
     matching_docs = _collect_matching_docs(work_dir, args.fund_code, (report_year,))
     document_id = matching_docs[0].document_id if matching_docs else ""
 
-    placeholders_before = len(_PLACEHOLDER_RE.findall(chapter_content))
+    llm_client = DeepSeekLlmClient() if getattr(args, "llm", False) else None
 
-    from fund_agent.service.chapter_generator import _fix_chapter_placeholders
+    from fund_agent.fund.document_tools.service import FundDocumentToolService
+    from fund_agent.host.session_store import SessionStore
+    from fund_agent.service.audit_pipeline import CHAPTER_CONTRACTS, ArtifactStore
+    from fund_agent.service.chat_contract import ChatTurnContract
+    from fund_agent.service.chat_service import ChatService, ChatTurnRequest
+    from fund_agent.service.prompt_composer import PromptComposer
+    from fund_agent.service.scene_config import FIX_SCENE_CONFIG
+    from fund_agent.service.session_models import PinnedState
 
-    fixed_content = _fix_chapter_placeholders(
-        chapter_content,
-        document_id=document_id,
+    # 构建 workdir tool service（interactive 模式）：失败文档跳过，可为 None
+    _stores: dict[str, object] = {}
+    _repo = FilesystemReportRepository(
+        catalog_path=work_dir / CATALOG_FILENAME,
+        blob_root=work_dir / "pdf_blobs",
+        docling_json_root=work_dir / "docling_json",
     )
-    if fixed_content is None:
+    for _doc in matching_docs or ():
+        try:
+            _stores[_doc.document_id] = _repo.load_store(_doc.document_id)
+        except Exception:
+            pass
+    _tool_svc = FundDocumentToolService(_stores) if _stores else None
+
+    if llm_client is None:
+        print(f"第 {chapter_num} 章: 未启用 LLM（使用 --llm），跳过", file=stdout)
+        return SUCCESS_EXIT_CODE
+
+    if not document_id:
+        failure = ToolFailure(code=FailureCode.NOT_FOUND, message="未找到匹配的年报文档，无法执行占位符补强")
+        _write_classified_failure(failure, stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+    template_dir = Path(__file__).parent.parent / "service" / "prompts"
+    prompt_composer = PromptComposer(template_dir=template_dir)
+    sessions_dir = work_dir / "sessions"
+    session_store = SessionStore(sessions_dir)
+    chat_service = ChatService(
+        session_store=session_store,
+        prompt_composer=prompt_composer,
+        scene_config=FIX_SCENE_CONFIG,
+        tool_service=_tool_svc,
+    )
+
+    # 审计反馈与章节合同（镜像 regenerate 的构建方式）
+    artifact_store = ArtifactStore(work_dir)
+    audit_decision = artifact_store.load_audit_decision(chapter_num)
+    violations = audit_decision.violations if audit_decision else ()
+    audit_feedback_lines = ["## 审计违规项\n"]
+    for v in violations:
+        audit_feedback_lines.append(f"- [{v.code}] {v.description}")
+        if v.evidence:
+            audit_feedback_lines.append(f"  证据: {v.evidence}")
+        if v.suggested_fix:
+            audit_feedback_lines.append(f"  建议: {v.suggested_fix}")
+    audit_feedback = "\n".join(audit_feedback_lines)
+
+    contract = CHAPTER_CONTRACTS.get(chapter_num)
+    chapter_contract_text = ""
+    if contract:
+        chapter_contract_text = "\n".join(f"- {item}" for item in contract.must_answer)
+
+    # 创建带 user_constraints 的 session；chat_service 把三个 context slot
+    # 透传进 FIX scene 的 system prompt
+    session = session_store.create(
+        fund_code=args.fund_code,
+        label=f"fix-ch{chapter_num}",
+    )
+    ps = PinnedState(
+        fund_code=args.fund_code,
+        active_year=report_year,
+        active_document_id=document_id or None,
+        user_constraints={
+            "chapter_content": chapter_content,
+            "audit_feedback": audit_feedback,
+            "chapter_contract": chapter_contract_text,
+        },
+    )
+    session = session.with_pinned_state(ps)
+    session_store.save(session)
+
+    user_prompt = (
+        f"请修复第 {chapter_num} 章中的占位符。\n\n"
+        f"## 原始章节内容\n\n{chapter_content}\n\n"
+        f"## 审计反馈\n\n{audit_feedback}\n\n"
+        f"## 章节合同\n\n{chapter_contract_text}\n\n"
+        "请直接输出补强后的完整章节正文（Markdown），不添加任何说明或前缀。"
+    )
+
+    fix_contract = ChatTurnContract(
+        scene="fix",
+        session_id=session.session_id,
+        user_text=user_prompt,
+    )
+
+    try:
+        response = chat_service.chat_turn(
+            ChatTurnRequest(session_id=session.session_id, user_text=user_prompt),
+            contract=fix_contract,
+            llm_client=llm_client,
+        )
+    except Exception as exc:
+        failure = ToolFailure(code=FailureCode.UNAVAILABLE, message=f"占位符修复失败: {exc}")
+        _write_classified_failure(failure, stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+    if (
+        response.investment_advice_detected
+        or not response.answer.strip()
+        or response.answer.startswith("LLM 处理失败")
+    ):
         failure = ToolFailure(code=FailureCode.UNAVAILABLE, message="占位符修复失败")
         _write_classified_failure(failure, stderr)
         return CLASSIFIED_FAILURE_EXIT_CODE
 
+    fixed_content = response.answer.strip()
+    placeholders_before = len(_PLACEHOLDER_RE.findall(chapter_content))
+
     placeholders_after = len(_PLACEHOLDER_RE.findall(fixed_content))
     strengthened = placeholders_before - placeholders_after
     retained = placeholders_after
+
+    if fixed_content and fixed_content != chapter_content:
+        md_text = _replace_chapter_in_markdown(md_text, chapter_num, fixed_content)
+        latest_report.write_text(md_text, encoding="utf-8")
 
     print(f"第 {chapter_num} 章修复完成：", file=stdout)
     print(f"补强占位符: {strengthened}", file=stdout)

@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import shutil
 import subprocess
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -31,6 +34,7 @@ from fund_agent.fund.document_tools.models import (
     PdfImportResult,
     ReportSummary,
     TableContent,
+    TableSummary,
     ToolFailure,
 )
 from fund_agent.fund.document_tools.persistent_repository import (
@@ -126,15 +130,35 @@ RunnerFactory = Callable[[FundDocumentToolService], LlmToolLoopRunner]
 PDF_BLOB_DIRNAME = "pdf_blobs"
 DOCLING_JSON_DIRNAME = "docling_json"
 
-_MAX_QUERY_CANDIDATES = 4
+# 候选上限 = 原始 query + 受控候选；manager_holdings 的候选词经 2026-08-05
+# interactive 质量修复裁决扩为 4 个（design.md §6.10），故上限调整为 5。
+_MAX_QUERY_CANDIDATES = 5
 _TARGET_NOT_FOUND_MESSAGE = "未找到符合受控披露目标的证据"
 _TABLE_TITLE_PREFIX = "表格标题:"
 _SECTION_TITLE_PREFIX = "来源章节:"
 _TABLE_BLOCK_HEADER = "相关表格:"
 _FEE_RATES_QUERY = "费用"
 _FEE_RATE_PERIOD_YEAR = "year"
+_FEE_RATE_TITLES = ("基金管理费", "基金托管费", "销售服务费")
+# QDII 年报把管理费表述为「管理人报酬」（正文无「基金管理费/管理费」字样），
+# 该措辞只作为费率标题块查找别名；不进入 _FEE_RATE_TITLES —— 10B 三标题契约
+# （_fee_rate_segments / _fee_rate_section_citations）依赖固定三标题。
+_FEE_RATE_MANAGEMENT_WORDINGS = ("基金管理费", "管理人报酬")
+# 回退路径 fail-closed 放行条件：仅当正文含明确 QDII 管理费费率句时，
+# 允许从 section title 未命中费率名的大章节（如 7.4.9 关联方关系）抽取。
+_MANAGEMENT_FEE_QDII_WORDING_RE = re.compile(r"管理人报酬[^。\n]{0,80}?\d+\.\d+%")
 
 from .investment_guard import INVESTMENT_ADVICE_KEYWORDS, contains_investment_advice
+
+_PDF_ENGINE_PANDOC = "pandoc"
+_PDF_ENGINE_XELATEX = "xelatex"
+_PDF_GOOGLE_CHROME_BIN = "google-chrome"
+_PDF_CHROME_MACOS_DEFAULT = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+_PDF_A4_WINDOW_SIZE = "794,1123"
+_PDF_CHROME_TIMEOUT_SECONDS = 120
+_PDF_XELATEX_TIMEOUT_SECONDS = 1800
+_PDF_WARNING_PANDOC_MISSING = "pandoc 未安装，已回退为 Markdown 格式"
+_PDF_WARNING_EXPORT_FAILED = "PDF 导出失败，已回退为 Markdown 格式"
 
 _INVESTMENT_ADVICE_MESSAGE = "routing context 包含投资建议关键词，拒绝回答"
 _PERFORMANCE_RETURNS_QUERY = "净值增长率"
@@ -161,9 +185,6 @@ _SHARE_SCOPE_A = "A"
 _SHARE_SCOPE_C = "C"
 _SHARE_CLASS_SCOPES = (_SHARE_SCOPE_A, _SHARE_SCOPE_C)
 
-
-
-
 _HOLDINGS_TOP_N = 10
 _HOLDINGS_QUERY = "股票投资明细"
 _BOND_HOLDINGS_QUERY = "前五名债券投资明细"
@@ -189,12 +210,26 @@ DISCLOSURE_LOCATOR_CONTRACT_REGISTRY = (
         extraction_allowed=False,
     ),
     _DisclosureLocatorContract(
+        profile_name="manager_holdings",
+        aliases=("持有本基金", "基金经理持有", "从业人员持有本基金"),
+        candidate_queries=(
+            "持有本基金",
+            "基金经理持有",
+            "期末基金管理人的从业人员持有本基金",
+            "基金经理持有本基金",
+        ),
+        acceptable_title_family=("期末基金管理人的从业人员持有本基金的情况",),
+        requires_table_citation=True,
+        extraction_allowed=False,
+    ),
+    _DisclosureLocatorContract(
         profile_name="fee_rates",
         aliases=("费用", "费率", "管理费", "托管费", "销售服务费"),
         candidate_queries=("基金管理费", "基金托管费", "销售服务费"),
         acceptable_title_family=("基金管理费", "基金托管费", "销售服务费"),
         requires_table_citation=False,
         extraction_allowed=False,
+        aggregate_all_matches=True,
     ),
     _DisclosureLocatorContract(
         profile_name="performance_returns",
@@ -690,6 +725,161 @@ class _QueryRouteRun:
 
     agent_result: AgentRunResult
     routing_trace: tuple[QueryRouteAttempt, ...]
+
+
+_MANAGER_HOLDS_INTERVAL_RE = re.compile(
+    r"^(?:>=|<=|>|<)?\d+(?:\.\d+)?(?:[~-]\d+(?:\.\d+)?)?$"
+)
+
+
+def _normalize_cell_text(text: str) -> str:
+    """去除单元格文本中的全部空白，用于 Docling 单元格噪声归一化。"""
+
+    return re.sub(r"\s+", "", str(text or ""))
+
+
+def _manager_holds_header_col(header: tuple[str, ...], keyword: str, default: int) -> int:
+    """按表头关键词定位列下标；未命中时返回默认列。"""
+
+    for index, cell in enumerate(header):
+        if keyword in _normalize_cell_text(cell):
+            return index
+    return default
+
+
+def _manager_holds_share_class(cell: str) -> str:
+    """从份额级别单元格提取 A类/C类 标签；无法识别时返回空字符串。"""
+
+    text = _normalize_cell_text(cell)
+    if "A类" in text or text.endswith("A"):
+        return "A类"
+    if "C类" in text or text.endswith("C"):
+        return "C类"
+    return ""
+
+
+def _manager_holds_interval(cell: str, unit: str) -> str | None:
+    """校验数量区间单元格，返回空白归一化后的原文本；无效时返回 None。"""
+
+    text = _normalize_cell_text(cell)
+    if not text:
+        return None
+    body = text
+    if unit and body.endswith(unit):
+        body = body[: -len(unit)]
+    if not _MANAGER_HOLDS_INTERVAL_RE.match(body):
+        return None
+    return text
+
+
+def _manager_holds_is_zero(value: str) -> bool:
+    """判断区间值是否全为零（如 "0" / ">=0"）。"""
+
+    numbers = re.findall(r"\d+(?:\.\d+)?", value)
+    return not numbers or all(float(number) == 0.0 for number in numbers)
+
+
+def _extract_manager_holds_fund(rows: tuple[tuple[str, ...], ...]) -> str:
+    """从 9.4 节披露表抽取基金经理持有区间文本。
+
+    优先取「基金经理持有」类目下 A 类份额行，无 A 行取非零行，
+    再退合计行；高级管理人员类目不混入；单位从表头（万份）继承。
+
+    参数:
+        rows: Docling 表格行。
+
+    返回:
+        holds_fund 文本（如 "A类>100万份"）；无有效披露时返回空字符串。
+    """
+
+    if not rows:
+        return ""
+    header = rows[0]
+    unit = "万份" if any("万份" in _normalize_cell_text(cell) for cell in header) else ""
+    project_col = _manager_holds_header_col(header, "项目", 0)
+    class_col = _manager_holds_header_col(header, "份额级别", 1)
+    value_col = _manager_holds_header_col(header, "数量区间", 2)
+
+    block_start = None
+    for index, row in enumerate(rows):
+        row_str = " ".join(str(cell) for cell in row)
+        if "基金经理持有" not in row_str or "开放式基金" not in row_str:
+            continue
+        if len(row) > project_col and "高级管理" in _normalize_cell_text(row[project_col]):
+            continue
+        block_start = index
+        break
+    if block_start is None:
+        return ""
+
+    block_rows: list[tuple[str, str]] = []  # (share_class, value_text)
+    for row in rows[block_start:]:
+        project = _normalize_cell_text(row[project_col]) if len(row) > project_col else ""
+        if project and block_rows:
+            break
+        if len(row) <= max(class_col, value_col):
+            continue
+        value_text = _manager_holds_interval(row[value_col], unit)
+        if value_text is None:
+            continue
+        block_rows.append((_manager_holds_share_class(row[class_col]), value_text))
+
+    selected = next((item for item in block_rows if item[0] == "A类"), None)
+    if selected is None:
+        selected = next(
+            (item for item in block_rows if not _manager_holds_is_zero(item[1])),
+            None,
+        )
+    if selected is None:
+        selected = next((item for item in block_rows if item[0] == ""), None)
+    if selected is None:
+        return ""
+    share_class, value_text = selected
+    if "万份" in value_text:
+        return value_text
+    return f"{share_class}{value_text}{unit}"
+
+
+def _extract_manager_holds_overall(rows: tuple[tuple[str, ...], ...]) -> str:
+    """从 9.2 从业人员整体持有表构造回退口径文本。
+
+    9.4 基金经理持有区间表缺失时回退使用：年报 9.2「期末基金管理人的从业人员
+    持有本基金的情况」整体表（table-80 类：「基金管理人所有从业人员持有本基金
+    | 7,312.84 | 0.01」），口径说明直接嵌入返回文本（如「基金经理区间未披露；
+    从业人员整体持有 7,312.84 份（0.01%）」），渲染点无需感知数据来源。
+
+    参数:
+        rows: Docling 表格行（表头 + 数据行）。
+
+    返回:
+        回退口径文本；非 9.2 从业人员整体持有表时返回空字符串。
+    """
+
+    if not rows:
+        return ""
+    header = rows[0]
+    project_col = _manager_holds_header_col(header, "项目", 0)
+    shares_col = _manager_holds_header_col(header, "持有份额总数", 1)
+    ratio_col = _manager_holds_header_col(header, "占基金总份额比例", 2)
+    for row in rows[1:]:
+        if len(row) <= project_col:
+            continue
+        project = _normalize_cell_text(row[project_col])
+        if "从业人员" not in project or "持有本基金" not in project:
+            continue
+        if len(row) <= max(shares_col, ratio_col):
+            continue
+        shares = _normalize_cell_text(row[shares_col])
+        if not shares or shares == "-":
+            continue
+        ratio = _normalize_cell_text(row[ratio_col])
+        if ratio in ("", "-"):
+            ratio = ""
+        elif not ratio.endswith("%"):
+            ratio = f"{ratio}%"
+        ratio_suffix = f"（{ratio}）" if ratio else ""
+        return f"基金经理区间未披露；从业人员整体持有 {shares} 份{ratio_suffix}"
+    return ""
 
 
 class FundReadingService:
@@ -1264,8 +1454,8 @@ class FundReadingService:
                     document_id=document_id,
                     query=query,
                 )
-            elif fund_type in ("index_etf",) or (fund_type == "index_fund" and "QDII" in fund_name):
-                # QDII 基金（ETF 或普通指数基金）持仓节标题为"权益投资明细"
+            elif fund_type not in ("bond_fund", "index_feeder") and "QDII" in fund_name:
+                # QDII 基金（主动/指数）持仓节标题为"所有权益投资明细"而非"股票投资明细"
                 query = _QDII_HOLDINGS_QUERY
                 routed = self._run_with_query_candidates(
                     host=host,
@@ -1298,53 +1488,53 @@ class FundReadingService:
             except Exception:
                 logger.warning("extract_holdings: 未分类异常", exc_info=True)
                 _extraction_error = True  # 未分类异常，记录标记
-            # equity 成功但持仓为空时，按基金类型二次 fallback
-            if not holdings and fund_name:
+            # equity 成功但持仓为空（或 QDII query 取到跨页续表碎片）时，按基金类型二次 fallback
+            if fund_name:
                 fund_type, _ = infer_fund_type(fund_name)
                 if fund_type == "bond_fund":
-                    bond_routed = self._run_with_query_candidates(
-                        host=host,
-                        document_id=document_id,
-                        query=_BOND_HOLDINGS_QUERY,
-                    )
-                    if bond_routed.agent_result.failure is None:
-                        try:
-                            bond_holdings = _extract_holdings_from_agent_result(
-                                document_id=document_id,
-                                result=bond_routed.agent_result,
-                                tool_service=tool_service,
-                            )
-                            if bond_holdings:
-                                holdings = list(bond_holdings)
-                        except DocumentToolError:
-                            pass
-                elif fund_type in ("index_etf",) or (fund_type == "index_fund" and "QDII" in fund_name):
-                    # QDII 基金：Agent query 可能匹配到资产组合汇总表而非持仓明细表，
-                    # 先尝试 query fallback，再直接扫描 QDII 格式表格
-                    qdii_routed = self._run_with_query_candidates(
-                        host=host,
-                        document_id=document_id,
-                        query=_QDII_HOLDINGS_QUERY,
-                    )
-                    if qdii_routed.agent_result.failure is None:
-                        try:
-                            qdii_holdings = _extract_holdings_from_agent_result(
-                                document_id=document_id,
-                                result=qdii_routed.agent_result,
-                                tool_service=tool_service,
-                            )
-                            if qdii_holdings:
-                                holdings = list(qdii_holdings)
-                        except DocumentToolError:
-                            pass
-                    # query fallback 仍为空时，直接扫描 QDII 列名格式的表格
                     if not holdings:
-                        direct = _extract_qdii_holdings_from_tables(
+                        bond_routed = self._run_with_query_candidates(
+                            host=host,
                             document_id=document_id,
-                            tool_service=tool_service,
+                            query=_BOND_HOLDINGS_QUERY,
                         )
-                        if direct:
-                            holdings = list(direct)
+                        if bond_routed.agent_result.failure is None:
+                            try:
+                                bond_holdings = _extract_holdings_from_agent_result(
+                                    document_id=document_id,
+                                    result=bond_routed.agent_result,
+                                    tool_service=tool_service,
+                                )
+                                if bond_holdings:
+                                    holdings = list(bond_holdings)
+                            except DocumentToolError:
+                                pass
+                elif fund_type not in ("bond_fund", "index_feeder") and "QDII" in fund_name:
+                    # QDII 基金：持仓表常为跨页分裂（表头截断 + 续表碎片行），
+                    # 直接扫描（含跨页合并）为权威路径；query 路径仅作兜底。
+                    direct = _extract_qdii_holdings_from_tables(
+                        document_id=document_id,
+                        tool_service=tool_service,
+                    )
+                    if direct:
+                        holdings = list(direct)
+                    elif not holdings:
+                        qdii_routed = self._run_with_query_candidates(
+                            host=host,
+                            document_id=document_id,
+                            query=_QDII_HOLDINGS_QUERY,
+                        )
+                        if qdii_routed.agent_result.failure is None:
+                            try:
+                                qdii_holdings = _extract_holdings_from_agent_result(
+                                    document_id=document_id,
+                                    result=qdii_routed.agent_result,
+                                    tool_service=tool_service,
+                                )
+                                if qdii_holdings:
+                                    holdings = list(qdii_holdings)
+                            except DocumentToolError:
+                                pass
         table_citation = None
         for citation in routed.agent_result.citations:
             if citation.locator.locator_kind is LocatorKind.TABLE:
@@ -1691,6 +1881,41 @@ class FundReadingService:
                 continue
             except Exception:
                 logger.warning("extract_fee_rates: 费率抽取异常", exc_info=True)
+
+        # 未披露销售服务费的年度（如 2021）会让 fee_rates 三标题聚合契约
+        # 整体 not_found；回退按单标题验证查询管理费/托管费正文，
+        # search_document / Agent / Store / ToolService 边界不变。
+        # QDII 主循环可能只命中部分字段（如仅管理费），按缺失字段逐项回退。
+        for query in ("基金管理费", "基金托管费"):
+            if any(fee.fee_name == query for fee in fees):
+                continue
+            fallback = host.run(document_id=document_id, query=query)
+            if fallback.failure is not None:
+                continue
+            route_plan = _route_plan_for_query(query)
+            matched_titles = _matched_disclosure_titles(fallback, route_plan.locator_contract)
+            if query not in matched_titles:
+                # QDII 年报把管理费表述为「管理人报酬」，且该披露可能嵌套在
+                # 关联方关系等大章节内（section title 不含费率名）；仅当正文
+                # 含明确费率句时放行，避免弱化 fail-closed 标题绑定。
+                if not (query == "基金管理费" and _MANAGEMENT_FEE_QDII_WORDING_RE.search(fallback.answer)):
+                    continue
+            if section_citation is None:
+                for citation in fallback.citations:
+                    if citation.locator.locator_kind is LocatorKind.SECTION:
+                        section_citation = citation
+                        break
+            try:
+                extracted_fees = _extract_fee_rates_from_agent_result(
+                    result=fallback,
+                )
+                for fee in extracted_fees:
+                    if not any(f.fee_name == fee.fee_name for f in fees):
+                        fees.append(fee)
+            except DocumentToolError:
+                continue
+            except Exception:
+                logger.warning("extract_fee_rates: 单标题费率回退抽取异常", exc_info=True)
 
         if not fees:
             return AnnualFeeResult(
@@ -2134,6 +2359,8 @@ class FundReadingService:
         """
 
         try:
+            report_warnings: list[str] = []
+
             # 1. 提取多年度数据
             repository = _repository(Path(request.work_dir))
             catalog_reports = repository.list_reports()
@@ -2166,6 +2393,24 @@ class FundReadingService:
             holdings_data, holdings_citations, holdings_sources = self._extract_report_holdings_with_citations(
                 request.fund_code, annual_docs, request.work_dir, fund_name=request.fund_name,
             )
+            holdings_source_note = ""
+            if request.holdings_source_fund and request.holdings_source_workdir is not None:
+                source_extraction = self._extract_report_holdings_from_source(
+                    annual_docs=annual_docs,
+                    source_fund=request.holdings_source_fund,
+                    source_work_dir=Path(request.holdings_source_workdir),
+                )
+                if source_extraction is None:
+                    report_warnings.append("关联持仓源不可用，持仓数据保持本基金口径")
+                else:
+                    source_holdings, source_citations, source_years = source_extraction
+                    if not source_holdings:
+                        report_warnings.append("关联持仓源未提取到持仓数据，持仓数据保持本基金口径")
+                    else:
+                        holdings_data = source_holdings
+                        holdings_citations = source_citations
+                        holdings_source_note = f"来源：标的 ETF {request.holdings_source_fund} 年报"
+                        holdings_sources = {year: holdings_source_note for year in source_years}
             fee_data, fee_citations = self._extract_report_fees_with_citations(
                 request.fund_code, annual_docs, request.work_dir,
             )
@@ -2183,6 +2428,7 @@ class FundReadingService:
             # 构建证据来源汇总
             evidence = ChapterEvidence(
                 holdings_citations=holdings_citations,
+                holdings_source_note=holdings_source_note,
                 fee_citations=fee_citations,
                 allocation_citations=allocation_citations,
                 performance_citations=performance_citations,
@@ -2214,9 +2460,15 @@ class FundReadingService:
             if llm_client is not None:
                 # 使用审计管道协调器（14C）
                 from fund_agent.service.audit_pipeline import ReportGenerationCoordinator
+                import os
+                chapter_concurrency = request.chapter_concurrency
+                if chapter_concurrency is None:
+                    env_value = os.environ.get("FUND_CHECKLIST_CHAPTER_CONCURRENCY", "").strip()
+                    chapter_concurrency = int(env_value) if env_value else 4
                 coordinator = ReportGenerationCoordinator(
                     llm_client=llm_client,
                     work_dir=Path(request.work_dir),
+                    chapter_concurrency=chapter_concurrency,
                 )
                 chapter_contents, coordinator_warnings = coordinator.generate_report(
                     fund_code=request.fund_code,
@@ -2292,7 +2544,7 @@ class FundReadingService:
 
             # 4. 输出
             output_path = None
-            warnings: list[str] = list(llm_warnings)
+            warnings: list[str] = list(report_warnings) + list(llm_warnings)
             if request.output_format == "markdown":
                 output_path = self._export_markdown(report, request.work_dir, signal_judgment)
             elif request.output_format == "pdf":
@@ -2339,6 +2591,58 @@ class FundReadingService:
         citations = {h.year: h.citation for h in result.series.annual_holdings}
         sources = {h.year: h.holding_source for h in result.series.annual_holdings if h.holding_source}
         return holdings, citations, sources
+
+    def _extract_report_holdings_from_source(
+        self,
+        *,
+        annual_docs: list[AnnualReportDocument],
+        source_fund: str,
+        source_work_dir: Path,
+    ) -> tuple[
+        dict[int, tuple[HoldingExtraction, ...]],
+        dict[int, Citation | None],
+        tuple[int, ...],
+    ] | None:
+        """从关联持仓源工作目录按年度提取 top-10 持仓。
+
+        参数:
+            annual_docs: 目标基金的多年度文档（用于对齐年份）。
+            source_fund: 关联持仓源基金代码（如标的 ETF 512890）。
+            source_work_dir: 关联持仓源工作目录（如 .fund_checklist_512890）。
+
+        返回:
+            (按年份持仓 dict, 按年份 citation dict, 覆盖年份)；
+            源目录无匹配年报或抽取失败时返回 None。
+        """
+
+        repository = _repository(source_work_dir)
+        source_docs: list[AnnualReportDocument] = []
+        source_name = ""
+        target_years = {doc.year for doc in annual_docs}
+        for record in repository.list_reports():
+            if record.get("fund_code") != source_fund:
+                continue
+            year = int(record["year"])
+            if year not in target_years:
+                continue
+            source_docs.append(AnnualReportDocument(year=year, document_id=str(record["document_id"])))
+            if not source_name:
+                source_name = str(record.get("fund_name", ""))
+        if not source_docs:
+            return None
+
+        result = self.extract_multi_year_holdings(ExtractHoldingsRequest(
+            fund_code=source_fund,
+            requested_years=[doc.year for doc in source_docs],
+            annual_report_documents=source_docs,
+            work_dir=source_work_dir,
+            fund_name=source_name,
+        ))
+        if result.series is None:
+            return None
+        holdings = {h.year: h.holdings for h in result.series.annual_holdings}
+        citations = {h.year: h.citation for h in result.series.annual_holdings}
+        return holdings, citations, tuple(sorted(holdings.keys()))
 
     def _extract_report_fees_with_citations(
         self,
@@ -2394,10 +2698,13 @@ class FundReadingService:
             )
             if result.failure or not result.fields:
                 continue
+            # A/C 分段表支持后单年度可能同时返回 A/C 两类字段；
+            # 报告口径统一优先 A 类，避免 last-wins 把 C 类值误写入报告。
+            selected = _prefer_share_scope_fields(result.fields, _SHARE_SCOPE_A)
             nav = ""
             bench = ""
             citation = None
-            for f in result.fields:
+            for f in selected:
                 if f.field_name == "annual_nav_growth_rate":
                     nav = f.decimal_percent_text
                     citation = f.citation
@@ -2412,7 +2719,8 @@ class FundReadingService:
                     share_class=None,
                 )
                 if not excess_result.failure and excess_result.fields:
-                    excess = excess_result.fields[0].decimal_percent_text
+                    selected_excess = _prefer_share_scope_fields(excess_result.fields, _SHARE_SCOPE_A)
+                    excess = selected_excess[0].decimal_percent_text
                 performance[doc.year] = {
                     "nav_growth_rate": nav,
                     "benchmark_return_rate": bench,
@@ -2608,20 +2916,23 @@ class FundReadingService:
                     investment_strategy = section.text[:500].strip()
                     break
 
-        # 搜索基金经理持有本基金
+        # 搜索基金经理持有本基金：9.4 节数量区间披露表优先；
+        # 全文档无 9.4 时回退 9.2 从业人员整体持有表（口径嵌入 holds_fund 文本）。
+        # 两遍扫描保证文档中先出现的 9.2 整体表不会抢占 9.4 区间结果。
         holds_fund = ""
+        fallback_overall = ""
         tables = tool_service.list_tables(doc_id)
         for t in tables:
             table = tool_service.read_table(doc_id, t.table_ref, max_rows=10)
-            if hasattr(table, "rows"):
-                for row in table.rows:
-                    row_str = " ".join(str(cell) for cell in row)
-                    if "基金经理持有" in row_str and "开放式基金" in row_str:
-                        for cell in row:
-                            cell_str = str(cell).strip()
-                            if "~" in cell_str or "万份" in cell_str:
-                                holds_fund = cell_str
-                                break
+            if not hasattr(table, "rows"):
+                continue
+            holds_fund = _extract_manager_holds_fund(table.rows)
+            if holds_fund:
+                break
+            if not fallback_overall:
+                fallback_overall = _extract_manager_holds_overall(table.rows)
+        if not holds_fund:
+            holds_fund = fallback_overall
 
         if not name:
             return None, manager_citation
@@ -2935,7 +3246,7 @@ class FundReadingService:
         lines = ["## 业绩表现\n", "| 年份 | 净值增长率 | 基准收益率 | 超额收益 |", "|------|-----------|-----------|---------|"]
         for year in sorted(performance.keys()):
             p = performance[year]
-            lines.append(f"| {year} | {p.get('nav_growth_rate', 'N/A')} | {p.get('benchmark_return_rate', 'N/A')} | {p.get('excess_return', 'N/A')} |")
+            lines.append(f"| {year} | {p.get('nav_growth_rate', '缺失')} | {p.get('benchmark_return_rate', '缺失')} | {p.get('excess_return', '缺失')} |")
         return "\n".join(lines) + "\n"
 
 
@@ -3432,7 +3743,7 @@ class FundReadingService:
                 f"- **基金名称**：{fund_name}\n"
                 f"- **基金代码**：{fund_code}\n"
                 f"- **报告年份**：{report_year}\n"
-                f"- **最新净值增长率**：{latest.get('nav_growth_rate', 'N/A')}\n\n"
+                f"- **最新净值增长率**：{latest.get('nav_growth_rate', '缺失')}\n\n"
                 f"## 投资要点\n\n"
                 f"基于 {report_year} 年报数据分析，该基金业绩表现和持仓情况详见后续章节。\n"
             )
@@ -3625,25 +3936,110 @@ class FundReadingService:
         return str(output_path)
 
     def _export_pdf(self, md_path: str, work_dir: Path) -> tuple[str, str | None]:
-        """使用 pandoc 导出 PDF。
+        """按 xelatex → Chrome headless → Markdown 回退顺序导出 PDF。
+
+        参数:
+            md_path: 源 Markdown 文件路径。
+            work_dir: 工作目录（保留参数，签名不变）。
 
         返回:
-            (输出路径, 警告信息或 None)
+            (输出路径, 警告信息或 None)；PDF 导出成功时警告为 None，
+            引擎均不可用或转换失败时回退 Markdown 并返回对应 warning。
         """
 
         pdf_path = md_path.replace(".md", ".pdf")
-        try:
+        pandoc_available = shutil.which(_PDF_ENGINE_PANDOC) is not None
+        if pandoc_available and shutil.which(_PDF_ENGINE_XELATEX) is not None:
+            try:
+                subprocess.run(
+                    [_PDF_ENGINE_PANDOC, md_path, "-o", pdf_path, "--pdf-engine=xelatex"],
+                    check=True,
+                    capture_output=True,
+                    timeout=_PDF_XELATEX_TIMEOUT_SECONDS,
+                )
+                return pdf_path, None
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+                # xelatex 失败时继续尝试 Chrome headless
+                pass
+        chrome_path = self._find_chrome() if pandoc_available else None
+        if chrome_path is not None:
+            try:
+                self._export_pdf_via_chrome(md_path, pdf_path, chrome_path)
+                return pdf_path, None
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+                # Chrome 失败时回退 Markdown + warning
+                pass
+        if not pandoc_available:
+            return md_path, _PDF_WARNING_PANDOC_MISSING
+        return md_path, _PDF_WARNING_EXPORT_FAILED
+
+    def _find_chrome(self) -> str | None:
+        """按 PUPPETEER_EXECUTABLE_PATH → PATH google-chrome → macOS 默认路径探测 Chrome。
+
+        返回:
+            可用的 Chrome 可执行文件路径；均不可用时返回 None。
+        """
+
+        env_chrome = os.environ.get("PUPPETEER_EXECUTABLE_PATH")
+        if env_chrome and Path(env_chrome).is_file():
+            return env_chrome
+        path_chrome = shutil.which(_PDF_GOOGLE_CHROME_BIN)
+        if path_chrome:
+            return path_chrome
+        if Path(_PDF_CHROME_MACOS_DEFAULT).is_file():
+            return _PDF_CHROME_MACOS_DEFAULT
+        return None
+
+    def _export_pdf_via_chrome(self, md_path: str, pdf_path: str, chrome_path: str) -> None:
+        """pandoc md→HTML（内嵌打印 CSS）后由 Headless Chrome 转 PDF。
+
+        参数:
+            md_path: 源 Markdown 文件路径。
+            pdf_path: 输出 PDF 文件路径。
+            chrome_path: Chrome 可执行文件路径。
+
+        异常:
+            subprocess.CalledProcessError / subprocess.TimeoutExpired: pandoc 或 Chrome 转换失败。
+        """
+
+        css_path = Path(__file__).parent / "assets" / "report_print.css"
+        with tempfile.TemporaryDirectory(prefix="fund-checklist-export-") as tmp_dir:
+            tmp = Path(tmp_dir)
+            header_path = tmp / "print-header.html"
+            header_path.write_text(
+                "<style>\n" + css_path.read_text(encoding="utf-8") + "\n</style>",
+                encoding="utf-8",
+            )
+            html_path = tmp / f"{Path(md_path).stem}.html"
             subprocess.run(
-                ["pandoc", md_path, "-o", pdf_path, "--pdf-engine=xelatex"],
+                [
+                    _PDF_ENGINE_PANDOC,
+                    md_path,
+                    "-f", "gfm",
+                    "-t", "html5",
+                    "-s",
+                    "--embed-resources",
+                    "--include-in-header", str(header_path),
+                    "-o", str(html_path),
+                ],
                 check=True,
                 capture_output=True,
-                timeout=1800,
+                timeout=_PDF_CHROME_TIMEOUT_SECONDS,
             )
-            return pdf_path, None
-        except FileNotFoundError:
-            return md_path, "pandoc 未安装，已回退为 Markdown 格式"
-        except subprocess.CalledProcessError:
-            return md_path, "PDF 导出失败，已回退为 Markdown 格式"
+            subprocess.run(
+                [
+                    chrome_path,
+                    "--headless",
+                    "--disable-gpu",
+                    f"--print-to-pdf={os.path.abspath(pdf_path)}",
+                    "--no-pdf-header-footer",
+                    f"--window-size={_PDF_A4_WINDOW_SIZE}",
+                    html_path.as_uri(),
+                ],
+                check=True,
+                capture_output=True,
+                timeout=_PDF_CHROME_TIMEOUT_SECONDS,
+            )
 
     def resolve_by_fund_code(
         self,
@@ -3818,7 +4214,10 @@ class FundReadingService:
                             failure_code=None,
                         )
                     )
-                    if any(title not in matched_titles for title in disclosure_titles):
+                    if (
+                        route_plan.locator_contract.aggregate_all_matches
+                        or any(title not in matched_titles for title in disclosure_titles)
+                    ):
                         matched_results.append(result)
                         matched_titles.update(disclosure_titles)
                     continue
@@ -3850,12 +4249,20 @@ class FundReadingService:
             )
             if required_titles and required_titles.issubset(matched_titles):
                 return _QueryRouteRun(
-                    agent_result=_aggregate_agent_results(tuple(matched_results)),
+                    agent_result=_aggregate_agent_results_for_contract(
+                        route_plan.locator_contract,
+                        tuple(matched_results),
+                    ),
                     routing_trace=tuple(attempts),
                 )
             if matched_results:
                 return _QueryRouteRun(
-                    agent_result=_target_not_found_result(_aggregate_agent_results(tuple(matched_results))),
+                    agent_result=_target_not_found_result(
+                        _aggregate_agent_results_for_contract(
+                            route_plan.locator_contract,
+                            tuple(matched_results),
+                        )
+                    ),
                     routing_trace=tuple(attempts),
                 )
 
@@ -4249,6 +4656,155 @@ def _aggregate_agent_results(results: tuple[AgentRunResult, ...]) -> AgentRunRes
     )
 
 
+def _aggregate_agent_results_for_contract(
+    contract: _DisclosureLocatorContract | None,
+    results: tuple[AgentRunResult, ...],
+) -> AgentRunResult:
+    """按 locator contract 的聚合语义合并多个 success 结果。
+
+    `aggregate_all_matches=True` 的契约（fee_rates）走标题块去重聚合，
+    其余契约保持简单拼接聚合。
+
+    参数:
+        contract: 命中的受控披露 contract；None 时按简单聚合处理。
+        results: 同一受控 profile 的多个安全 Agent 成功结果。
+
+    返回:
+        聚合后的 AgentRunResult。
+
+    异常:
+        本函数不执行 I/O，不抛出业务异常。
+    """
+
+    if contract is not None and contract.aggregate_all_matches:
+        return _aggregate_fee_rate_results(results)
+    return _aggregate_agent_results(results)
+
+
+def _strip_fee_rate_table_blocks(answer: str) -> str:
+    """剥离 fee_rates answer 中「相关表格:」金额表引用块。
+
+    金额表块从「相关表格:」行开始到下一个空行（`\\n\\n` 边界）结束；
+    块内表格标题行（如「7.4.10.2.3 销售服务费」）不得参与正文标题定位。
+
+    参数:
+        answer: 单个 candidate query 的安全 Agent answer。
+
+    返回:
+        去除金额表引用块后的 answer 文本。
+
+    异常:
+        本函数不执行 I/O，不抛出业务异常。
+    """
+
+    lines = answer.splitlines()
+    stripped: list[str] = []
+    index = 0
+    while index < len(lines):
+        if lines[index].strip() == _TABLE_BLOCK_HEADER:
+            index += 1
+            while index < len(lines) and lines[index].strip():
+                index += 1
+            continue
+        stripped.append(lines[index])
+        index += 1
+    return "\n".join(stripped)
+
+
+def _fee_rate_title_block(stripped: str, title: str) -> str | None:
+    """返回剥离金额表块后的 answer 中指定披露标题的首个完整块。
+
+    块从标题首次出现开始，到同一 answer 中下一个披露标题或文本末尾结束；
+    标题后无正文（块为空）时返回 None，交由后续结果补全。
+
+    参数:
+        stripped: 剥离金额表块后的单个 answer 文本。
+        title: 目标披露标题。
+
+    返回:
+        标题的完整正文块；标题缺失或块为空时返回 None。
+
+    异常:
+        本函数不执行 I/O，不抛出业务异常。
+    """
+
+    start = stripped.find(title)
+    if start < 0:
+        return None
+    next_positions = (
+        stripped.find(other, start + len(title))
+        for other in _FEE_RATE_TITLES
+        if other != title
+    )
+    ends = tuple(position for position in next_positions if position >= 0)
+    end = min(ends) if ends else len(stripped)
+    block = stripped[start:end].strip()
+    return block or None
+
+
+def _aggregate_fee_rate_results(results: tuple[AgentRunResult, ...]) -> AgentRunResult:
+    """按 10B fee_rates 标题块去重聚合多个 candidate success 结果。
+
+    每个结果先剥离「相关表格:」金额表引用块，再按固定标题顺序取首个完整
+    标题块（同一标题只保留第一个含正文的块，消除三个 query answer 的正文
+    重复）；citations 按 (locator_kind, section_ref, table_ref) 去重合并，
+    tool_trace 合并。
+
+    参数:
+        results: fee_rates 受控 profile 的多个安全 Agent 成功结果。
+
+    返回:
+        标题块去重聚合后的 AgentRunResult；无结果时返回 NOT_FOUND 结果。
+
+    异常:
+        本函数不执行 I/O，不抛出业务异常。
+    """
+
+    if not results:
+        return AgentRunResult(
+            answer="",
+            citations=(),
+            tool_trace=(),
+            failure=ToolFailure(code=FailureCode.NOT_FOUND, message=_TARGET_NOT_FOUND_MESSAGE),
+        )
+    block_by_title: dict[str, str] = {}
+    for result in results:
+        stripped = _strip_fee_rate_table_blocks(result.answer)
+        for title in _FEE_RATE_TITLES:
+            if title in block_by_title:
+                continue
+            block = _fee_rate_title_block(stripped, title)
+            if block is not None:
+                block_by_title[title] = block
+    answer = "\n\n".join(
+        block_by_title[title] for title in _FEE_RATE_TITLES if title in block_by_title
+    )
+    citations = _dedupe_fee_rate_citations(
+        tuple(citation for result in results for citation in result.citations)
+    )
+    return AgentRunResult(
+        answer=answer,
+        citations=citations,
+        tool_trace=tuple(trace for result in results for trace in result.tool_trace),
+        failure=None,
+    )
+
+
+def _dedupe_fee_rate_citations(citations: tuple[Citation, ...]) -> tuple[Citation, ...]:
+    """按 (locator_kind, section_ref, table_ref) 去重合并 fee_rates citations。"""
+
+    seen: set[tuple[object, str | None, str | None]] = set()
+    deduped: list[Citation] = []
+    for citation in citations:
+        locator = citation.locator
+        key = (locator.locator_kind, locator.section_ref, locator.table_ref)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(citation)
+    return tuple(deduped)
+
+
 def _target_title_lines(answer: str) -> tuple[str, ...]:
     """从 Agent 安全 answer 中提取 section/table title 行用于 Service 目标判定。"""
 
@@ -4291,6 +4847,8 @@ def _extract_fee_rate_fields(result: AgentRunResult) -> tuple[FeeRateExtraction,
         citation = citations.get(spec.title)
         if segment is None or citation is None:
             raise DocumentToolError(FailureCode.NOT_FOUND, "fee_rates 候选章节不完整")
+        # Docling 空格噪声（1.  50%）先归一化再做百分比匹配
+        segment = _normalize_percent_text(segment)
         # 排除费率变更历史句（由 X% 调整/调低/变更为 Y%）
         _raw_matches = tuple(spec.pattern.finditer(segment))
         _change_re = re.compile(r'由\s*\d+\.\d{2}%\s*(?:调整|调低|调降|调升|变更|修改)')
@@ -4340,10 +4898,9 @@ def _validated_fee_rate_specs() -> tuple[_FeeRateExtractionSpec, ...]:
 def _fee_rate_segments(answer: str) -> dict[str, str]:
     """按 10B 三个固定披露标题切分安全 answer。"""
 
-    titles = ("基金管理费", "基金托管费", "销售服务费")
     positions: list[tuple[str, int]] = []
     search_start = 0
-    for title in titles:
+    for title in _FEE_RATE_TITLES:
         position = answer.find(title, search_start)
         if position < 0:
             raise DocumentToolError(FailureCode.NOT_FOUND, "fee_rates 候选章节缺失")
@@ -4358,15 +4915,34 @@ def _fee_rate_segments(answer: str) -> dict[str, str]:
 
 
 def _fee_rate_section_citations(citations: tuple[Citation, ...]) -> dict[str, Citation]:
-    """按 10B 聚合顺序为三段费率披露匹配 section citation。"""
+    """按 section_ref 去重为三段费率披露匹配 section citation。
 
-    titles = ("基金管理费", "基金托管费", "销售服务费")
-    section_citations = tuple(
-        citation for citation in citations if citation.locator.locator_kind is LocatorKind.SECTION
-    )
-    if len(section_citations) < len(titles):
+    TABLE locator 携带的 section_ref 也计入覆盖（table-0052 的
+    section_ref=section-0398 已验证可定位到销售服务费节）；按出现顺序取
+    每个 section_ref 的首个 citation，要求覆盖不少于三个不同 section，
+    返回 dict 仍按固定标题顺序 zip。
+
+    参数:
+        citations: 聚合后的 fee_rates citations。
+
+    返回:
+        固定标题顺序映射到 section citation 的 dict。
+
+    异常:
+        DocumentToolError: 不同 section_ref 覆盖不足三个时抛 NOT_FOUND。
+    """
+
+    by_section_ref: dict[str, Citation] = {}
+    for citation in citations:
+        locator = citation.locator
+        if locator.section_ref is None:
+            continue
+        if locator.locator_kind not in (LocatorKind.SECTION, LocatorKind.TABLE):
+            continue
+        by_section_ref.setdefault(locator.section_ref, citation)
+    if len(by_section_ref) < len(_FEE_RATE_TITLES):
         raise DocumentToolError(FailureCode.NOT_FOUND, "fee_rates citation 不完整")
-    return dict(zip(titles, section_citations, strict=False))
+    return dict(zip(_FEE_RATE_TITLES, by_section_ref.values(), strict=False))
 
 
 def _extract_performance_return_fields(
@@ -4410,15 +4986,15 @@ def _extract_performance_return_fields(
     )
     fields: list[PerformanceReturnExtraction] = []
     for table in performance_tables:
-        row = _performance_past_year_row(table.rows)
-        if row is None:
-            continue
         indexes = _performance_column_indexes(table.rows, specs)
         if indexes is None:
             raise DocumentToolError(FailureCode.NOT_FOUND, "performance_returns 目标列缺失")
         share_scope = share_scopes.get(table.table_ref)
         if share_scope is None:
             raise DocumentToolError(FailureCode.NOT_FOUND, "performance_returns 份额类别无法唯一识别")
+        row = _performance_past_year_row(table.rows, share_scope=share_scope)
+        if row is None:
+            continue
         for spec in specs:
             column_index = indexes[spec.field_name]
             value = _single_percent_text(row[column_index])
@@ -4478,6 +5054,12 @@ def _extract_annual_performance_fields(
         tables.append(table)
 
     header_tables = tuple(table for table in tables if _performance_column_indexes(table.rows, specs))
+    headerless_tables = tuple(
+        table
+        for table in tables
+        if _performance_column_indexes(table.rows, specs) is None
+        and _has_performance_past_year_row(table.rows)
+    )
     if not header_tables:
         raise DocumentToolError(FailureCode.NOT_FOUND, "annual performance 目标列缺失")
 
@@ -4502,7 +5084,7 @@ def _extract_annual_performance_fields(
             raise DocumentToolError(FailureCode.NOT_FOUND, "annual performance 份额类别无法唯一识别")
         if requested_scope is not None and share_scope != requested_scope:
             continue
-        row = _performance_past_year_row(table.rows)
+        row = _performance_past_year_row(table.rows, share_scope=share_scope)
         if row is None:
             continue
         indexes = _performance_column_indexes(table.rows, specs)
@@ -4533,6 +5115,45 @@ def _extract_annual_performance_fields(
             continue
         if len(share_fields) == len(specs):
             fields.extend(share_fields)
+
+    # 无表头部分表（A/C 分段表的后续段）：用同 section 相邻表头对齐列位置，
+    # 按行内份额标签切段后逐 scope 抽取，不再整体 not_found。
+    for table in headerless_tables:
+        indexes = _headerless_performance_column_indexes(table, header_tables, specs)
+        if indexes is None:
+            continue
+        if not _performance_table_has_share_labels(table.rows):
+            continue
+        for share_scope in _SHARE_CLASS_SCOPES:
+            if requested_scope is not None and share_scope != requested_scope:
+                continue
+            row = _performance_past_year_row(table.rows, share_scope=share_scope)
+            if row is None:
+                continue
+            share_fields: list[AnnualPerformanceExtraction] = []
+            try:
+                for spec in specs:
+                    column_index = indexes[spec.field_name]
+                    value = _single_percent_text(row[column_index])
+                    share_fields.append(
+                        AnnualPerformanceExtraction(
+                            field_name=spec.field_name,
+                            decimal_percent_text=value,
+                            report_year=report_year,
+                            source_period_label=_PERFORMANCE_RETURN_PERIOD_TEXT,
+                            share_class_scope=share_scope,
+                            raw_text=_performance_raw_text(
+                                period_text=row[0],
+                                column_text=table.rows[0][column_index],
+                                value_text=value,
+                            ),
+                            citation=table.citation,
+                        )
+                    )
+            except DocumentToolError:
+                continue
+            if len(share_fields) == len(specs):
+                fields.extend(share_fields)
 
     if not fields:
         raise DocumentToolError(FailureCode.NOT_FOUND, "annual performance 过去一年完整字段缺失")
@@ -4576,14 +5197,24 @@ def _extract_annual_excess_return_fields(
         tables.append(table)
 
     header_tables = tuple(table for table in tables if _performance_column_indexes(table.rows, signature_specs))
+    headerless_tables = tuple(
+        table
+        for table in tables
+        if _performance_column_indexes(table.rows, signature_specs) is None
+        and _has_performance_past_year_row(table.rows)
+    )
     if not header_tables:
         raise DocumentToolError(FailureCode.NOT_FOUND, "annual excess return ①－③ 列缺失")
 
-    share_scopes = _annual_excess_return_table_share_scopes(
-        header_tables,
-        section_text_by_ref=section_text_by_ref,
-        requested_share_class=requested_share_class,
-    )
+    try:
+        share_scopes = _annual_excess_return_table_share_scopes(
+            header_tables,
+            section_text_by_ref=section_text_by_ref,
+            requested_share_class=requested_share_class,
+        )
+    except DocumentToolError:
+        # Docling 分裂跨 section 场景：share scope 无法唯一识别时，与 10F 一致默认所有表为 A
+        share_scopes = {t.table_ref: _SHARE_SCOPE_A for t in header_tables}
     requested_scope = _normalize_share_class_scope(requested_share_class) if requested_share_class else None
     if requested_share_class and requested_scope is None:
         raise DocumentToolError(FailureCode.NOT_FOUND, "annual excess return 份额类别无法唯一识别")
@@ -4595,7 +5226,7 @@ def _extract_annual_excess_return_fields(
             continue
         if requested_scope is not None and share_scope != requested_scope:
             continue
-        row = _performance_past_year_row(table.rows)
+        row = _performance_past_year_row(table.rows, share_scope=share_scope)
         if row is None:
             continue
         indexes = _performance_column_indexes(table.rows, signature_specs)
@@ -4623,6 +5254,41 @@ def _extract_annual_excess_return_fields(
                 citation=table.citation,
             )
         )
+
+    # 无表头部分表：用同 section 相邻表头对齐列位置，按行内份额标签切段后逐 scope 抽取
+    for table in headerless_tables:
+        indexes = _headerless_performance_column_indexes(table, header_tables, signature_specs)
+        if indexes is None:
+            continue
+        if not _performance_table_has_share_labels(table.rows):
+            continue
+        for share_scope in _SHARE_CLASS_SCOPES:
+            if requested_scope is not None and share_scope != requested_scope:
+                continue
+            row = _performance_past_year_row(table.rows, share_scope=share_scope)
+            if row is None:
+                continue
+            try:
+                column_index = indexes[_FIELD_ANNUAL_EXCESS_RETURN]
+                value = _single_percent_text(row[column_index])
+            except DocumentToolError:
+                continue
+            fields.append(
+                AnnualExcessReturnExtraction(
+                    field_name=_FIELD_ANNUAL_EXCESS_RETURN,
+                    decimal_percent_text=value,
+                    report_year=report_year,
+                    source_period_label=_PERFORMANCE_RETURN_PERIOD_TEXT,
+                    share_class_scope=share_scope,
+                    source_column_label=_ANNUAL_EXCESS_RETURN_COLUMN_LABEL,
+                    raw_text=_performance_raw_text(
+                        period_text=row[0],
+                        column_text=table.rows[0][column_index],
+                        value_text=value,
+                    ),
+                    citation=table.citation,
+                )
+            )
 
     if not fields:
         raise DocumentToolError(FailureCode.NOT_FOUND, "annual excess return 过去一年 ①－③ 字段缺失")
@@ -4735,7 +5401,9 @@ def _annual_excess_return_table_share_scopes(
             scope = _annual_performance_share_scope_from_rows(table.rows)
             if scope is not None:
                 inferred[table.table_ref] = scope
-        return inferred
+        if len(inferred) == len(tables):
+            return inferred
+        raise
 
 
 def _performance_table_citation_refs(result: AgentRunResult) -> tuple[tuple[str, str], ...]:
@@ -4806,29 +5474,43 @@ def _annual_performance_table_refs(
     if not cited_table_refs:
         raise DocumentToolError(FailureCode.NOT_FOUND, "annual performance table citation 缺失")
 
-    def _read_candidate_table(table_ref: str) -> TableContent | None:
+    def _read_candidate_table(
+        table_ref: str,
+        *,
+        require_header: bool = True,
+    ) -> TableContent | None:
         table = tool_service.read_table(document_id, table_ref, max_rows=_PERFORMANCE_TABLE_MAX_ROWS)
         if isinstance(table, ToolFailure):
             return None
         if strict_table_refs and table.section_ref not in source_section_refs:
             return None
-        if _performance_column_indexes(table.rows, specs) is None:
+        if require_header and _performance_column_indexes(table.rows, specs) is None:
             return None
         return table
 
-    # 第一遍：收集所有列签名匹配的 cited table（含 Docling 分裂的不完整表）
+    # 第一遍：收集所有列签名匹配的 cited table（含 Docling 分裂的不完整表）。
+    # cited_related 标记 cited 表是否与 performance 表相关（有 header 或有"过去一年"行），
+    # 用于区分「cited 表不完整需要同 section 相邻表补全」与「cited 表根本无关，
+    # 不得消费未被 cite 的 signature 表」两种场景。
     refs: list[str] = []
+    cited_related = False
     for table_ref in cited_table_refs:
-        table = _read_candidate_table(table_ref)
+        table = _read_candidate_table(table_ref, require_header=False)
         if table is None:
             continue
-        refs.append(table.table_ref)
+        if _performance_column_indexes(table.rows, specs) is not None:
+            refs.append(table.table_ref)
+        if (
+            _performance_column_indexes(table.rows, specs) is not None
+            or _has_performance_past_year_row(table.rows)
+        ):
+            cited_related = True
 
     # 检查已收集的表中是否有含"过去一年"行的完整表；
     # Docling 分裂场景：agent 可能只 cite 了不完整的前半段，后半段未被 cite。
     # 此时需要 fallback 扫描 section 内全部表格来补全。
     _any_complete = any(
-        (_t := _read_candidate_table(r)) is not None and _performance_past_year_row(_t.rows) is not None
+        (_t := _read_candidate_table(r)) is not None and _has_performance_past_year_row(_t.rows)
         for r in refs
     ) if refs else False
 
@@ -4841,12 +5523,16 @@ def _annual_performance_table_refs(
             table = tool_service.read_table(document_id, t_meta.table_ref, max_rows=_PERFORMANCE_TABLE_MAX_ROWS)
             if isinstance(table, ToolFailure):
                 continue
-            # source_section_refs 内的表：仅在无 header 且有"过去一年"行时纳入（续表场景）
+            # source_section_refs 内的表：
+            # - 无表头续表（A/C 分段表的后续段）且含"过去一年"行时纳入；
+            # - 有独立 header 但未被 cite 的表，仅在 cited 表确为 performance 相关且
+            #   该表含完整"过去一年"行时纳入（007466-2024 的 A 类完整表 table-15 场景）。
             if hasattr(t_meta, "section_ref") and t_meta.section_ref in source_section_refs:
                 if _performance_column_indexes(table.rows, specs) is not None:
-                    continue  # 有独立 header 但未被 cite 的表，仍跳过
-                if _performance_past_year_row(table.rows) is None:
-                    continue  # 无 header 也无过去一年数据的无关表，跳过
+                    if not cited_related or not _has_performance_past_year_row(table.rows):
+                        continue
+                elif not _has_performance_past_year_row(table.rows):
+                    continue
                 refs.append(table.table_ref)
                 continue
             # 其他 section 的表：原有逻辑
@@ -4854,7 +5540,15 @@ def _annual_performance_table_refs(
                 continue
             refs.append(table.table_ref)
 
-    refs_tuple = tuple(dict.fromkeys(refs))
+    # 按文档顺序排序，保证 share scope 与表按出现顺序一一绑定
+    if hasattr(tool_service, "list_tables"):
+        table_order = {
+            t_meta.table_ref: index
+            for index, t_meta in enumerate(tool_service.list_tables(document_id))
+        }
+        refs_tuple = tuple(dict.fromkeys(sorted(refs, key=lambda ref: table_order.get(ref, len(table_order)))))
+    else:
+        refs_tuple = tuple(dict.fromkeys(refs))
     if not refs_tuple:
         raise DocumentToolError(FailureCode.NOT_FOUND, "annual performance 目标列缺失")
     return refs_tuple
@@ -4899,13 +5593,109 @@ def _header_matches_performance_spec(cell: str, spec: _PerformanceReturnExtracti
     )
 
 
-def _performance_past_year_row(rows: tuple[tuple[str, ...], ...]) -> tuple[str, ...] | None:
-    """返回唯一 past_1_year 行；缺失或多行均按 not_found 处理。"""
+def _has_performance_past_year_row(rows: tuple[tuple[str, ...], ...]) -> bool:
+    """非抛错判断表格是否包含 过去一年 行（用于分裂扫描）。"""
 
-    matches = tuple(row for row in rows[1:] if row and _normalize_disclosure_text(row[0]) == _PERFORMANCE_RETURN_PERIOD_TEXT)
+    return any(
+        row and _normalize_disclosure_text(row[0]) == _PERFORMANCE_RETURN_PERIOD_TEXT
+        for row in rows[1:]
+    )
+
+
+_PERFORMANCE_SHARE_SEGMENT_RE = re.compile(r"([ACINY])(?:类)?$")
+
+
+def _performance_share_segment_label(row: tuple[str, ...]) -> str | None:
+    """从份额标签行首列识别份额类别（A/C/I/Y）；非标签行返回 None。"""
+
+    if not row:
+        return None
+    first = _normalize_disclosure_text(row[0])
+    if not first:
+        return None
+    match = _PERFORMANCE_SHARE_SEGMENT_RE.search(first)
+    if match is None:
+        return None
+    # 标签行要求其余单元格为空，避免把数据行误判为份额标签
+    if any(_normalize_disclosure_text(cell) for cell in row[1:]):
+        return None
+    return match.group(1)
+
+
+def _performance_share_segment_rows(
+    rows: tuple[tuple[str, ...], ...],
+    share_scope: str,
+) -> tuple[tuple[str, ...], ...]:
+    """按行内份额标签切段，返回目标份额类别的数据行（不含标签行与段首表头）。"""
+
+    label_indexes = [
+        (index, label)
+        for index, row in enumerate(rows)
+        if (label := _performance_share_segment_label(row)) is not None
+    ]
+    if not label_indexes:
+        # 无标签行的单段表：整表属于目标份额类别，按原口径跳过表头行
+        return rows[1:]
+    for index, (row_index, label) in enumerate(label_indexes):
+        if label != share_scope:
+            continue
+        start = row_index + 1
+        end = label_indexes[index + 1][0] if index + 1 < len(label_indexes) else len(rows)
+        return tuple(
+            row
+            for row in rows[start:end]
+            if _normalize_disclosure_text(row[0]) != "阶段"
+        )
+    return ()
+
+
+def _performance_table_has_share_labels(rows: tuple[tuple[str, ...], ...]) -> bool:
+    """判断表格是否包含可识别的份额标签行（用于无表头合并表切段）。"""
+
+    return any(_performance_share_segment_label(row) is not None for row in rows)
+
+
+def _performance_past_year_row(
+    rows: tuple[tuple[str, ...], ...],
+    *,
+    share_scope: str | None = None,
+) -> tuple[str, ...] | None:
+    """返回目标份额类别的唯一 past_1_year 行；缺失或单段多行按 not_found 处理。"""
+
+    candidates = (
+        _performance_share_segment_rows(rows, share_scope)
+        if share_scope is not None
+        else rows[1:]
+    )
+    matches = tuple(
+        row
+        for row in candidates
+        if row and _normalize_disclosure_text(row[0]) == _PERFORMANCE_RETURN_PERIOD_TEXT
+    )
     if len(matches) > 1:
         raise DocumentToolError(FailureCode.NOT_FOUND, "performance_returns 过去一年行无法唯一识别")
     return matches[0] if matches else None
+
+
+def _headerless_performance_column_indexes(
+    table: TableContent,
+    header_tables: tuple[TableContent, ...],
+    specs: tuple[_PerformanceReturnExtractionSpec, ...],
+) -> dict[str, int] | None:
+    """为无表头续表从同 section 相邻表头表对齐目标列位置。"""
+
+    width = max((len(row) for row in table.rows), default=0)
+    candidates = (
+        tuple(header for header in header_tables if header.section_ref == table.section_ref)
+        or header_tables
+    )
+    for header in candidates:
+        indexes = _performance_column_indexes(header.rows, specs)
+        if indexes is None:
+            continue
+        if max(indexes.values(), default=0) < width:
+            return indexes
+    return None
 
 
 def _performance_table_share_scopes(
@@ -4976,6 +5766,16 @@ def _normalize_share_class_scope(share_class: str) -> str | None:
     return None
 
 
+def _prefer_share_scope_fields(fields, preferred_scope: str):
+    """优先返回指定份额类别的字段；无该类别时回退到全部字段。"""
+
+    scoped = tuple(
+        field for field in fields
+        if getattr(field, "share_class_scope", None) == preferred_scope
+    )
+    return scoped if scoped else tuple(fields)
+
+
 def _single_percent_text(cell: str) -> str:
     """从目标表格单元格中读取唯一百分号文本，不转小数。"""
 
@@ -5002,6 +5802,29 @@ def _normalize_disclosure_text(text: str) -> str:
     """去除披露文本中的排版空白，用于受控匹配。"""
 
     return re.sub(r"\s+", "", text)
+
+
+def _normalize_percent_text(text: str) -> str:
+    """折叠百分比数值内部空白（Docling 分块噪声）。
+
+    只作用于百分比邻域：折叠数字、小数点、百分号之间的空白，
+    例如 `1.  50%` -> `1.50%`、`1. 50 %` -> `1.50%`；
+    正文其余部分保持不变。
+
+    参数:
+        text: 待归一化文本。
+
+    返回:
+        百分比 token 内部空白折叠后的文本。
+
+    异常:
+        本函数不执行 I/O，不抛出业务异常。
+    """
+
+    def _collapse(match: re.Match[str]) -> str:
+        return re.sub(r"\s+", "", match.group(0))
+
+    return re.sub(r"\d+\s*(?:\.\s*\d+)?\s*%", _collapse, text)
 
 
 def _detect_share_class(cell_text: str) -> str | None:
@@ -5266,6 +6089,8 @@ def _extract_qdii_holdings_from_tables(
     """直接扫描文档表格，查找 QDII 格式持仓表并抽取数据。
 
     当 Agent citation 未能正确引用 QDII 持仓表时的兜底方案。
+    支持跨页分裂表：主表（QDII 表头）+ 续表（碎片行 + 数据行）；
+    表头被跨页截断时用续表首行碎片补齐，碎片行（首列非序号）跳过。
 
     参数:
         document_id: 文档 ID。
@@ -5289,32 +6114,213 @@ def _extract_qdii_holdings_from_tables(
         full_table = tool_service.read_table(document_id, table_meta.table_ref, max_rows=_HOLDINGS_TABLE_MAX_ROWS)
         if isinstance(full_table, ToolFailure) or not full_table.rows:
             continue
-        column_indexes = _holdings_column_indexes(full_table.rows)
-        if column_indexes is None:
-            continue
-        holdings: list[HoldingExtraction] = []
-        _extraction_error = False  # 跟踪未分类异常
-        for row in full_table.rows[1:]:  # 跳过 header
-            if len(row) <= max(column_indexes.values()):
-                continue
-            stock_code = row[column_indexes["stock_code"]].strip()
-            stock_name = row[column_indexes["stock_name"]].strip()
-            quantity = row[column_indexes.get("quantity", 0)].strip() if "quantity" in column_indexes else ""
-            fair_value = row[column_indexes.get("fair_value", 0)].strip() if "fair_value" in column_indexes else ""
-            percentage = row[column_indexes["percentage"]].strip()
-            if not stock_code and not stock_name:
-                continue
-            holdings.append(HoldingExtraction(
-                rank=len(holdings) + 1,
-                stock_code=stock_code,
-                stock_name=stock_name,
-                quantity=quantity,
-                fair_value=fair_value,
-                percentage=percentage,
-            ))
+        holdings = _extract_qdii_table_with_continuations(
+            document_id=document_id,
+            tool_service=tool_service,
+            primary_table=full_table,
+        )
         if holdings:
             return tuple(holdings[:_HOLDINGS_TOP_N])
     return None
+
+
+def _extract_qdii_table_with_continuations(
+    *,
+    document_id: str,
+    tool_service: FundDocumentToolService,
+    primary_table: TableContent,
+) -> list[HoldingExtraction]:
+    """从 QDII 主表及同章节跨页续表合并抽取持仓行。
+
+    参数:
+        document_id: 文档 ID。
+        tool_service: 文档工具服务。
+        primary_table: 含 QDII 特征表头的主表。
+
+    返回:
+        合并后的持仓列表（最多 _HOLDINGS_TOP_N 行）。
+    """
+
+    column_indexes = _holdings_column_indexes(primary_table.rows)
+    continuation: TableContent | None = None
+    data_source = primary_table
+    if column_indexes is None:
+        # 表头可能被跨页截断（如 2024：'占基 金资' + 续表 '产净值比例（%）'），
+        # 用续表首行碎片补齐表头后再抽取。
+        continuation = _find_qdii_header_continuation(
+            document_id=document_id,
+            tool_service=tool_service,
+            primary_table=primary_table,
+        )
+        if continuation is None:
+            return []
+        merged_header = _merge_qdii_header_fragments(
+            primary_table.rows[0],
+            continuation.rows[0],
+        )
+        column_indexes = _holdings_column_indexes((merged_header,))
+        if column_indexes is None:
+            return []
+        data_source = continuation
+
+    holdings: list[HoldingExtraction] = []
+    for row in data_source.rows[1:]:  # 跳过 header
+        extracted = _holding_from_qdii_row(
+            row,
+            column_indexes,
+            rank=len(holdings) + 1,
+        )
+        if extracted is not None:
+            holdings.append(extracted)
+            if len(holdings) >= _HOLDINGS_TOP_N:
+                return holdings
+
+    if len(holdings) < _HOLDINGS_TOP_N:
+        holdings.extend(
+            _extract_qdii_continuation_rows(
+                document_id=document_id,
+                tool_service=tool_service,
+                primary_table=primary_table,
+                column_indexes=column_indexes,
+                existing_count=len(holdings),
+            )
+        )
+    return holdings[:_HOLDINGS_TOP_N]
+
+
+def _find_qdii_header_continuation(
+    *,
+    document_id: str,
+    tool_service: FundDocumentToolService,
+    primary_table: TableContent,
+) -> TableContent | None:
+    """查找同章节下一页、列数一致的续表，用于补齐截断表头。
+
+    参数:
+        document_id: 文档 ID。
+        tool_service: 文档工具服务。
+        primary_table: 表头截断的 QDII 主表。
+
+    返回:
+        续表内容；未找到时返回 None。
+    """
+
+    primary_col_count = len(primary_table.rows[0]) if primary_table.rows else 0
+    for table_meta in tool_service.list_tables(document_id):
+        if table_meta.table_ref == primary_table.table_ref:
+            continue
+        if table_meta.section_ref != primary_table.section_ref:
+            continue
+        if (
+            table_meta.locator.page_no is not None
+            and primary_table.locator.page_no is not None
+            and table_meta.locator.page_no <= primary_table.locator.page_no
+        ):
+            continue
+        if table_meta.column_count != primary_col_count:
+            continue
+        table = tool_service.read_table(document_id, table_meta.table_ref, max_rows=1)
+        if isinstance(table, ToolFailure) or not table.rows:
+            continue
+        if _is_qdii_rank_row(table.rows[0]):
+            continue  # 首行已是数据行，不是表头碎片
+        return table
+    return None
+
+
+def _merge_qdii_header_fragments(
+    header: tuple[str, ...],
+    fragments: tuple[str, ...],
+) -> tuple[str, ...]:
+    """按列拼接主表表头与续表碎片行文本。"""
+
+    return tuple(
+        (header[idx] if idx < len(header) else "").strip()
+        + (fragments[idx] if idx < len(fragments) else "").strip()
+        for idx in range(max(len(header), len(fragments)))
+    )
+
+
+def _extract_qdii_continuation_rows(
+    *,
+    document_id: str,
+    tool_service: FundDocumentToolService,
+    primary_table: TableContent,
+    column_indexes: dict[str, int],
+    existing_count: int,
+) -> list[HoldingExtraction]:
+    """抽取同章节跨页续表的数据行（跳过碎片行）。"""
+
+    primary_col_count = len(primary_table.rows[0]) if primary_table.rows else 0
+    holdings: list[HoldingExtraction] = []
+    for table_meta in tool_service.list_tables(document_id):
+        if table_meta.table_ref == primary_table.table_ref:
+            continue
+        if table_meta.section_ref != primary_table.section_ref:
+            continue
+        if (
+            table_meta.locator.page_no is not None
+            and primary_table.locator.page_no is not None
+            and table_meta.locator.page_no <= primary_table.locator.page_no
+        ):
+            continue
+        if table_meta.column_count != primary_col_count:
+            continue
+        table = tool_service.read_table(document_id, table_meta.table_ref, max_rows=_HOLDINGS_TABLE_MAX_ROWS)
+        if isinstance(table, ToolFailure) or not table.rows:
+            continue
+        for row in table.rows:
+            if len(holdings) + existing_count >= _HOLDINGS_TOP_N:
+                return holdings
+            if not _is_qdii_rank_row(row):
+                continue  # 跳过跨页碎片行
+            extracted = _holding_from_qdii_row(
+                row,
+                column_indexes,
+                rank=existing_count + len(holdings) + 1,
+            )
+            if extracted is not None:
+                holdings.append(extracted)
+    return holdings
+
+
+def _is_qdii_rank_row(row: tuple[str, ...]) -> bool:
+    """判断行是否为 QDII 持仓数据行（首列为序号数字）。"""
+
+    if not row:
+        return False
+    try:
+        int(row[0].strip())
+    except (ValueError, AttributeError):
+        return False
+    return True
+
+
+def _holding_from_qdii_row(
+    row: tuple[str, ...],
+    column_indexes: dict[str, int],
+    *,
+    rank: int,
+) -> HoldingExtraction | None:
+    """按列索引把单行映射为持仓抽取结果；无效行返回 None。"""
+
+    if len(row) <= max(column_indexes.values()):
+        return None
+    stock_code = row[column_indexes["stock_code"]].strip()
+    stock_name = row[column_indexes["stock_name"]].strip()
+    if not stock_code and not stock_name:
+        return None
+    quantity = row[column_indexes.get("quantity", 0)].strip() if "quantity" in column_indexes else ""
+    fair_value = row[column_indexes.get("fair_value", 0)].strip() if "fair_value" in column_indexes else ""
+    percentage = row[column_indexes["percentage"]].strip()
+    return HoldingExtraction(
+        rank=rank,
+        stock_code=stock_code,
+        stock_name=stock_name,
+        quantity=quantity,
+        fair_value=fair_value,
+        percentage=percentage,
+    )
 
 
 def _extract_holdings_from_agent_result(
@@ -5353,7 +6359,7 @@ def _extract_holdings_from_agent_result(
             is_bond_table = False
 
         # 表格无 header 时（如跨页续表），搜索相邻表格的 header
-        # 限制：只搜索 table_ref 编号在 [当前-5, 当前) 范围内的表格
+        # 限制：同 section 内双向查找，table_ref 编号在 [当前-5, 当前+5] 范围内
         header_from_other_table = False
         if column_indexes is None and not is_bond_table:
             try:
@@ -5361,12 +6367,23 @@ def _extract_holdings_from_agent_result(
             except (ValueError, IndexError):
                 current_num = 0
             all_tables = tool_service.list_tables(document_id)
-            for candidate in all_tables:
+
+            def _same_section_nearby(candidate: TableSummary) -> bool:
+                """候选表必须与当前表同 section 且编号在双向 5 表范围内。"""
+
                 try:
                     cand_num = int(candidate.table_ref.split("-")[-1])
                 except (ValueError, IndexError):
-                    continue
-                if cand_num >= current_num or current_num - cand_num > 5:
+                    return False
+                return (
+                    cand_num != current_num
+                    and abs(cand_num - current_num) <= 5
+                    and candidate.section_ref == table.section_ref
+                )
+
+            # 优先找含 股票名称+占基金资产净值比例 表头的表
+            for candidate in all_tables:
+                if not _same_section_nearby(candidate):
                     continue
                 candidate_table = tool_service.read_table(document_id, candidate.table_ref, max_rows=1)
                 if isinstance(candidate_table, ToolFailure):
@@ -5377,12 +6394,21 @@ def _extract_holdings_from_agent_result(
                     is_bond_table = False
                     header_from_other_table = True
                     break
-                bond_idx = _bond_holdings_column_indexes(candidate_table.rows)
-                if bond_idx is not None:
-                    column_indexes = bond_idx
-                    is_bond_table = True
-                    header_from_other_table = True
-                    break
+
+            # 其次才找债券持仓表头
+            if column_indexes is None:
+                for candidate in all_tables:
+                    if not _same_section_nearby(candidate):
+                        continue
+                    candidate_table = tool_service.read_table(document_id, candidate.table_ref, max_rows=1)
+                    if isinstance(candidate_table, ToolFailure):
+                        continue
+                    bond_idx = _bond_holdings_column_indexes(candidate_table.rows)
+                    if bond_idx is not None:
+                        column_indexes = bond_idx
+                        is_bond_table = True
+                        header_from_other_table = True
+                        break
 
         if column_indexes is None:
             continue
@@ -5548,15 +6574,27 @@ def _holdings_column_indexes(rows: tuple[tuple[str, ...], ...]) -> dict[str, int
             mapping["stock_code"] = idx
         elif "股票名称" in cell_clean:
             mapping["stock_name"] = idx
-        elif "公司名称" in cell_clean and "stock_name" not in mapping:
-            # QDII 持仓表列名：公司名称（中文）/ 公司名称（英文）
-            mapping["stock_name"] = idx
         elif "数量" in cell_clean:
             mapping["quantity"] = idx
         elif "公允价值" in cell_clean:
             mapping["fair_value"] = idx
         elif "占基金资产净值比例" in cell_clean or "占比" in cell_clean:
             mapping["percentage"] = idx
+
+    if "stock_name" not in mapping:
+        # QDII 持仓表列名：公司名称（中文）/ 公司名称（英文）——优先中文列
+        company_name_indexes = [
+            idx for idx, cell in enumerate(header)
+            if "公司名称" in cell.strip().replace(" ", "")
+        ]
+        if company_name_indexes:
+            mapping["stock_name"] = next(
+                (
+                    idx for idx in company_name_indexes
+                    if "中文" in header[idx].strip().replace(" ", "")
+                ),
+                company_name_indexes[0],
+            )
 
     # 注意：不将 stock_name 映射到 stock_code，避免语义错误。
     # QDII 表若无"证券代码"列，stock_code 留空由上层处理。
@@ -5636,6 +6674,18 @@ def _extract_allocation_from_agent_result(
         if _is_asset_allocation_table(table.rows):
             asset_allocation = _parse_asset_allocation_table(table.rows)
             break
+
+    if not asset_allocation:
+        # citation 错绑 caption 含查询词的非资产配置表时（如 519696-2023 估值表），
+        # 全表扫描兜底：命中表头 项目/金额/占基金总资产 的资产配置表即解析。
+        all_tables = tool_service.list_tables(document_id)
+        for t in all_tables:
+            table = tool_service.read_table(document_id, t.table_ref, max_rows=30)
+            if isinstance(table, ToolFailure):
+                continue
+            if _is_asset_allocation_table(table.rows):
+                asset_allocation = _parse_asset_allocation_table(table.rows)
+                break
 
     if not industry_allocation:
         all_tables = tool_service.list_tables(document_id)
@@ -5769,21 +6819,83 @@ def _parse_industry_allocation_table(rows: tuple[tuple[str, ...], ...]) -> list[
     return items
 
 
+_FEE_RATE_HISTORY_MARKER_RE = re.compile(
+    r"自\s*\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日\s*起"
+)
+_FEE_RATE_PERCENT_RE = re.compile(r"(\d+\.\d+%)")
+
+
+def _fee_rate_from_title_block(answer: str, fee_name: str) -> str | None:
+    """从费率标题块抽取当期适用费率。
+
+    标题块从费率名称首次出现到下一个费率名称或文本末尾；块内含
+    「自…年…月…日起」时取标记后首个百分比，否则取块内最后一个
+    百分比（年报注文以当期费率结尾）。
+
+    参数:
+        answer: 百分比归一化后的 Agent 安全 answer。
+        fee_name: 费率名称（基金管理费 / 基金托管费）。
+
+    返回:
+        当期适用费率；无法唯一确定时返回 None。
+
+    异常:
+        本函数不执行 I/O，不抛出业务异常。
+    """
+
+    start = answer.find(fee_name)
+    if start < 0:
+        return None
+    end = len(answer)
+    for other in _FEE_RATE_TITLES:
+        if other == fee_name:
+            continue
+        position = answer.find(other, start + len(fee_name))
+        if position > start:
+            end = min(end, position)
+    block = answer[start:end]
+    marker = _FEE_RATE_HISTORY_MARKER_RE.search(block)
+    if marker is not None:
+        after_marker = block[marker.end():]
+        after = _FEE_RATE_PERCENT_RE.search(after_marker)
+        if after is not None:
+            return after.group(1)
+        return None
+    percentages = _FEE_RATE_PERCENT_RE.findall(block)
+    return percentages[-1] if percentages else None
+
+
 def _extract_fee_rates_from_agent_result(
     *,
     result: AgentRunResult,
 ) -> tuple[FeeRateItem, ...]:
-    """从 Agent 结果中抽取费率信息。"""
+    """从 Agent 结果中抽取费率信息。
+
+    先做百分比数值归一化（Docling 空格噪声）；管理费/托管费按费率标题块
+    取当期适用费率：块内含「自…年…月…日起」时取标记后首个百分比，否则
+    取块内最后一个百分比。
+    """
 
     fees: list[FeeRateItem] = []
-    answer = result.answer
+    answer = _normalize_percent_text(result.answer)
+
+    for fee_name in ("基金管理费", "基金托管费"):
+        rate = _fee_rate_from_title_block(answer, fee_name)
+        if rate is not None:
+            fees.append(FeeRateItem(fee_name=fee_name, rate=rate))
+
+    # QDII 措辞兼容：年报正文以「管理人报酬」表述管理费（「基金管理费/管理费」
+    # 均不出现），标题块命中后仍输出 基金管理费 字段。
+    if not any(fee.fee_name == "基金管理费" for fee in fees):
+        rate = _fee_rate_from_title_block(answer, _FEE_RATE_MANAGEMENT_WORDINGS[1])
+        if rate is not None:
+            fees.append(FeeRateItem(fee_name="基金管理费", rate=rate))
+
     fee_patterns = [
-        (r"基金管理费.*(\d+\.\d+%)", "基金管理费"),
-        (r"基金托管费.*(\d+\.\d+%)", "基金托管费"),
-        (r"销售服务费.*?A类.*?不收取", "销售服务费A类"),
-        (r"销售服务费.*?A类.*?(\d+\.\d+%)", "销售服务费A类"),
-        (r"C类.*?销售服务费.*?(\d+\.\d+%)", "销售服务费C类"),
-        (r"销售服务费.*?C类.*?(\d+\.\d+%)", "销售服务费C类"),
+        (r"销售服务费.{0,80}?A类.{0,80}?不收取", "销售服务费A类"),
+        (r"销售服务费.{0,80}?A类.{0,80}?(\d+\.\d+%)", "销售服务费A类"),
+        (r"C类.{0,80}?销售服务费.{0,80}?(\d+\.\d+%)", "销售服务费C类"),
+        (r"销售服务费.{0,80}?C类.{0,80}?(\d+\.\d+%)", "销售服务费C类"),
     ]
 
     for pattern, name in fee_patterns:
@@ -5794,13 +6906,14 @@ def _extract_fee_rates_from_agent_result(
                 fees.append(FeeRateItem(fee_name=name, rate=rate))
 
     if not fees:
-        management_match = re.search(r"(?:管理费|管理人报酬).*(\d+\.\d+%)", answer, re.DOTALL)
-        custodian_match = re.search(r"托管费.*(\d+\.\d+%)", answer, re.DOTALL)
-
-        if management_match:
-            fees.append(FeeRateItem(fee_name="基金管理费", rate=management_match.group(1)))
-        if custodian_match:
-            fees.append(FeeRateItem(fee_name="基金托管费", rate=custodian_match.group(1)))
+        for fee_name, label in (
+            ("管理费", "基金管理费"),
+            ("托管费", "基金托管费"),
+            (_FEE_RATE_MANAGEMENT_WORDINGS[1], "基金管理费"),
+        ):
+            rate = _fee_rate_from_title_block(answer, fee_name)
+            if rate is not None:
+                fees.append(FeeRateItem(fee_name=label, rate=rate))
 
         if "不收取" in answer and "销售服务费" in answer:
             fees.append(FeeRateItem(fee_name="销售服务费A类", rate="不收取"))

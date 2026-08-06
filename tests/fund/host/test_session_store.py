@@ -19,6 +19,7 @@ from fund_agent.service.session_models import (
     EpisodeSummary,
     PinnedState,
     Session,
+    ToolCallSummary,
     Turn,
 )
 
@@ -70,6 +71,13 @@ class TestTurn:
         assert turn.role == "assistant"
         assert len(turn.citations) == 1
         assert len(turn.tool_trace) == 1
+
+    def test_turn_blocked_fields_defaults(self):
+        """未拦截轮次：original_content 为 None，blocked_terms 为空元组。"""
+        turn = Turn(role="assistant", content="基金经理是张三。")
+        assert turn.original_content is None
+        assert turn.blocked_terms == ()
+        assert turn.tool_calls == ()
 
 
 class TestEpisodeSummary:
@@ -178,6 +186,82 @@ class TestSessionStore:
         loaded = store.load(session.session_id)
         assert len(loaded.turns) == 2
         assert loaded.turns[0].content == "Q1"
+
+    def test_old_format_session_json_loads_with_new_turn_fields(self, store: SessionStore, store_dir: Path):
+        """旧格式 session JSON（无 original_content/blocked_terms/tool_calls）仍可加载。"""
+        session_id = "old-format-session"
+        payload = {
+            "schema_version": 1,
+            "session_id": session_id,
+            "label": None,
+            "status": "ACTIVE",
+            "pinned_state": {"fund_code": "011649"},
+            "turns": [
+                {
+                    "role": "user",
+                    "content": "问题",
+                    "citations": [],
+                    "tool_trace": [],
+                    "timestamp": "2026-01-01T00:00:00+00:00",
+                },
+                {
+                    "role": "assistant",
+                    "content": "回答",
+                    "citations": [],
+                    "tool_trace": ["search_document"],
+                    "timestamp": "2026-01-01T00:00:01+00:00",
+                },
+            ],
+            "episode_summaries": [],
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+        }
+        store_dir.mkdir(parents=True, exist_ok=True)
+        (store_dir / f"{session_id}.json").write_text(
+            json.dumps(payload, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        loaded = store.load(session_id)
+        assert len(loaded.turns) == 2
+        assert loaded.turns[1].original_content is None
+        assert loaded.turns[1].blocked_terms == ()
+        assert loaded.turns[1].tool_calls == ()
+        assert loaded.turns[1].tool_trace == ("search_document",)
+
+    def test_round_trip_preserves_blocked_fields_and_tool_calls(self, store: SessionStore):
+        """磁盘往返后 original_content / blocked_terms / tool_calls 完整保留。"""
+        session = store.create(fund_code="011649")
+        assistant = Turn(
+            role="assistant",
+            content="抱歉，不支持涉及投资建议的问题。",
+            tool_trace=("read_section(failure:not_found)",),
+            tool_calls=(
+                ToolCallSummary(
+                    tool_name="read_section",
+                    arguments_display="section_ref=sec-0001",
+                    success=False,
+                    failure_code="not_found",
+                ),
+            ),
+            original_content="建议买入该基金，目标价5元。",
+            blocked_terms=("建议买入", "买入", "目标价"),
+        )
+        session = session.add_turn(Turn(role="user", content="这个基金怎么样？")).add_turn(assistant)
+        store.save(session)
+
+        loaded = store.load(session.session_id)
+        assert len(loaded.turns) == 2
+        restored = loaded.turns[1]
+        assert restored.original_content == "建议买入该基金，目标价5元。"
+        assert restored.blocked_terms == ("建议买入", "买入", "目标价")
+        assert len(restored.tool_calls) == 1
+        tc = restored.tool_calls[0]
+        assert tc.tool_name == "read_section"
+        assert tc.arguments_display == "section_ref=sec-0001"
+        assert tc.success is False
+        assert tc.failure_code == "not_found"
+        assert restored.tool_trace == ("read_section(failure:not_found)",)
 
     def test_load_nonexistent_raises(self, store: SessionStore):
         """加载不存在的 session 抛出 FileNotFoundError。"""

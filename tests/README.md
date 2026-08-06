@@ -182,7 +182,7 @@ git diff --check
 真实 CLI smoke：
 
 ```bash
-uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '股票投资明细' --work-dir .fund_checklist_cli_smoke
+uv run python -m fund_agent.cli.main read --pdf '基金年报/011649_易方达逆向投资混合_2025_annual_report.pdf' --fund-code 011649 --fund-name '易方达逆向投资混合' --year 2025 --query '股票投资明细' --work-dir .fund_checklist_cli_smoke
 ```
 
 Slice 9A 不测试 query normalization / synonym routing、`fund-checklist ask`、DeepSeek 真实 PDF CLI、8A/8B/8C contract 变更、UI、多轮会话、批量任务、指标计算、字段抽取、自动报告、投资判断或 release readiness。
@@ -251,7 +251,7 @@ Slice 9E 不测试新 profile、新召回能力、rerank、语义理解、分词
 
 Post-MVP Slice 10A controlled disclosure target contract 测试范围：
 
-- 只使用仓库本地真实样本 PDF：`基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf`；样本缺失直接失败。
+- 只使用仓库本地真实样本 PDF：`基金年报/011649_易方达逆向投资混合_2025_annual_report.pdf`；样本缺失直接失败。
 - 固定三条 smoke query：`前十大持仓`、`资产配置`、`费用`。
 - `前十大持仓` 的 answer 必须包含 `股票投资明细` 或 `前十名股票投资明细`。
 - `资产配置` 的 answer 必须包含 `期末基金资产组合情况` 或 `基金资产组合情况`。
@@ -272,9 +272,9 @@ git diff --check
 Slice 10A 真实 CLI smoke：
 
 ```bash
-uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '前十大持仓' --work-dir .fund_checklist_cli_smoke_9f
-uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '资产配置' --work-dir .fund_checklist_cli_smoke_9f
-uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '费用' --work-dir .fund_checklist_cli_smoke_9f
+uv run python -m fund_agent.cli.main read --pdf '基金年报/011649_易方达逆向投资混合_2025_annual_report.pdf' --fund-code 011649 --fund-name '易方达逆向投资混合' --year 2025 --query '前十大持仓' --work-dir .fund_checklist_cli_smoke_9f
+uv run python -m fund_agent.cli.main read --pdf '基金年报/011649_易方达逆向投资混合_2025_annual_report.pdf' --fund-code 011649 --fund-name '易方达逆向投资混合' --year 2025 --query '资产配置' --work-dir .fund_checklist_cli_smoke_9f
+uv run python -m fund_agent.cli.main read --pdf '基金年报/011649_易方达逆向投资混合_2025_annual_report.pdf' --fund-code 011649 --fund-name '易方达逆向投资混合' --year 2025 --query '费用' --work-dir .fund_checklist_cli_smoke_9f
 ```
 
 Slice 10A 不测试新增 profile、alias 覆盖矩阵、routing 规则变更、`search_document` contract 变更、Agent/Store/ToolService 变更、CLI 输出格式变更、benchmark、correctness evaluation、开放式 query normalization、自动分词、同义词扩散、query intent 分类、embedding、LLM intent、top-N scan、rerank、歧义消解、`fund-checklist ask`、template contract execution、calculation framework、字段抽取、自动报告、投资判断或 release readiness。
@@ -298,7 +298,7 @@ git diff --check
 Slice 10B 真实 CLI smoke：
 
 ```bash
-uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '费用' --work-dir .fund_checklist_cli_smoke_10b
+uv run python -m fund_agent.cli.main read --pdf '基金年报/011649_易方达逆向投资混合_2025_annual_report.pdf' --fund-code 011649 --fund-name '易方达逆向投资混合' --year 2025 --query '费用' --work-dir .fund_checklist_cli_smoke_10b
 ```
 
 Slice 10B 不测试费率数值抽取、结构化字段输出、显性成本小计、总成本、扣费后收益率、年化收益率、开放语义理解、embedding、LLM intent、top-N scan、rerank、歧义消解、template contract execution、自动报告、投资判断或 release readiness。
@@ -324,7 +324,7 @@ git diff --check
 Slice 10C 真实 CLI smoke：
 
 ```bash
-uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '费用' --work-dir .fund_checklist_cli_smoke_10c
+uv run python -m fund_agent.cli.main read --pdf '基金年报/011649_易方达逆向投资混合_2025_annual_report.pdf' --fund-code 011649 --fund-name '易方达逆向投资混合' --year 2025 --query '费用' --work-dir .fund_checklist_cli_smoke_10c
 ```
 
 Slice 10C 不测试净值增长率、基准收益率、换手率、显性成本小计、总成本、扣费后收益率、年化收益率、`R=A+B-C`、同类中位数、开放语义理解、embedding、LLM intent、top-N scan、rerank、歧义消解、template contract execution、chapter contract execution、自动报告、投资判断或 release readiness。
@@ -349,7 +349,7 @@ git diff --check
 Slice 11A 真实 CLI smoke：
 
 ```bash
-uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '净值增长率' --work-dir .fund_checklist_cli_smoke_11a
+uv run python -m fund_agent.cli.main read --pdf '基金年报/011649_易方达逆向投资混合_2025_annual_report.pdf' --fund-code 011649 --fund-name '易方达逆向投资混合' --year 2025 --query '净值增长率' --work-dir .fund_checklist_cli_smoke_11a
 ```
 
 Slice 11A 不测试字段抽取、period 裁决、换手率、显性成本小计、总成本、扣费后收益率、年化收益率、`A=R-B`、`R=A+B-C`、Alpha/Beta/Cost 综合评估、同类中位数、开放语义理解、embedding、LLM intent、top-N scan、rerank、歧义消解、template contract execution、chapter contract execution、自动报告、投资判断或 release readiness。
@@ -372,10 +372,10 @@ git diff --check
 Slice 11B 真实 CLI smoke：
 
 ```bash
-uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '前十大持仓' --work-dir .fund_checklist_cli_smoke_11b_holdings
-uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '资产配置' --work-dir .fund_checklist_cli_smoke_11b_asset
-uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '费用' --work-dir .fund_checklist_cli_smoke_11b_fees
-uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '净值增长率' --work-dir .fund_checklist_cli_smoke_11b_performance
+uv run python -m fund_agent.cli.main read --pdf '基金年报/011649_易方达逆向投资混合_2025_annual_report.pdf' --fund-code 011649 --fund-name '易方达逆向投资混合' --year 2025 --query '前十大持仓' --work-dir .fund_checklist_cli_smoke_11b_holdings
+uv run python -m fund_agent.cli.main read --pdf '基金年报/011649_易方达逆向投资混合_2025_annual_report.pdf' --fund-code 011649 --fund-name '易方达逆向投资混合' --year 2025 --query '资产配置' --work-dir .fund_checklist_cli_smoke_11b_asset
+uv run python -m fund_agent.cli.main read --pdf '基金年报/011649_易方达逆向投资混合_2025_annual_report.pdf' --fund-code 011649 --fund-name '易方达逆向投资混合' --year 2025 --query '费用' --work-dir .fund_checklist_cli_smoke_11b_fees
+uv run python -m fund_agent.cli.main read --pdf '基金年报/011649_易方达逆向投资混合_2025_annual_report.pdf' --fund-code 011649 --fund-name '易方达逆向投资混合' --year 2025 --query '净值增长率' --work-dir .fund_checklist_cli_smoke_11b_performance
 ```
 
 Slice 11B 不测试新增 profile、字段抽取、净值增长率或基准收益率字段 DTO、换手率、显性成本小计、总成本、扣费后收益率、年化收益率、`A=R-B`、`R=A+B-C`、开放语义理解、embedding、LLM intent、top-N scan、rerank、template contract execution、chapter contract execution、自动报告、投资判断或 release readiness。
@@ -403,10 +403,10 @@ git diff --check
 Slice 10D 真实 CLI smoke：
 
 ```bash
-uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '前十大持仓' --work-dir .fund_checklist_cli_smoke_11b_holdings
-uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '资产配置' --work-dir .fund_checklist_cli_smoke_11b_asset
-uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '费用' --work-dir .fund_checklist_cli_smoke_11b_fees
-uv run python -m fund_agent.cli.main read --pdf '基金年报/安信企业价值优选混合型证券投资基金2024年年度报告.pdf' --fund-code 004393 --fund-name '安信企业价值优选混合型证券投资基金' --year 2024 --query '净值增长率' --work-dir .fund_checklist_cli_smoke_11b_performance
+uv run python -m fund_agent.cli.main read --pdf '基金年报/011649_易方达逆向投资混合_2025_annual_report.pdf' --fund-code 011649 --fund-name '易方达逆向投资混合' --year 2025 --query '前十大持仓' --work-dir .fund_checklist_cli_smoke_11b_holdings
+uv run python -m fund_agent.cli.main read --pdf '基金年报/011649_易方达逆向投资混合_2025_annual_report.pdf' --fund-code 011649 --fund-name '易方达逆向投资混合' --year 2025 --query '资产配置' --work-dir .fund_checklist_cli_smoke_11b_asset
+uv run python -m fund_agent.cli.main read --pdf '基金年报/011649_易方达逆向投资混合_2025_annual_report.pdf' --fund-code 011649 --fund-name '易方达逆向投资混合' --year 2025 --query '费用' --work-dir .fund_checklist_cli_smoke_11b_fees
+uv run python -m fund_agent.cli.main read --pdf '基金年报/011649_易方达逆向投资混合_2025_annual_report.pdf' --fund-code 011649 --fund-name '易方达逆向投资混合' --year 2025 --query '净值增长率' --work-dir .fund_checklist_cli_smoke_11b_performance
 ```
 
 Slice 10D 不测试近 3 年、近 5 年、成立以来、年度序列表、图表数据、`excess_return`、`annualized_return`、`max_drawdown`、`volatility`、`sharpe`、`tracking_error`、`turnover_rate`、显性成本小计、总成本、扣费后收益率、年化收益率、`A=R-B`、`R=A+B-C`、同类中位数、开放语义理解、embedding、LLM intent、top-N scan、rerank、template contract execution、chapter contract execution、自动报告、投资判断或 release readiness。
@@ -430,3 +430,35 @@ git diff --check
 ```
 
 Slice 10F 不测试标准差、超额收益、年度序列、近 3 年、近 5 年、成立以来、图表数据、OCR / chart parsing、管理人报告 fallback、`A=R-B`、`R=A+B-C`、换手率、显性成本小计、总成本、扣费后收益率、年化收益率、同类中位数、开放语义理解、embedding、LLM intent、template contract execution、chapter contract execution、自动报告、投资判断或 release readiness。
+
+## Phase 7.4（2026-08-02）：interactive e2e 失败修复
+
+Phase 7.4 各 slice 验证命令（S0/S1/S2/S4 已 ACCEPTED，S3 挂起待 B1 口径确认）：
+
+```bash
+# S0 失败轮可观测性与持久化
+uv run pytest tests/fund/service/test_chat_service.py tests/fund/host/test_session_store.py tests/fund/cli/test_cli_interactive.py -q --tb=short
+
+# S1 ToolFailure 回喂
+uv run pytest tests/fund/agent/test_llm_tool_loop.py tests/fund/agent/test_stream_events.py tests/fund/agent/test_tool_result.py -q --tb=short
+
+# S2 tool call 容错
+uv run pytest tests/fund/agent/test_llm_tool_loop.py tests/fund/agent/test_real_llm_adapter.py -q --tb=short
+
+# S4 prompt 引导
+uv run pytest tests/fund/service/test_scene_config.py tests/fund/service/test_prompt_composer_upgrade.py tests/fund/agent/test_llm_tool_loop.py -q --tb=short
+
+# S6 provider malformed 有界重试
+uv run pytest tests/fund/agent/test_real_llm_adapter.py tests/fund/agent/test_deepseek_live_smoke.py -q --tb=short
+
+# S7 interactive 终答守卫改写重试
+uv run pytest tests/fund/agent/test_llm_tool_loop.py tests/fund/agent/test_stream_events.py -q --tb=short
+
+# F1/F2 费率与持仓修复（2026-08-02）
+uv run pytest tests/fund/service/test_extraction.py tests/fund/document_tools/test_docling_store.py -q --tb=short
+
+# F3 基金经理持有区间抽取（2026-08-02）
+uv run pytest tests/fund/service/test_extraction.py -q --tb=short
+```
+
+整体验收（opt-in live e2e，总控手动执行）：`uv run fund-checklist interactive --fund-code 004393 --work-dir .fund_e2e_004393 --enable-tool-trace`，重跑原 9 问，目标 0 条 `LLM 处理失败`、2 条误拦截解除、失败轮在 session 可见。

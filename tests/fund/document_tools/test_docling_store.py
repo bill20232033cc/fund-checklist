@@ -6,6 +6,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from fund_agent.fund.document_tools.constants import LocatorKind, ReportType, SourceKind
@@ -28,8 +30,19 @@ def _identity() -> ReportIdentity:
     )
 
 
-def _write_docling_json(path: Path, *, include_overflow_row: bool = False) -> None:
-    """写入最小 Docling-shaped JSON，用于 store 行为测试。"""
+def _write_docling_json(
+    path: Path,
+    *,
+    include_overflow_row: bool = False,
+    caption_text: str | None = "表格标题专属词",
+) -> None:
+    """写入最小 Docling-shaped JSON，用于 store 行为测试。
+
+    参数:
+        path: 输出路径。
+        include_overflow_row: 是否包含超出 bounded 扫描范围的行。
+        caption_text: 表格 caption 文本；None 表示不提供 caption。
+    """
 
     table_cells = [
         {
@@ -120,9 +133,80 @@ def _write_docling_json(path: Path, *, include_overflow_row: bool = False) -> No
                 "self_ref": "#/tables/0",
                 "label": "table",
                 "prov": [{"page_no": 2, "bbox": {"l": 10, "t": 20, "r": 30, "b": 40}}],
-                "captions": [{"text": "表格标题专属词"}],
+                "captions": ([{"text": caption_text}] if caption_text is not None else []),
                 "data": {
                     "table_cells": table_cells
+                },
+            }
+        ],
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def _write_docling_json_whitespace_fragments(path: Path) -> None:
+    """写入正文/表头含空白碎片的 Docling JSON，用于空白归一化检索测试。"""
+
+    payload = {
+        "schema_name": "DoclingDocument",
+        "texts": [
+            {
+                "self_ref": "#/texts/0",
+                "label": "section_header",
+                "text": "§1 净值表现",
+                "level": 1,
+                "prov": [{"page_no": 1, "bbox": {"l": 1, "t": 2, "r": 3, "b": 4}}],
+            },
+            {
+                "self_ref": "#/texts/1",
+                "label": "text",
+                "text": "本基金在本报告期内保持稳定运作，投资组合整体维持均衡配置。"
+                "本基金份额净值 增长率① 为 5.23%，同期业绩比较基准收益率为 1.20%。",
+                "prov": [{"page_no": 1}],
+            },
+            {
+                "self_ref": "#/texts/2",
+                "label": "section_header",
+                "text": "§2 基金简介",
+                "level": 1,
+                "prov": [{"page_no": 2}],
+            },
+            {
+                "self_ref": "#/texts/3",
+                "label": "text",
+                "text": "基金产品说明与托管人信息。",
+                "prov": [{"page_no": 2}],
+            },
+        ],
+        "tables": [
+            {
+                "self_ref": "#/tables/0",
+                "label": "table",
+                "prov": [{"page_no": 1, "bbox": {"l": 10, "t": 20, "r": 30, "b": 40}}],
+                "captions": [{"text": "业绩比较基准 比较"}],
+                "data": {
+                    "table_cells": [
+                        {
+                            "start_row_offset_idx": 0,
+                            "end_row_offset_idx": 1,
+                            "start_col_offset_idx": 0,
+                            "end_col_offset_idx": 1,
+                            "text": "份额净值",
+                        },
+                        {
+                            "start_row_offset_idx": 0,
+                            "end_row_offset_idx": 1,
+                            "start_col_offset_idx": 1,
+                            "end_col_offset_idx": 2,
+                            "text": "增长率①",
+                        },
+                        {
+                            "start_row_offset_idx": 0,
+                            "end_row_offset_idx": 1,
+                            "start_col_offset_idx": 2,
+                            "end_col_offset_idx": 3,
+                            "text": "5.23%",
+                        },
+                    ]
                 },
             }
         ],
@@ -261,6 +345,83 @@ def test_store_search_does_not_scan_unbounded_table_rows(tmp_path) -> None:
     results = store.search("越界行专属词")
 
     assert results == ()
+
+
+def test_store_search_normalizes_whitespace_in_section_text(tmp_path) -> None:
+    """正文检索必须对 query 与正文做空白归一化，命中后返回原文摘录。"""
+
+    json_path = tmp_path / "sample.docling.json"
+    _write_docling_json_whitespace_fragments(json_path)
+    store = DoclingDocumentStore(identity=_identity(), json_path=json_path)
+
+    results = store.search("净值增长率")
+
+    section_hits = [r for r in results if r.match_kind is SearchMatchKind.SECTION_TEXT]
+    assert len(section_hits) == 1
+    assert "份额净值 增长率" in section_hits[0].excerpt
+    assert section_hits[0].locator.section_ref == "section-0000"
+
+
+def test_store_search_normalizes_whitespace_in_table_row_text(tmp_path) -> None:
+    """表格行检索必须对 query 与行文本做空白归一化，命中后返回原文行摘录。"""
+
+    json_path = tmp_path / "sample.docling.json"
+    _write_docling_json_whitespace_fragments(json_path)
+    store = DoclingDocumentStore(identity=_identity(), json_path=json_path)
+
+    results = store.search("净值增长率")
+
+    row_hits = [r for r in results if r.match_kind is SearchMatchKind.TABLE_ROW]
+    assert len(row_hits) == 1
+    assert row_hits[0].table_ref == "table-0000"
+    assert "份额净值" in row_hits[0].excerpt
+    assert "增长率" in row_hits[0].excerpt
+    assert "5.23%" in row_hits[0].excerpt
+
+
+def test_store_list_tables_backfills_empty_caption_with_section_title(tmp_path) -> None:
+    """caption 为空时 list_tables 必须回填所在章节标题作为 evidence。"""
+
+    json_path = tmp_path / "sample.docling.json"
+    _write_docling_json(json_path, caption_text=None)
+
+    tables = DoclingDocumentStore(identity=_identity(), json_path=json_path).list_tables()
+
+    assert len(tables) == 1
+    assert tables[0].caption == "§2 基金简介"
+
+
+@pytest.mark.parametrize("noise_caption", ["第 2 页", "第 58 页 共 70 页", "单位：人民币元"])
+def test_store_list_tables_backfills_noise_caption_with_section_title(
+    tmp_path, noise_caption: str
+) -> None:
+    """caption 仅含页码/单位噪声时 list_tables 必须回填章节标题。"""
+
+    json_path = tmp_path / "sample.docling.json"
+    _write_docling_json(json_path, caption_text=noise_caption)
+
+    tables = DoclingDocumentStore(identity=_identity(), json_path=json_path).list_tables()
+
+    assert len(tables) == 1
+    assert tables[0].caption == "§2 基金简介"
+
+
+@pytest.mark.parametrize(
+    ("caption", "expected_semantic"),
+    [
+        ("第 58 页 共 70 页", False),
+        ("第 2 页", False),
+        ("单位：人民币元", False),
+        ("8.3 期末按公允价值占基金资产净值比例大小排序的所有股票投资明细", True),
+        ("表格标题专属词", True),
+    ],
+)
+def test_is_semantic_caption_three_states(caption: str, expected_semantic: bool) -> None:
+    """页码（含 共 N 页）/单位噪声判定非语义；正常 caption 判定语义。"""
+
+    from fund_agent.fund.document_tools.docling_store import _is_semantic_caption
+
+    assert _is_semantic_caption(caption) is expected_semantic
 
 
 # ── _is_continuation_of / _column_type_signature 单元测试 ──────────────────

@@ -1,9 +1,9 @@
 # fund-checklist implementation-control
 
-更新时间：2026-07-29（Phase 7.3 已完成，Phase 7.2 + Phase 7.1a 已完成）
+更新时间：2026-08-06（QDII slice 序列 S1-S4 全部完成，controller review 通过；007466 slice 完成；interactive 质量修复完成）
 当前阶段：`FUND_ANALYSIS_ASSISTANT`
 当前角色：control / CIC-lite controller
-当前目标：Phase 7.3 对话历史注入 LLM context — ✅ 已完成（2026-07-29）。Phase 7.2 交互体验增强 + 修复能力激活 + 场景扩展 — ✅ 已完成（2026-07-27）。Phase 7.1a 集成补完 — ✅ 已完成（2026-07-27）。Phase 7 已完成。
+当前目标：QDII slice 序列 — S1 持仓 ✅、S2 费率 ✅、S3 资产配置 ✅、S4 持有本基金 ✅（全部 controller review 通过）。007466 slice — ✅。interactive 质量修复 — ✅。PDF 导出 fallback — ✅。测试修复 slice — ✅。Phase 7.5 — ✅。F1.1 — ✅。
 关联文档：AGENTS.md（执行规则）、docs/design.md（设计决策）
 
 ## 已完成研究报告
@@ -552,6 +552,7 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
   - Citations / Trace 存在；CLI 默认输出不包含 `routing_trace`。
 - 10C remaining blocking risk: none reported。
 - 10C 没有进入净值增长率、基准收益率、换手率、成本计算、`R=A+B-C`、模板执行、自动报告或投资判断。
+- 2026-08-03 修复记录（10B/10C 链路）：真实 PDF smoke `test_real_pdf_controlled_profiles_apply_disclosure_target_contract`（004393-2024）存在预置失败 `fee_rates citation 不完整`。根因三层（全部实证）：① 路由聚合按披露标题去重，只保留首个 candidate query 结果，而「基金管理费/基金托管费」query 的 answer 不含销售服务费费率正文（正文只在「销售服务费」query answer 里）→ 聚合 citations 缺 section-0398 的 SECTION locator；② `_fee_rate_segments` 裸 `find` 标题被「相关表格:」引用行干扰，销售服务费 segment 切错；③ 简单拼接聚合导致管理费/托管费正文重复 → 字段无法唯一抽取。修复计划：`.sisyphus/plans/fee-rates-10bc-fix-20260803.md`（Mimo review ACCEPTED，2026-08-03），状态：待 DS 实施。
 - Post-MVP 10D 裁决为 performance return fields extraction contract。
 - 10D 目标是在 11A 已定位的 performance disclosure table 中抽取受控字段，不重新做开放检索。
 - 首批字段只允许 `nav_growth_rate` 和 `benchmark_return_rate`。
@@ -2456,3 +2457,317 @@ uv run pytest tests/fund/cli/ tests/fund/service/ tests/fund/host/ tests/fund/ag
 1. **Bug（已修）**：`truncate_turns` 已补充 `status=self.status, updated_at=...`
 2. **遗漏（已补）**：`chat_turn()` 已显式填充 `ToolCallSummary`
 3. **建议**：ContextBudget 与 history token 交互留 TODO，Phase 8 处理
+
+## Phase 7.4：interactive e2e 失败修复（S0-S7 已 ACCEPTED，live e2e 11/11）
+
+> 裁决时间：2026-08-02 | 状态：✅ S0-S7 全部 ACCEPTED；opt-in live e2e 第七轮 11/11 通过（0 失败 / 0 误拦截）
+> 背景：08-01 e2e `uv run fund-checklist interactive --fund-code 004393 --work-dir .fund_e2e_004393 --enable-tool-trace`（9 问：4 成功 / 5 失败 / 2 误拦截）
+> 计划产物：`.sisyphus/plans/interactive-e2e-fix-20260802.md`（唯一计划 artifact）
+> Goal：`.sisyphus/goals/phase7.4-goal.md`（/goal 表述，Mimo review ACCEPTED）
+
+### 失败根因与 slice 映射
+
+| # | 现象 | 根因 | slice |
+|---|------|------|-------|
+| 1 | 基金规模 / 港股持仓 → 章节不存在 | LLM 猜测 section_ref，首个 ToolFailure 即整轮失败（llm_tool_loop.py:424-425/534-535） | S1（回喂） |
+| 2 | 对比2021-2024 → provider 结构不符 | `_parse_tool_call` 强制 document_id（deepseek_llm.py:656），aggregate 工具本豁免仍被强制 | S2（容错） |
+| 3 | 值得继续关注 → 工具调用超过限制 | max_iterations=20 耗尽且无 evidence（llm_tool_loop.py:1042） | S4（prompt 引导） |
+| 4 | 管理费/托管费/销售服务费 → 工具调用不被允许 | 白名单 + document_id 前缀双校验（llm_tool_loop.py:638/641-644）一次偏差即失败 | S2 |
+| 5 | 前十大重仓股 / 基金风格 → 误拦截 | 弱词豁免窗口不含持仓/风格事实描述（llm_tool_loop.py:83-133） | S3（依赖口径）+ S0 持久化 |
+
+### slice 顺序
+
+S0（失败轮可观测性与持久化）→ S1（ToolFailure 回喂）→ S2（document_id 补全/工具名归一化）→ S3（投资建议判据，依赖 B1 口径 owner 确认，未确认前挂起）→ S4（prompt 引导）→ S5（doc-sync）
+
+### 已验证事实（2026-08-02，Mimo review 确认）
+
+- e276ff3 失败分支使用不存在的 `entry.status`（`ToolTraceEntry` 仅 `tool_name/arguments/result_kind/failure_code`），revert 属正确纠错；S0 恢复时必须改用 `result_kind`/`failure_code`。
+- 工作区未提交 WIP = B1（投资建议强弱词豁免）+ B2（document_id 注入），为计划基线，不得重复规划或回退；`docling_store.py` WIP 与本计划无关，禁止触碰。
+- main.py:1104/1243 用户输入预检仍用旧 naive guard，与 B1 单一真源不一致（S3 修复）。
+
+### 下一步（实现派发）
+
+### slice 验收结果（2026-08-02，controller review）
+
+| slice | 内容 | 状态 | 验证 |
+-------|------|------|------|
+| S0 | 失败轮 session 成对持久化 + tool_trace 恢复（纠正 `entry.status` 字段错误）+ 被拦截原文与触发词落盘（含 `session_store.py` 磁盘往返） | ✅ ACCEPTED | chat_service/session_store/cli_interactive 140 passed；agent 基线 91 passed |
+| S1 | ToolFailure 回喂：失败作为带 failure 标记的 ToolResult 回喂下一轮；run/run_stream 不终止；去重短路；provider 异常仍 fail-closed | ✅ ACCEPTED | llm_tool_loop/stream_events/tool_result 85 passed；agent 基线 91 passed |
+| S2 | `_parse_tool_call` document_id 可选；runner expected 补全 + 前缀校验；工具名有界归一化 | ✅ ACCEPTED | llm_tool_loop/real_llm_adapter 85 passed；agent 全量 201 passed |
+| S3 | 投资建议判据按决策 A 落地（弱词 + 事实上下文词放行、指令动词拦截、fail-closed 兜底）+ main.py 预检单一真源；实证修正：指令动词去裸「应」（避免误命中 应付/应计），改 应当/应买入/应卖出/应增持/应减持 | ✅ ACCEPTED | 决策 A 经 B1 口径 owner 确认；llm_tool_loop/chat_service/cli 204 passed（3 条预置失败除外） |
+| S4 | prompt 引导：无事实目标 0 工具 final answer；空搜索最多换 1 次词；不猜 section_ref/table_ref | ✅ ACCEPTED | scene_config/prompt_composer/llm_tool_loop 108 passed |
+| S5 | 真源文档与 AGENTS.md 同步 | ✅ 本文件 | git diff --check 干净 |
+| S6 | provider malformed 有界重试 1 次（stream + 非 stream，重试后仍 fail-closed） | ✅ ACCEPTED | real_llm_adapter + live_smoke 37 passed；agent 全量 213 passed |
+| S7 | interactive 终答投资建议守卫有界改写重试 1 次（重答仍过同一守卫；ask/generate 不重试） | ✅ ACCEPTED | llm_tool_loop/stream_events 82 passed；agent 全量 218 passed |
+
+### 既有失败（非本任务引入，HEAD 级核验）
+
+4 条测试在 HEAD（c4e5e71）同样失败（临时 worktree 复现）：`test_fix_chapter`（stale 引用已重构符号）、`test_cli_reuses_existing_docling_json_without_converter` / `test_cli_happy_path...`（fake 摘录断言漂移）、`test_convert_local_pdf_writes_docling_json`（缺失真实 PDF fixture）。与 S0-S5 改动无关，另开 slice 处理，不在本 Phase 7.4 范围。
+
+### opt-in live e2e 结果（2026-08-02，七轮）
+
+命令：`uv run fund-checklist interactive --fund-code 004393 --work-dir .fund_e2e_004393 --enable-tool-trace`（管道输入原 11 问）。
+
+第一轮（S4 初始版）：6/11 通过，5 失败——Q3 投资策略（投资建议关键词）、Q5 重仓股（拦截）、Q6 港股（拦截）、Q9 值得关注（投资建议关键词，0 工具）、Q10 风格（step limit，search 无命中耗尽预算）。
+
+第二轮（S4 补充后）：7/11 通过，4 失败——Q3 投资策略（投资建议关键词）、Q4 对比2021-2024（投资建议关键词）、Q5 重仓股（拦截）、Q9 值得关注（投资建议关键词，0 工具）、Q11 费率（拦截）。Q6 港股（多次检索无命中→声明未找到）与 Q10 风格（0 工具中性表述）已修复，归因于 S4 补充的"连续 2 次无命中即停"与"观点类中性表述"规则。
+
+剩余失败分类（session a573a025 证据，S0 持久化已生效）：
+
+| 问题 | 现象 | 分类 |
+------|------|------|
+| Q3 投资策略 / Q4 对比策略 / Q5 重仓股 / Q11 费率 | 回答含 买入/卖出 等年报事实性表述，B1 弱词豁免窗口（50 字符内 策略/宣称/原文/摘录/运作分析）未命中 → 拦截 | 🔴 S3 口径范围（事实性描述 vs 操作建议边界），依赖 B1 口径 owner 确认 |
+| Q9 值得继续关注 | 0 工具调用但回答含操作建议措辞，runner 终答守卫 fail-closed | 部分属 S4 措辞约束（模型行为方差），部分属 S3 口径（"值得关注"类判断边界） |
+
+### 最终验收（第七轮，2026-08-02）
+
+`uv run fund-checklist interactive --fund-code 004393 --work-dir .fund_e2e_004393 --enable-tool-trace`（管道输入原 11 问）→ **11/11 通过，0 条 `LLM 处理失败`，0 条误拦截**。失败轮可观测性（S0）、失败自愈（S1）、document_id 容错（S2）、决策 A 事实豁免（S3）、空搜索预算保护与中性表述（S4）、malformed 有界重试（S6）、终答守卫改写重试（S7）均已生效。
+
+残余说明：e2e 单轮结果受 LLM 措辞方差影响（第三至六轮各轮有 1-2 条守卫/解析失败，已被 S6/S7 或模型方差吸收）；第七轮为全绿终验。强指令词（建议买入/强烈推荐/目标价/预期收益预测句式）仍 fail-closed，属设计内。
+
+### S3 口径裁决（2026-08-02）
+
+B1 口径 owner 确认**决策 A**：弱词豁免引用上下文词表扩展（15 个事实性上下文词）、窗口 100、指令动词拦截、无上下文词 fail-closed 兜底；实证修正：指令动词去裸「应」。口径提案：`.sisyphus/plans/phase7.4-s3-caliber-proposal.md`（Mimo review ACCEPTED）。
+
+## 2026-08-02 后记：F1/F2 费率与持仓修复（163415 报告缺陷）
+
+> 状态：✅ 实现完成并 ACCEPTED（controller review）；端到端 generate 复跑验收中
+> 规格：`.sisyphus/plans/fee-holdings-fix-20260802.md`（Mimo review ACCEPTED）
+
+### F1 费率（贪婪正则 → 有界非贪婪）
+
+- `_extract_fee_rates_from_agent_result`（extraction.py:5799 附近）的 管理费/托管费/销售服务费 正则由 `.*` 贪婪改为 `.{0,80}?` 有界非贪婪：修复「所有费率等于 LLM 答案最后一个百分比」问题（2025 曾全取 0.60%，实际 1.20%/0.20%/0.60%）。
+- 实测：多百分比答案逐项取对（管理费 1.20%、托管费 0.20%、销售C 0.60%）；综合费率输入恢复正确（A类 1.40%、C类 2.00%，口径另议）。
+
+### F2 持仓（caption 噪声 + header-fallback）
+
+- `_NO_SEMANTIC_CAPTION_RE` 页码模式扩展支持「第 N 页 共 M 页」（原只匹配「第 N 页」），使垃圾页眉 caption 回填 section 标题 → `search("股票投资明细")` 可命中 top-10 表。
+- `_extract_holdings_from_agent_result` 的 header-fallback 由「只搜编号更小的表」改为「同 section ±5 双向查找」。
+- 实测：2023/2025 前十大持仓从 0 行恢复为 10 行（2025 宁德时代 6.86% 首行等）。
+
+### 既有失败（与 F1/F2 无关，已实证）
+
+`test_real_pdf_controlled_profiles_apply_disclosure_target_contract`（test_extraction.py:2804）仍失败：10B fee_rates 确定性路由对 004393-2024 年报每个费率查询只产出 **1 个 section citation**（管理费→section-0379、托管费→section-0390、销售服务费→section-0398），10C `_fee_rate_section_citations` 要求最终结果 ≥3 个 section citation → NOT_FOUND「fee_rates citation 不完整」。无关性证据：F1 只改解析（在 citation 检查之后）；F2 caption 改动对该文档 0 处生效；holdings fallback 仅持仓路径；DS 还原实验同错。需单独 slice 排查（候选：路由后合并三查询 section citations，或放宽 10C 段切分）。
+
+> 2026-08-03 更新：该失败已由 fee-rates-10bc 修复（`aggregate_all_matches=True` 聚合三查询 section citation）解决，real-pdf 测试 1 passed。
+
+### F3 基金经理持有区间抽取缺失（规格 ACCEPTED，实施待派发）
+
+- 现象：2025 年报 9.4 节披露「基金经理持有本开放式基金 A类 >100 万份、C类 0、合计 >100」（store table-0090 row 4-6），报告 Ch4 显示「未披露」。
+- 根因：`_extract_manager_info` holds_fund 取值条件只认单元格含「~」或「万份」（extraction.py:2620-2624），本表区间值为 `>100`（单位在表头）→ 漏抽。
+- 规格：`.sisyphus/plans/fee-holdings-fix-20260802.md` §6（Mimo review ACCEPTED）；修复方向：区间形态 `>N`/`<N`/`N~M`/纯数字 + 表头单位继承 + 空白归一化 + 优先 A 类行。
+- 状态：✅ 已实施（extraction.py:748 9.4 区间抽取，含表头单位继承）；2026-08-03 163415 generate 端到端验证生效：报告 Ch3 显示「持有本基金 A类>100万份」，`FundManagerInfo.holds_fund='A类>100万份'`（excerpt citation section-0064, p.11）。
+
+## 2026-08-04 后记：F1.1 费率抽取修复（空格噪声 + 费率沿革口径）
+
+> 状态：✅ 完成（2026-08-05，Mimo review ACCEPTED → 真源文档更新 → DS 实施 → controller review：17 passed、实数据五年全绿）
+> 规格：`.sisyphus/plans/fee-rates-f11-fix-20260804.md`
+
+### 现象（163415 2025 generate 端到端重跑验收）
+
+| 年份 | 重跑前报告值 | 真值 | 状态 |
+|---|---|---|---|
+| 2021 | 无行（not_found） | 管理 1.50% / 托管 0.25% | 管理费未提取 |
+| 2022 | 0.25% / 0.25% | 1.50% / 0.25% | 管理费错误 |
+| 2023 | 1.50% / 0.25% | 当期适用 1.20% / 0.20% | 口径不符 |
+| 2024 | 1.50% / 0.25% | 当期适用 1.20% / 0.20% | 管理/托管均错误 |
+| 2025 | 1.20% / 0.20% / 销售C 0.60% | 同左 | 正确 |
+
+### 根因与修复
+
+- 根因一（Docling 空格噪声）：`1.  50%` 破坏 `\d+\.\d+%` 匹配，多年度路径 `_extract_fee_rates_from_agent_result`（extraction.py:6079）主正则（6088）失配后在 80 字符窗口误捕获托管费 0.25%；10C 路径同失配返回 not_found。修复：新增百分比邻域归一化 helper，两条路径抽取前先归一化。
+- 根因二（费率沿革文本）：2023/2024 年报按「2023/1/1-7/9 1.50% → 自 7/10 起 1.20%」披露，有界正则取首个百分比得到历史费率。修复：10C 路径已有沿革选择逻辑（4551/4568），仅补归一化；多年度路径新增「含『自…起』取其后费率，否则取标题块内最后一个百分比」。
+- 2023 口径裁决：报告单值列取当期适用（期末）费率 1.20%/0.20%，不做分段加权。
+
+### 验证命令
+
+```bash
+uv run pytest tests/fund/service/test_extraction.py -k "fee" -q --tb=short
+uv run pytest tests/fund/service/test_extraction.py tests/fund/document_tools/test_docling_store.py -q --tb=short
+```
+
+验收口径：单测覆盖空格归一化、沿革文本取当期费率；实数据对 163415 五年 store 断言管理费/托管费 = 2021 1.50/0.25、2022 1.50/0.25、2023 1.20/0.20、2024 1.20/0.20、2025 1.20/0.20；`git diff --check` 干净；不 commit / push。
+
+## Phase 7.5：generate 章节级并发（实现完成，待 controller review）
+
+> 状态：🟢 实现完成（2026-08-05），真源文档已更新（design.md §6.8），待 controller review 后收口
+> 设计：`.sisyphus/plans/phase7.5-chapter-concurrency-design.md`（Mimo review ACCEPTED；命名 Phase 7.5，备选 Slice 14D）
+
+### 实现摘要（2026-08-05）
+
+- `fund_agent/service/audit_pipeline.py`：`ReportGenerationCoordinator` 四阶段并发改造（`ThreadPoolExecutor`，B/D 复用同一 executor 且强制 join）、`_run_chapter_worker` 顶层兜异常、`_process_states` 加 `threading.Lock`（`_set_state`/`_get_state`）、章节闭环 3 处 `self._llm_client` 改为显式下传 `llm_client`、无 `clone()` 时回退串行 + warning。
+- `fund_agent/agent/deepseek_llm.py`：新增 `clone()`（同 transport/env/options/system_prompt/temperature，独立 `_cumulative_usage`）。
+- `fund_agent/service/models.py`：`GenerateReportRequest` 新增可选 `chapter_concurrency: int | None = None`。
+- `fund_agent/service/extraction.py`：`generate_report` 唯一解析点（request 字段 → env `FUND_CHECKLIST_CHAPTER_CONCURRENCY` → 默认 4），显式传入 coordinator；未触碰 F1.1 费率逻辑与 Phase 7.4 区域。
+- `fund_agent/cli/main.py`：generate parser 新增 `--concurrency`（1..8 校验；无 `--llm` 时忽略并提示），透传 request。
+- 测试：新增 `tests/fund/service/test_report_concurrency.py`（T1-T8 + concurrency=1 串行等价基线，13 用例）；既有 fake 补 `clone()`。
+
+### 验证结果（2026-08-05）
+
+```bash
+uv run pytest tests/fund/service/test_report_concurrency.py tests/fund/service/test_audit_pipeline.py -q --tb=short
+# 61 passed
+uv run pytest tests/fund/service/test_llm_chapter_generation.py tests/fund/cli/test_cli.py -q --tb=short
+# 111 passed；3 failed 为既有问题（HEAD 复现）：test_cli_happy_path... / test_cli_reuses_existing... / test_fix_chapter
+uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.py tests/fund/cli/test_cli.py -q --tb=short
+# 169 passed；4 failed 均为既有问题（HEAD 复现）：上述 3 项 + test_convert_local_pdf_writes_docling_json（缺 fixture PDF）
+uv run pytest tests/fund/agent/test_real_llm_adapter.py tests/fund/agent/test_deepseek_live_smoke.py tests/fund/service/test_extraction.py -q --tb=short
+# 238 passed
+```
+
+验收：T1-T8 全绿（13/13）；`chapter_concurrency=1` 调用序列与串行基线一致（fake 记录比对）；`git diff --check` 干净；默认 pytest 无网络；未 commit / push。
+
+### 要点
+
+- 四阶段：A 前置串行（data_table + global_numbers 预生成）→ B Ch1-6 并行（写→审计→重写闭环在 worker 内）→ C 决策串行（B join 后 all_passed 判定）→ D Ch0/Ch7 并行收尾（复用 executor，B/D 之间强制 join）。
+- 机制：`ThreadPoolExecutor`；每 worker 独立 `DeepSeekLlmClient.clone()`（独立 `_cumulative_usage`）；闭环内 3 处 `self._llm_client` 显式下传。
+- lane：`chapter_concurrency`，优先级 CLI `--concurrency` → request 字段 → env `FUND_CHECKLIST_CHAPTER_CONCURRENCY` → 默认 4（1..8，1=串行等价）；client 无 `clone()` 回退串行 + warning。
+- 线程安全：`_process_states` 按章 key + Lock；ArtifactStore 按章分文件唯一 writer；共享输入只读；warnings 主线程按 cid 排序；worker 禁止直接 print。
+- 失败语义：单章失败隔离；`passed/passed_with_degradation/audit_exhausted` 不变；cancel 用 `shutdown(wait=True, cancel_futures=True)`。
+- 禁止：不引入 dayu runtime/代码/async 事件循环；不改 search_document / Service 公共契约；不触碰 Phase 7.4 与 F1.1 未提交区域。
+
+### 验证命令
+
+```bash
+uv run pytest tests/fund/service/test_report_concurrency.py tests/fund/service/test_audit_pipeline.py -q --tb=short
+uv run pytest tests/fund/service/test_llm_chapter_generation.py tests/fund/cli/test_cli.py -q --tb=short
+```
+
+验收口径：`chapter_concurrency=1` 与串行基线调用序列一致；`N` 时并发峰值 ≤ N；章节集合/顺序稳定；单章失败隔离；clone 独立 usage；默认 pytest 无网络；`git diff --check` 干净；不 commit / push。
+
+## 测试修复 slice：4 个基线失败 + fix CLI 断链（计划 ACCEPTED，实施中）
+
+> 状态：🟡 计划 ACCEPTED（2026-08-05，Mimo review：8 处代码事实核实），真源文档已更新，DS 实施中 → controller review 后收口
+> 规格：`.sisyphus/plans/test-fixes-20260805.md`
+
+### 前提修正（相对 2026-08-02 结论）
+
+4 个基线失败中 **3 个是测试侧**（fixture 路径错位、两处断言过时），但 `test_fix_chapter` 暴露**主体代码断链**：`main.py:_run_fix_command` 惰性导入已不存在的 `chapter_generator._fix_chapter_placeholders`（Phase 7.2 scene 化移除），fix CLI 运行即 ImportError；`FIX_SCENE_CONFIG`（scene_config.py:145）与 `scenes/fix.md` 已建但未接线（repair/regenerate 已接 REPAIR/REGENERATE_SCENE_CONFIG → ChatService，fix 未接）。
+
+### 修复要点
+
+- fixture：`test_docling_conversion.py` 数据源切换为 `基金年报/011649_易方达逆向投资混合_2025_annual_report.pdf`（fund_code 011649 / 易方达逆向投资混合 / year 2025）；`tests/README.md` 16 处 smoke 命令同步。
+- 断言：`test_cli.py` 两处 `基金管理人` → `基金经理`（与确定性输出对齐）。
+- fix CLI：重接 `FIX_SCENE_CONFIG` → ChatService（`PinnedState.user_constraints` 透传 chapter_content/audit_feedback/chapter_contract，chat_service.py:570）+ workdir tool_service（interactive 模式）+ `--llm` 参数；保留补强/保留占位符统计与 exit code；删除对不存在符号的引用。
+- `test_fix_chapter` 重写：注入带 `clone()` 的 fake LLM（仿 generate real-pdf smoke），断言 exit 0 + 统计 + 仅处理目标章节。
+
+### 验证命令
+
+```bash
+uv run pytest tests/fund/document_tools/test_docling_conversion.py tests/fund/cli/test_cli.py -q --tb=short
+uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.py tests/fund/cli/test_cli.py -q --tb=short
+```
+
+验收口径：4 个基线失败转绿；其余测试不回退；011649 fixture 真实转换通过；`git diff --check` 干净；不 commit / push。
+
+## PDF 导出 fallback slice（计划 ACCEPTED，实施中）
+
+> 状态：🟡 计划 ACCEPTED（2026-08-05，Mimo review），真源文档已更新（design.md §6.9），DS 实施中 → controller review 后收口
+> 规格：`.sisyphus/plans/pdf-export-fallback-20260805.md`
+
+### 问题与方案
+
+- 问题：`_export_pdf`（extraction.py:3770）单一路径 pandoc `--pdf-engine=xelatex`；本机无任何 LaTeX 引擎（xelatex/pdflatex/lualatex/tectonic/weasyprint/typst 均无）、Chrome 150 可用 → `--format pdf` 必然回退 md。
+- 方案（参考 dayu/render/render.py，不复制代码）：引擎 fallback 链 ① xelatex（`shutil.which` 前置探测）→ ② pandoc md→HTML（内嵌打印 CSS）→ Chrome headless `--print-to-pdf`（A4 794×1123，timeout 120s）→ ③ 回退 md + warning。Chrome 探测 `PUPPETEER_EXECUTABLE_PATH` → PATH → macOS 默认路径。打印 CSS 为原创资产，HTML 中间产物临时目录清理。
+- 前置验证：手动 `pandoc md→html && Chrome --print-to-pdf` 已实测通过（含中文）；dayu 渲染管线已核实。
+
+### 验证命令
+
+```bash
+uv run pytest tests/fund/service/test_extraction.py -k "export" -q --tb=short
+uv run pytest tests/fund/service/test_extraction.py -q --tb=short
+```
+
+实数据 smoke：当前环境 `_export_pdf('.fund_e2e_163415/reports/163415-2025-analysis.md', ...)` 应走 Chrome 分支产出真实 PDF（>0 字节，warning None）。
+
+验收口径：单测覆盖三态（xelatex / chrome / md 回退）；实数据 PDF 产出；`git diff --check` 干净；不 commit / push。
+
+## interactive 质量修复 slice（计划 ACCEPTED，实施中）
+
+> 状态：🟡 计划 ACCEPTED（2026-08-05，Mimo review：4 处代码事实核实），真源文档已更新（design.md §6.10），DS 实施中 → controller review 后收口
+> 规格：`.sisyphus/plans/interactive-quality-fix-20260805.md`
+
+### 问题与裁决
+
+- 现象（004393 interactive 实测 4 问）：检索无受控路由（持有本基金类 query 无 profile，LLM 用词 0 命中假阴性；实测「持有本基金」命中 section-0593）；空结果不收敛 + `max_iterations=20` 导致慢/重复（5-14 次调用）；终答回显工具原文；JSON 信封未解包。
+- 用户裁决（按推荐）：三层全做；空结果有 profile 自动候选词重试 1 轮、否则连续 2 次强制收敛；终答重叠 ≥40 字符或 >800 字有界重答 1 次；保持 JSON 契约 + runner 解包；本次只做 `manager_holdings` profile；`max_iterations` 20 → 12；方案 E 不变。
+- 后续 backlog（不在本 slice）：规模、份额、基准收益率、超额收益率、十大持仓 等受控 profile。
+
+### 修复范围
+
+- L1 检索路由：新增 `manager_holdings` profile（candidate_queries 覆盖 持有本基金 等 4 词）。
+- L2 工具循环：空结果强制收敛（连续 2 次）+ 候选词重试 1 轮（候选注入在 Service，收敛执行在 Agent）；interactive `max_iterations=12`。
+- L3 终答质量：JSON 信封解包；原文粘贴检测 + 有界重答 1 次 + 截断摘要；`scene.md` 加「禁止粘贴原文、≤200 字」约束。
+
+### 验证命令
+
+```bash
+uv run pytest tests/fund/cli/test_cli_interactive.py tests/fund/service/test_chat_service.py tests/fund/host/test_session_store.py tests/fund/agent/test_context_budget.py tests/fund/service/test_scene_config.py tests/fund/service/test_prompt_contributions.py tests/fund/service/test_prompt_composer_upgrade.py tests/fund/agent/test_tool_result.py tests/fund/agent/test_tool_context.py -v --tb=short
+uv run pytest tests/fund/agent/test_llm_tool_loop.py tests/fund/service/test_extraction.py tests/fund/service/test_scene_config.py tests/fund/service/test_chat_service.py -k "manager_holdings or converge or json or overlap or paste or max_iterations" -q --tb=short
+```
+
+验收口径：单测全绿；opt-in live e2e（004393 复跑）Q1 命中 9.4、Q3/Q4 ≤200 字无原文粘贴、Q4 调用 <12；`git diff --check` 干净；不 commit / push。
+
+### interactive 质量修复 slice 收口（2026-08-06 controller review 通过）
+
+- 实现：`manager_holdings` profile（extraction.py:206，candidate_queries 4 词）；空结果强制收敛（连续 2 次 0 命中，`_INTERACTIVE_EMPTY_SEARCH_CONVERGE_LIMIT=2`）+ 有候选词自动重试最多 1 轮；终答 JSON 信封解包（纯 JSON / ```json 代码块）+ 原文粘贴/超长守卫（与 evidence 连续重叠 ≥40 字符或 >800 字 → 有界重答 1 次 → 仍超标截断前 200 字摘要）；interactive `max_iterations` 20→12 + `retrieval` context slot（候选词注入在 chat_service，收敛执行在 runner，runner 不 import service）；`scene.md` v1.6 加「禁止粘贴工具原文、≤200 字」。
+- 验证：Phase 7 核心 253 passed；slice 单测 18 passed；四目标文件全量 370 passed（DS 实测）；controller 独立复跑 253+18 passed；`git diff --check` 干净；默认测试无网络。
+- 已知偏差（已记录）：plan §L3「key_facts 落盘」未完全达成——`tool_loop.py`/`session_models.py` 不在 allowed write set，`AgentRunResult`/`Turn` 无 key_facts 槽位，key_facts 仅解析保留在 `FinalAnswer` 内（citations 已随 `AgentRunResult.citations` 落盘）。展示链路不受影响；key_facts 持久化列为后续可选小修。
+- 遗留：opt-in live e2e（004393 interactive 复跑）未跑（需显式授权）。
+
+## 007466 业绩抽取修复 + 关联 ETF 持仓集中度（计划待 review）
+
+> 状态：🟡 计划待 Mimo review（规格：`.sisyphus/plans/007466-performance-holdings-concentration-20260805.md`）
+
+要点：007466 2024/2025 业绩抽取失败（2024 `annual performance 过去一年完整字段缺失`、2025 `performance_returns 过去一年行无法唯一识别`），数据存在（2024 A类 21.06/17.00/4.06；2025 4.18/0.47/3.71），根因是 3.2.1 表按 A/C 拆成多表/分段表；修复方向：过去一年唯一性按 share_scope 过滤 + 无表头部分表用相邻 A 类表头对齐 + 数据表防错填。持仓集中度改从关联 ETF 512890（`.fund_checklist_512890`，2021-2025 数据可用）top-10 提取，generate 新增可选关联源参数，报告标注来源基金。
+
+### 007466 slice 收口（2026-08-06 controller review 通过）
+
+- Task A：`_performance_past_year_row` 按 share_scope 过滤（A/C/I/Y 段标签切分，单段多行仍 fail-closed）；`_headerless_performance_column_indexes` 无表头部分表按相邻 A 类表头对齐；`_annual_performance_table_refs` 支持 cited 部分表 + uncited 完整同 section 表补全（保留「cited 无关表不得消费 uncited signature 表」的 10F 契约）；报告级统一优先 A 类；Ch2 数据表年份取业绩∪费率并集，缺失单元格显式「缺失」，prompt 禁止用其他列补空（顺带修复 `performance[year]` KeyError）。
+- Task B：`GenerateReportRequest.holdings_source_fund / holdings_source_workdir` + CLI `--holdings-source-fund/--holdings-source-workdir`；Service 从关联源提取 top-10 替换持仓并标注「来源：标的 ETF 512890 年报」（Ch3 持仓表、Ch3/Ch6 集中度、证据、metadata 均标注）；未指定时保持现状。
+- 验证：`-k performance or holdings or concentration` 61 passed（controller 复跑）；三文件全量 369 passed（DS：基线 358 + 新增 11）；实数据五年业绩 2021-2025 全对（2024 21.06/17.00/4.06、2025 4.18/0.47/3.71，2021-2023 不回退）；报告核验 Ch0 4.18%、Ch2 2024/2025 行真值、集中度 2025 前五 13.58%/前十 25.12% 带来源标注；`git diff --check` 干净；未 commit / push。
+
+## QDII slice 序列（S1 持仓已完成，S2-S4 排队）
+
+> 规格：`.sisyphus/plans/qdii-extraction-slices-20260806.md`（Mimo review ACCEPTED）
+
+### S1 持仓适配收口（2026-08-06 controller review 通过）
+
+- 根因（Mimo 修正后）：`search_document` 只匹配 section.text 不匹配 title；QDII fallback 分支（extraction.py:1408/1463）只覆盖 index_etf/index_fund+QDII，主动 QDII（519696）走不到。
+- 修复：QDII fallback 条件扩展为 `fund_type not in ("bond_fund","index_feeder") and "QDII" in fund_name`；直接扫描（`_extract_qdii_holdings_from_tables`）为权威路径、query 仅兜底（实测 query 命中跨页续表碎片）；支持跨页分裂表（表头碎片补齐 `_merge_qdii_header_fragments`、同章节续表按列合并 `_extract_qdii_continuation_rows`、碎片行跳过）；双「公司名称」列优先中文列（`_holdings_column_indexes`:6501）。
+- 验证：`-k holdings` 24 passed（controller 复跑）；三文件全量 375 passed；实数据 519696 2024/2025 各 10 行（2025 前三：腾讯控股 5.01/中国宏桥 4.75/中芯国际 3.69）；163415/007466 不回退；`git diff --check` 干净；未 commit / push。
+- 已知问题（另排 slice，非 S1 范围）：004393 持仓 0 行（前序未提交区 search/citation 变化导致首个 table citation 命中行业配置表 table-0079，非 S1 回归，A/B 实证）；519696-2025 第 6 名跨页断裂（代码/占比丢失，按最小适配跳过碎片行）；519696-2023 表头截断（「证券代」「占基」）仍为空（不在 S1 验收内）。
+
+### S2 费率（待 review）
+
+根因：QDII 年报把管理费表述为「支付基金管理人的**管理人报酬**」（无「基金管理费」字样）→ 2022 管理费缺失；2023/2024 托管费（0.35%）正文存在但抽取缺失（各年路由/绑定不稳定）。验收真值：519696 五年管理费/托管费 = 2021-2024 1.80%/0.35%、2025 1.20%/0.20%。
+
+### S2 收口（2026-08-06 controller review 通过）
+
+- 修复：`_FEE_RATE_MANAGEMENT_WORDINGS = ("基金管理费", "管理人报酬")` + QDII 措辞回退正则；`_extract_fee_rates_from_agent_result` 主路径「基金管理费」块未命中时改查「管理人报酬」块（输出仍为 基金管理费）；`_extract_fee_rates_from_store` 回退从「全空才跑」改为逐缺失字段单标题验证（补 2023/2024 托管费）；2022 嵌套章节（7.4.9 关联方关系）正文含明确费率句时放行。
+- 计划偏差（已写回 design.md §6.13）：未把「管理人报酬」加入 `_FEE_RATE_TITLES`——该固定三标题元组喂 10B 契约（`_fee_rate_segments`/`_fee_rate_section_citations`），追加第 4 项会破坏 A 股费率路径；实现改为块查找别名，行为满足计划意图。
+- 验证：`-k "fee or qdii"` 29 passed（controller 复跑）；完整三文件 381 passed；实数据 519696 五年 1.80%/0.35%（2021-2024）与 1.20%/0.20%（2025）全对；163415/007466/004393 不回退（004393-2022 1.5% 为源 PDF 措辞）；`git diff --check` 干净；未 commit / push。
+
+### S3 资产配置（计划 ACCEPTED，实施中）
+
+根因（Mimo review 修正）：`search("期末基金资产组合情况")` 命中 table-0059 估值表（caption 含查询词），真正资产配置表 table-0060（caption=「金额单位：人民币元」）不被引用；`_extract_allocation_from_agent_result`（extraction.py:6601）asset_allocation 无全表扫描 fallback（industry 有，6629-6637）→ 错绑后空。修复：增加 asset_allocation 全表扫描 fallback（`list_tables` + `_is_asset_allocation_table` + `_parse_asset_allocation_table`），表结构无需适配。验收：519696 2023 资产配置非空；2021/2022/2024/2025 不回退。
+
+### S3 收口（2026-08-06 controller review 通过）
+
+- 修复：`_extract_allocation_from_agent_result`（6629-6639）在 citation 表循环后新增 asset_allocation 全表扫描 fallback（ToolFailure 跳过、命中即 break），与 industry fallback 对称；表结构无需适配。
+- 验证：`-k allocation` 6 passed（controller 复跑）；三文件全量 387 passed；AGENTS.md 最小验证命令 175 passed；实数据 519696 五年 3/6/3/2/5 行（2023 修复前空 → 权益投资 70,231,733.87 / 90.43）；端到端复核 2023 路由仍绑定 table-0059（非资产配置表），2023 非空确由 fallback 命中 table-0060；`git diff --check` 干净；未 commit / push。
+
+### S4 持有本基金 9.2/9.4 口径（计划待 review）
+
+根因：519696-2025 无 9.4 基金经理持有区间表（`_extract_manager_holding` 找不到 → 报告「未披露」基本正确），但有 9.2 从业人员整体持有（table-80：7,312.84 份 / 0.01%）未被利用。修复：9.4 不存在时回退 9.2 整体数据并标注口径；163415（有 9.4）不回退。
+
+### S4 收口（2026-08-06 controller review 通过）
+
+- 修复：新增 `_extract_manager_holds_overall`（extraction.py:843，9.2 从业人员整体持有解析，口径嵌入 holds_fund 文本）；`_extract_fund_manager_with_citation` 改为两遍扫描（先 9.4 区间表命中即 break，全部落空才回退 9.2——因并存文档中 9.2 表排在 9.4 之前，单遍 break-on-first-hit 会误回退）；`FundManagerInfo.holds_fund` docstring（models.py:624）同步；3 处渲染点零改动。
+- 验证：`-k "manager or holds or 9.4 or fund_manager"` 26 passed（controller 复跑）；三文件全量 391 passed；实数据 519696-2025 → 「基金经理区间未披露；从业人员整体持有 7,312.84 份（0.01%）」、163415-2025 → 「A类>100万份」不回退；回归护栏 163415-2021 / 512890-2025（9.2+9.4 并存）均优先 9.4；`git diff --check` 干净；未 commit / push。
+
+## QDII 序列收尾状态（2026-08-06）
+
+- S1-S4 全部完成：519696 持仓（2024/2025 各 10 行）、费率（五年真值）、资产配置（2023 补齐）、持有本基金（9.2 回退口径）。
+- 遗留（另排 slice）：004393 持仓 0 行（前序未提交区 search/citation 变化，非 QDII 序列引入）；519696-2025 持仓第 6 名跨页断裂（代码/占比丢失，跳过碎片行）；519696-2023 持仓表头截断（「证券代」「占基」）。
+- 519696 报告复跑命令：`uv run fund-checklist generate --fund-code 519696 --fund-name "交银环球精选混合(QDII)" --year 2025 --work-dir .fund_e2e_519696 --llm --format pdf --concurrency 4`。

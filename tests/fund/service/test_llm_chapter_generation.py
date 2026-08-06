@@ -37,6 +37,13 @@ class FakeLlmClient:
             self._default_response = ""
         self.calls: list[dict[str, str]] = []
 
+    def clone(self) -> "FakeLlmClient":
+        """返回独立记录调用序列的同配置新实例。"""
+
+        if self._default_response:
+            return FakeLlmClient(self._default_response)
+        return FakeLlmClient(list(self._responses))
+
     def generate_text(self, *, system_prompt: str, user_prompt: str, temperature: float = 0) -> str:
         """记录调用并返回预设响应。"""
 

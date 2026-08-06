@@ -164,3 +164,64 @@ class TestToolResultWithMeta:
         assert wrapper.result.tool_name is Tn.READ_SECTION
         assert wrapper.result.evidence_text == "some evidence"
         assert wrapper.remaining_budget is None
+
+
+class TestFailureFeedbackProjection:
+    """S1 失败回喂的 LLM-facing 投影测试（复用 Envelope.error / ok=False 投影）。"""
+
+    @staticmethod
+    def _failure_result():
+        """构造带 failure 标记的 runner ToolResult。"""
+        from fund_agent.agent.llm_tool_loop import ToolResult as LoopToolResult
+        from fund_agent.fund.document_tools.constants import FailureCode, ToolName
+        from fund_agent.fund.document_tools.models import ToolFailure
+
+        return LoopToolResult(
+            tool_name=ToolName.READ_SECTION,
+            result=None,
+            citations=(),
+            evidence_text="",
+            failure=ToolFailure(code=FailureCode.NOT_FOUND, message="章节不存在"),
+        )
+
+    def test_safe_tool_result_projects_error_envelope(self):
+        """DeepSeek _safe_tool_result 对失败项输出 error+message 信封。"""
+        from fund_agent.agent.deepseek_llm import _safe_tool_result
+
+        projected = _safe_tool_result(self._failure_result())
+        assert projected == {"error": "not_found", "message": "章节不存在"}
+
+    def test_safe_tool_result_failure_with_budget(self):
+        """失败投影同样注入 tool_calls_remaining。"""
+        from fund_agent.agent.deepseek_llm import _safe_tool_result
+
+        projected = _safe_tool_result(self._failure_result(), remaining_budget=5)
+        assert projected == {
+            "error": "not_found",
+            "message": "章节不存在",
+            "tool_calls_remaining": 5,
+        }
+
+    def test_wrap_results_for_llm_projects_failure(self):
+        """wrap_results_for_llm 对失败项输出 error+message 信封。"""
+        from fund_agent.agent.llm_tool_loop import LlmToolLoopRunner
+
+        projected = LlmToolLoopRunner.wrap_results_for_llm((self._failure_result(),))
+        assert projected == [{"error": "not_found", "message": "章节不存在"}]
+
+    def test_safe_tool_result_success_shape_unchanged(self):
+        """成功条目投影保持既有形状（tool_name / evidence_text / citations / truncation）。"""
+        from fund_agent.agent.deepseek_llm import _safe_tool_result
+        from fund_agent.agent.llm_tool_loop import ToolResult as LoopToolResult
+        from fund_agent.fund.document_tools.constants import ToolName
+
+        success = LoopToolResult(
+            tool_name=ToolName.SEARCH_DOCUMENT,
+            result=(),
+            citations=(),
+            evidence_text="证据文本",
+        )
+        projected = _safe_tool_result(success)
+        assert projected["tool_name"] == "search_document"
+        assert projected["evidence_text"] == "证据文本"
+        assert projected["truncation"] is None
