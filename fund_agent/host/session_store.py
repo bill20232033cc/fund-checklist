@@ -183,6 +183,7 @@ class SessionStore:
                     "role": t.role,
                     "content": t.content,
                     "citations": list(t.citations),
+                    "key_facts": list(t.key_facts),
                     "tool_trace": list(t.tool_trace),
                     "tool_calls": [
                         {
@@ -230,6 +231,7 @@ class SessionStore:
                 role=t.get("role", "user"),
                 content=t.get("content", ""),
                 citations=tuple(t.get("citations", [])),
+                key_facts=tuple(t.get("key_facts", [])),
                 tool_trace=tuple(t.get("tool_trace", [])),
                 tool_calls=tuple(
                     ToolCallSummary(

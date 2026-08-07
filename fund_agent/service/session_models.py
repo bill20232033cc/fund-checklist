@@ -61,6 +61,7 @@ class Turn:
         role: user 或 assistant。
         content: 对话文本内容。
         citations: assistant 回答的 citation 引用列表。
+        key_facts: assistant 回答解析出的关键事实元组。
         tool_trace: 工具调用轨迹摘要。
         tool_calls: 结构化工具调用摘要列表。
         original_content: 被投资建议检测拦截前的原始回答；未拦截时为 None。
@@ -72,6 +73,7 @@ class Turn:
     role: str  # "user" | "assistant"
     content: str
     citations: tuple[str, ...] = ()
+    key_facts: tuple[str, ...] = ()
     tool_trace: tuple[str, ...] = ()
     tool_calls: tuple[ToolCallSummary, ...] = ()
     original_content: str | None = None

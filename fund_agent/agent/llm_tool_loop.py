@@ -446,7 +446,12 @@ class LlmToolLoopRunner:
         aggregate_handler: Callable[..., AggregateMultiYearAnnualPerformanceResult] | None = None,
         budget: ContextBudgetState | None = None,
     ) -> None:
-        """初始化受控 LLM tool loop runner。"""
+        """初始化受控 LLM tool loop runner。
+
+        参数:
+            aggregate_handler: 可选回调，签名 (document_id, fund_code, requested_years,
+                annual_report_documents, share_class)；document_id 由 runner 用 expected 注入。
+        """
 
         self._tool_service = tool_service
         self._llm_client = llm_client
@@ -965,7 +970,6 @@ class LlmToolLoopRunner:
         返回:
             通过守卫的 AgentRunResult；守卫失败时 fail-closed。
         """
-
         if final.failure is not None and final.failure.message == _INVESTMENT_ADVICE_MESSAGE:
             final = self._retry_final_answer_advice_guard(
                 document_id=document_id,
@@ -1104,13 +1108,13 @@ class LlmToolLoopRunner:
         if tool_name is None or tool_name not in ALLOWED_LLM_TOOL_NAMES:
             trace.append(_trace_entry(call.tool_name, trace_arguments, "failure", FailureCode.UNAVAILABLE))
             return ToolFailure(code=FailureCode.UNAVAILABLE, message=_TOOL_NOT_ALLOWED_MESSAGE)
-        if tool_name is not ToolName.AGGREGATE_MULTI_YEAR_ANNUAL_PERFORMANCE:
-            # document_id 缺失/空字符串时用 expected 补全；aggregate 维持既有豁免
-            if not call.document_id:
-                call = replace(call, document_id=expected_document_id)
-            if not _document_id_matches(call.document_id, expected_document_id):
-                trace.append(_trace_entry(tool_name, trace_arguments, "failure", FailureCode.UNAVAILABLE))
-                return ToolFailure(code=FailureCode.UNAVAILABLE, message=_TOOL_NOT_ALLOWED_MESSAGE)
+        # document_id 缺失/空字符串时用 expected 补全；aggregate 也需 document_id，
+        # 不再豁免注入（R5 live e2e 证据：aggregate 曾以 document_id='' 调用而失败）。
+        if not call.document_id:
+            call = replace(call, document_id=expected_document_id)
+        if not _document_id_matches(call.document_id, expected_document_id):
+            trace.append(_trace_entry(tool_name, trace_arguments, "failure", FailureCode.UNAVAILABLE))
+            return ToolFailure(code=FailureCode.UNAVAILABLE, message=_TOOL_NOT_ALLOWED_MESSAGE)
 
         result = self._call_allowed_tool(tool_name, call, aggregate_handler=self._aggregate_handler)
         if isinstance(result, ToolFailure):
@@ -1142,6 +1146,7 @@ class LlmToolLoopRunner:
             if fund_code is None or requested_years is None or annual_report_documents is None:
                 return ToolFailure(code=FailureCode.UNAVAILABLE, message=_TOOL_ARGUMENT_MESSAGE)
             return aggregate_handler(
+                call.document_id,
                 fund_code,
                 requested_years,
                 annual_report_documents,
@@ -1410,6 +1415,7 @@ def _final_result(
             tool_trace=trace,
             failure=None,
             token_usage=token_usage,
+            key_facts=final_answer.key_facts,
         )
 
     evidence_texts = tuple(result.evidence_text for result in tool_results if result.evidence_text.strip())
@@ -1440,6 +1446,7 @@ def _final_result(
         tool_trace=trace,
         failure=None,
         token_usage=token_usage,
+        key_facts=final_answer.key_facts,
     )
 
 

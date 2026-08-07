@@ -227,7 +227,23 @@ class TestSessionStore:
         assert loaded.turns[1].original_content is None
         assert loaded.turns[1].blocked_terms == ()
         assert loaded.turns[1].tool_calls == ()
+        assert loaded.turns[1].key_facts == ()
         assert loaded.turns[1].tool_trace == ("search_document",)
+
+    def test_round_trip_preserves_key_facts(self, store: SessionStore):
+        """磁盘往返后 key_facts 完整保留（interactive 落盘验收）。"""
+        session = store.create(fund_code="011649")
+        assistant = Turn(
+            role="assistant",
+            content="根据年报，基金经理持有本基金份额数量区间为 0-10 万份。",
+            key_facts=("0-10 万份", "从业人员整体持有"),
+        )
+        session = session.add_turn(Turn(role="user", content="基金经理持有本产品吗")).add_turn(assistant)
+        store.save(session)
+
+        loaded = store.load(session.session_id)
+        assert len(loaded.turns) == 2
+        assert loaded.turns[1].key_facts == ("0-10 万份", "从业人员整体持有")
 
     def test_round_trip_preserves_blocked_fields_and_tool_calls(self, store: SessionStore):
         """磁盘往返后 original_content / blocked_terms / tool_calls 完整保留。"""

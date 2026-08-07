@@ -449,6 +449,7 @@ def test_fake_llm_searches_reads_section_then_answers_with_section_citation(tmp_
     assert result.answer == "基金经理张明负责本基金投资管理。"
     assert len(result.citations) == 1
     assert result.citations[0].locator.section_ref == "section-0000"
+    assert result.key_facts == ("张明",)
     assert tuple(entry.tool_name for entry in result.tool_trace) == (
         ToolName.SEARCH_DOCUMENT,
         ToolName.READ_SECTION,
@@ -1155,6 +1156,35 @@ def test_interactive_json_envelope_citations_parsed_into_result(tmp_path: Path) 
     assert result.citations[0].locator.section_ref == "9.4 期末基金管理人的从业人员持有本基金的情况"
 
 
+def test_interactive_json_envelope_key_facts_persisted_into_result(tmp_path: Path) -> None:
+    """interactive：JSON 信封中的 key_facts 解析后随 AgentRunResult 落盘。"""
+
+    runner = LlmToolLoopRunner(
+        tool_service=_service(tmp_path),
+        llm_client=FakeLlmClient(
+            [
+                FinalAnswer(
+                    answer=(
+                        '{"answer": "根据年报，基金经理持有本基金份额数量区间为 0-10 万份。", '
+                        '"citations": [], "key_facts": ["0-10 万份", "从业人员整体持有"]}'
+                    ),
+                    citations=(),
+                    key_facts=(),
+                )
+            ]
+        ),
+    )
+
+    result = runner.run(
+        document_id=_identity().document_id,
+        query="基金经理持有本产品吗",
+        scene="interactive",
+    )
+
+    assert result.failure is None
+    assert result.key_facts == ("0-10 万份", "从业人员整体持有")
+
+
 def test_interactive_advice_guard_retried_once_then_neutral_answer_passes(tmp_path: Path) -> None:
     """interactive：终答含建议被守卫拦截 → 重试 1 次 → 中性回答通过，next_step 恰好 2 次。"""
 
@@ -1653,7 +1683,7 @@ def test_fake_llm_aggregate_multi_year_partial_coverage_preserves_metadata(tmp_p
         missing=(2024,),
     )
 
-    def fake_aggregate_handler(fund_code, requested_years, annual_report_documents, share_class):
+    def fake_aggregate_handler(document_id, fund_code, requested_years, annual_report_documents, share_class):
         return fake_result
 
     final = FinalAnswer(
@@ -1692,7 +1722,7 @@ def test_fake_llm_aggregate_multi_year_complete_coverage_no_invented_missing_yea
         missing=(),
     )
 
-    def fake_aggregate_handler(fund_code, requested_years, annual_report_documents, share_class):
+    def fake_aggregate_handler(document_id, fund_code, requested_years, annual_report_documents, share_class):
         return fake_result
 
     final = FinalAnswer(
@@ -1720,7 +1750,7 @@ def test_fake_llm_aggregate_multi_year_complete_coverage_no_invented_missing_yea
 def test_fake_llm_aggregate_multi_year_tool_failure_not_found_returns_agent_failure(tmp_path: Path) -> None:
     """aggregate handler 返回 not_found failure 时：失败回喂进 trace，终答无证据则终态失败。"""
 
-    def fake_aggregate_handler(fund_code, requested_years, annual_report_documents, share_class):
+    def fake_aggregate_handler(document_id, fund_code, requested_years, annual_report_documents, share_class):
         return AggregateMultiYearAnnualPerformanceResult(
             series=(),
             failure=ToolFailure(code=FailureCode.NOT_FOUND, message="multi-year annual performance 覆盖不足 3 年"),
@@ -1747,12 +1777,48 @@ def test_fake_llm_aggregate_multi_year_tool_failure_not_found_returns_agent_fail
     assert result.answer == ""
 
 
+def test_aggregate_tool_document_id_injected_from_expected_when_empty(tmp_path: Path) -> None:
+    """aggregate 调用 document_id 为空时，runner 用 expected 注入并传给 handler（R5 回归）。"""
+
+    received: list[str] = []
+
+    def fake_aggregate_handler(document_id, fund_code, requested_years, annual_report_documents, share_class):
+        received.append(document_id)
+        return _fake_multi_year_result(years=(2020, 2021, 2022, 2023, 2024), missing=())
+
+    extra = dict(_aggregate_extra())
+    call = ToolCall(
+        tool_name=ToolName.AGGREGATE_MULTI_YEAR_ANNUAL_PERFORMANCE,
+        document_id="",  # LLM 未带 document_id（R5 live 证据为 ''）
+        extra=extra,
+    )
+    final = FinalAnswer(
+        answer="多年度业绩: coverage_status=complete, covered_years=2020-2024。",
+        citations=_citations_from_result(
+            _fake_multi_year_result(years=(2020, 2021, 2022, 2023, 2024), missing=())
+        ),
+        key_facts=(),
+    )
+
+    runner = LlmToolLoopRunner(
+        tool_service=_service(tmp_path),
+        llm_client=FakeLlmClient([call, final]),
+        aggregate_handler=fake_aggregate_handler,
+    )
+
+    result = runner.run(document_id=_identity().document_id, query="多年度业绩")
+
+    assert result.failure is None
+    assert received == [_identity().document_id]
+    assert result.tool_trace[0].result_kind == "success"
+
+
 def test_fake_llm_aggregate_multi_year_tool_failure_identity_mismatch_returns_agent_failure(
     tmp_path: Path,
 ) -> None:
     """aggregate handler 返回 identity_mismatch failure 时：失败回喂进 trace，终答无证据则终态失败。"""
 
-    def fake_aggregate_handler(fund_code, requested_years, annual_report_documents, share_class):
+    def fake_aggregate_handler(document_id, fund_code, requested_years, annual_report_documents, share_class):
         return AggregateMultiYearAnnualPerformanceResult(
             series=(),
             failure=ToolFailure(code=FailureCode.IDENTITY_MISMATCH, message="multi-year annual report identity 不匹配"),
@@ -1785,7 +1851,7 @@ def test_fake_llm_aggregate_multi_year_final_answer_includes_per_year_citations(
         missing=(2024,),
     )
 
-    def fake_aggregate_handler(fund_code, requested_years, annual_report_documents, share_class):
+    def fake_aggregate_handler(document_id, fund_code, requested_years, annual_report_documents, share_class):
         return fake_result
 
     final = FinalAnswer(
@@ -1820,7 +1886,7 @@ def test_fake_llm_aggregate_multi_year_final_answer_no_investment_judgment(tmp_p
         missing=(2024,),
     )
 
-    def fake_aggregate_handler(fund_code, requested_years, annual_report_documents, share_class):
+    def fake_aggregate_handler(document_id, fund_code, requested_years, annual_report_documents, share_class):
         return fake_result
 
     final = FinalAnswer(
@@ -1856,7 +1922,7 @@ def test_fake_llm_aggregate_multi_year_no_leakage(tmp_path: Path) -> None:
         missing=(2024,),
     )
 
-    def fake_aggregate_handler(fund_code, requested_years, annual_report_documents, share_class):
+    def fake_aggregate_handler(document_id, fund_code, requested_years, annual_report_documents, share_class):
         return fake_result
 
     final = FinalAnswer(

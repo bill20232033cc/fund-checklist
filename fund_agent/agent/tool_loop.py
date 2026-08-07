@@ -64,6 +64,7 @@ class AgentRunResult:
         citations: section/table reading tools 返回的 citation 元组。
         tool_trace: public reading tool 调用轨迹。
         failure: 失败分类；成功时为 None。
+        key_facts: 终答解析出的关键事实元组；无解析结果为 ()。
 
     返回:
         Host/UI 可安全消费的 Agent run 结果。
@@ -77,6 +78,7 @@ class AgentRunResult:
     tool_trace: tuple[ToolTraceEntry, ...]
     failure: ToolFailure | None = None
     token_usage: object | None = None  # TokenUsage | None，避免循环导入
+    key_facts: tuple[str, ...] = ()
 
 
 class MinimalFundDocumentAgent:

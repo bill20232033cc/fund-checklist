@@ -307,6 +307,7 @@ class ChatService:
                 c.document_id if hasattr(c, "document_id") else str(c)
                 for c in agent_result.citations
             ),
+            key_facts=agent_result.key_facts,
             tool_trace=tuple(
                 e.tool_name if hasattr(e, "tool_name") else str(e)
                 for e in agent_result.tool_trace

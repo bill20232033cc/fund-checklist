@@ -1468,6 +1468,11 @@ class FundReadingService:
         # index_feeder 自身无持仓表，跳过 query 直接走继承路径
         holdings: list[HoldingExtraction] = []
         _extraction_error = False  # 跟踪未分类异常
+        table_citation = None
+        for citation in routed.agent_result.citations:
+            if citation.locator.locator_kind is LocatorKind.TABLE:
+                table_citation = citation
+                break
         if routed.agent_result.failure is not None:
             if fund_type != "index_feeder":
                 return AnnualHoldingsResult(
@@ -1535,11 +1540,17 @@ class FundReadingService:
                                     holdings = list(qdii_holdings)
                             except DocumentToolError:
                                 pass
-        table_citation = None
-        for citation in routed.agent_result.citations:
-            if citation.locator.locator_kind is LocatorKind.TABLE:
-                table_citation = citation
-                break
+                elif fund_type not in ("bond_fund", "index_feeder") and "QDII" not in fund_name:
+                    # A 股基金：agent citation 首位命中非持仓表（如行业配置表）且无后续
+                    # 持仓表 citation 时，直接扫描（list_tables + 表头特征）兜底，并复用
+                    # _extract_holdings_continuations 的跨页续表合并；同步校正 citation。
+                    if not holdings:
+                        direct = _extract_stock_holdings_from_tables(
+                            document_id=document_id,
+                            tool_service=tool_service,
+                        )
+                        if direct:
+                            holdings, table_citation = direct
 
         # 联接基金持仓继承：从目标 ETF 年报获取持仓
         holding_source = ""
@@ -6078,7 +6089,98 @@ def _extract_target_etf_code(document_id: str, store: DoclingDocumentStore) -> t
 
     return None
 
-_QDII_COLUMN_KEYWORDS = ("证券代码", "公司名称")
+def _is_qdii_header_text(header_text: str) -> bool:
+    """判断拼接后的表头文本是否具备 QDII 持仓特征（含截断前缀兼容）。
+
+    QDII 持仓表头在 Docling 输出中可能被截断（如 519696-2023 的「证券代」、
+    「公司名」），完整关键词预检会漏放；这里同时接受「证券代码/证券代」与
+    「公司名称/公司名」两类前缀形态。真正的表级鉴别仍由
+    `_extract_qdii_table_with_continuations` 内的 `_holdings_column_indexes`
+    完成，本函数只是扫描入口的低成本预筛。
+
+    参数:
+        header_text: 表头行所有单元格去空白后的拼接文本。
+
+    返回:
+        True 表示表头具备 QDII 持仓特征，可进入详情解析。
+    """
+
+    has_code = "证券代码" in header_text or "证券代" in header_text
+    has_name = "公司名称" in header_text or "公司名" in header_text
+    return has_code and has_name
+
+
+def _extract_stock_holdings_from_tables(
+    *,
+    document_id: str,
+    tool_service: FundDocumentToolService,
+) -> tuple[tuple[HoldingExtraction, ...], Citation | None] | None:
+    """直接扫描文档表格，查找 A 股持仓表并抽取数据。
+
+    当 Agent citation 首位命中非持仓表（如行业配置表）且后续无持仓表 citation 时的兜底方案。
+    按 list_tables 顺序扫描表头，命中 A 股持仓特征列（stock_code 或 quantity + stock_name +
+    percentage）后解析数据行；不足 10 行时复用 _extract_holdings_continuations 做跨页续表合并。
+
+    参数:
+        document_id: 文档 ID。
+        tool_service: 文档工具服务。
+
+    返回:
+        (持仓列表, 主表 citation)；未找到 A 股持仓表时返回 None。
+    """
+
+    tables = tool_service.list_tables(document_id)
+    for table_meta in tables:
+        if not table_meta.table_ref:
+            continue
+        header_table = tool_service.read_table(document_id, table_meta.table_ref, max_rows=1)
+        if isinstance(header_table, ToolFailure) or not header_table.rows:
+            continue
+        column_indexes = _holdings_column_indexes(header_table.rows)
+        if column_indexes is None:
+            continue
+        if "stock_code" not in column_indexes and "quantity" not in column_indexes:
+            continue
+        full_table = tool_service.read_table(document_id, table_meta.table_ref, max_rows=_HOLDINGS_TABLE_MAX_ROWS)
+        if isinstance(full_table, ToolFailure) or not full_table.rows:
+            continue
+
+        holdings: list[HoldingExtraction] = []
+        for row in full_table.rows[1:]:  # 跳过表头
+            if len(row) <= max(column_indexes.values()):
+                continue
+            stock_code = row[column_indexes["stock_code"]].strip()
+            stock_name = row[column_indexes["stock_name"]].strip()
+            if not stock_code and not stock_name:
+                continue
+            quantity = row[column_indexes.get("quantity", 0)].strip() if "quantity" in column_indexes else ""
+            fair_value = row[column_indexes.get("fair_value", 0)].strip() if "fair_value" in column_indexes else ""
+            percentage = row[column_indexes["percentage"]].strip()
+            holdings.append(HoldingExtraction(
+                rank=len(holdings) + 1,
+                stock_code=stock_code,
+                stock_name=stock_name,
+                quantity=quantity,
+                fair_value=fair_value,
+                percentage=percentage,
+            ))
+            if len(holdings) >= _HOLDINGS_TOP_N:
+                break
+        if not holdings:
+            continue
+
+        if len(holdings) < _HOLDINGS_TOP_N:
+            holdings.extend(_extract_holdings_continuations(
+                document_id=document_id,
+                tool_service=tool_service,
+                primary_section_ref=full_table.section_ref,
+                primary_page=full_table.locator.page_no,
+                primary_table_ref=full_table.table_ref,
+                primary_column_indexes=column_indexes,
+                existing_count=len(holdings),
+            ))
+        return tuple(holdings[:_HOLDINGS_TOP_N]), full_table.citation
+    return None
 
 
 def _extract_qdii_holdings_from_tables(
@@ -6108,7 +6210,7 @@ def _extract_qdii_holdings_from_tables(
         if isinstance(header_table, ToolFailure) or not header_table.rows:
             continue
         header_text = "".join(cell.strip().replace(" ", "") for cell in header_table.rows[0])
-        if not all(kw in header_text for kw in _QDII_COLUMN_KEYWORDS):
+        if not _is_qdii_header_text(header_text):
             continue
         # 命中 QDII 表，读取全部数据行
         full_table = tool_service.read_table(document_id, table_meta.table_ref, max_rows=_HOLDINGS_TABLE_MAX_ROWS)
@@ -6351,6 +6453,11 @@ def _extract_holdings_from_agent_result(
         if isinstance(table, ToolFailure):
             raise DocumentToolError(table.code, table.message)
 
+        if not _is_holdings_table_candidate(table.rows):
+            # 表级鉴别：自身表头无股票/债券特征列的表格（如行业配置表）不得被当作持仓表消费，
+            # 跳过该 citation 继续遍历，而非 break。
+            continue
+
         column_indexes = _holdings_column_indexes(table.rows)
         if column_indexes is None:
             column_indexes = _bond_holdings_column_indexes(table.rows)
@@ -6561,8 +6668,47 @@ def _is_continuation_row(rows: tuple[tuple[str, ...], ...]) -> bool:
         return False
 
 
+def _is_holdings_table_candidate(rows: tuple[tuple[str, ...], ...]) -> bool:
+    """表级鉴别：判断表格是否可作为持仓表候选被消费。
+
+    规则：自身表头必须满足其一——
+    1. A 股持仓表：stock_code 或 quantity 特征列 + stock_name + percentage；
+    2. 债券持仓表（_bond_holdings_column_indexes 可识别）；
+    3. 无表头续表（首列为序号），允许经相邻表头查找后消费。
+
+    行业配置表（行业类别/公允价值/占净值比例）无股票特征列，返回 False。
+
+    参数:
+        rows: 表格有界行（首行视为表头）。
+
+    返回:
+        True 表示可作为持仓表候选；False 表示应跳过该表。
+    """
+
+    if not rows:
+        return False
+    indexes = _holdings_column_indexes(rows)
+    if indexes is not None:
+        return "stock_code" in indexes or "quantity" in indexes
+    if _bond_holdings_column_indexes(rows) is not None:
+        return True
+    return _is_continuation_row(rows)
+
+
 def _holdings_column_indexes(rows: tuple[tuple[str, ...], ...]) -> dict[str, int] | None:
-    """识别持仓表的列索引映射。"""
+    """识别持仓表的列索引映射。
+
+    除完整子串匹配外，支持截断表头前缀识别（519696-2023 的「证券代」「占基」）：
+    `stock_code` 接受「证券代」前缀、`percentage` 接受「占基」「占基金」前缀；
+    前缀匹配必须校验该列数据单元格含数字，防止行业配置表/估值表等误绑。
+    前缀识别仍失败时，按 QDII 固定列序做位置推断兜底。
+
+    参数:
+        rows: 表格有界行（首行视为表头）。
+
+    返回:
+        列索引映射（至少含 stock_name 与 percentage）；无法识别时返回 None。
+    """
 
     if not rows:
         return None
@@ -6572,6 +6718,9 @@ def _holdings_column_indexes(rows: tuple[tuple[str, ...], ...]) -> dict[str, int
         cell_clean = cell.strip().replace(" ", "")
         if "股票代码" in cell_clean or "证券代码" in cell_clean:
             mapping["stock_code"] = idx
+        elif cell_clean.startswith("证券代") and _column_has_digits(rows, idx):
+            # 截断表头（如「证券代」）前缀识别；要求列数据含数字防误绑。
+            mapping["stock_code"] = idx
         elif "股票名称" in cell_clean:
             mapping["stock_name"] = idx
         elif "数量" in cell_clean:
@@ -6579,6 +6728,12 @@ def _holdings_column_indexes(rows: tuple[tuple[str, ...], ...]) -> dict[str, int
         elif "公允价值" in cell_clean:
             mapping["fair_value"] = idx
         elif "占基金资产净值比例" in cell_clean or "占比" in cell_clean:
+            mapping["percentage"] = idx
+        elif (
+            (cell_clean.startswith("占基") or cell_clean.startswith("占基金"))
+            and _column_has_digits(rows, idx)
+        ):
+            # 截断表头（如「占基」「占基金」）前缀识别；要求列数据含数字防误绑。
             mapping["percentage"] = idx
 
     if "stock_name" not in mapping:
@@ -6602,7 +6757,100 @@ def _holdings_column_indexes(rows: tuple[tuple[str, ...], ...]) -> dict[str, int
     required = ("stock_name", "percentage")
     if all(k in mapping for k in required):
         return mapping
-    return None
+    return _infer_qdii_column_indexes_by_position(rows)
+
+
+def _column_has_digits(rows: tuple[tuple[str, ...], ...], idx: int) -> bool:
+    """检查表格列中是否存在含数字的数据单元格（排除表头行）。
+
+    截断表头前缀匹配的防误绑校验：仅当该列其余单元格含数字时才允许放宽绑定。
+    表头行之外无数据单元格（如表头仅有一行的跨页主表）时返回 False，保持 fail-closed。
+
+    参数:
+        rows: 表格有界行（首行视为表头）。
+        idx: 待校验列索引。
+
+    返回:
+        True 表示该列存在含数字的数据单元格。
+    """
+
+    for row in rows[1:]:
+        if idx < len(row) and row[idx].strip():
+            return any(ch.isdigit() for ch in row[idx])
+    return False
+
+
+def _infer_qdii_column_indexes_by_position(
+    rows: tuple[tuple[str, ...], ...],
+) -> dict[str, int] | None:
+    """按 QDII 固定列序推断持仓列索引（截断前缀识别失败时的兜底）。
+
+    仅在表头可确认 QDII 持仓结构时启用：首列为序号、存在「数量」「公允价值」相邻
+    列、占比为末列且含数字、代码列数据匹配「短 token + 两位大写交易所后缀」
+    （QDII 代码形如 700 HK / MSFT US）。任一条件不满足即返回 None，
+    避免行业配置表/估值表/买卖明细表被位置推断误判。
+
+    参数:
+        rows: 表格有界行（首行视为表头）。
+
+    返回:
+        完整列索引映射（stock_code/stock_name/quantity/fair_value/percentage）；
+        无法确认时返回 None。
+    """
+
+    if not rows:
+        return None
+    header = rows[0]
+    if not header or header[0].strip() not in ("序号", "序"):
+        return None
+
+    quantity_idx: int | None = None
+    fair_value_idx: int | None = None
+    for idx, cell in enumerate(header):
+        cell_clean = cell.strip().replace(" ", "")
+        if "数量" in cell_clean:
+            quantity_idx = idx
+        elif "公允价值" in cell_clean:
+            fair_value_idx = idx
+    if quantity_idx is None or fair_value_idx is None:
+        return None
+    if fair_value_idx != quantity_idx + 1:
+        return None
+
+    percentage_idx = fair_value_idx + 1
+    if percentage_idx != len(header) - 1:
+        return None
+    if not _column_has_digits(rows, percentage_idx):
+        return None
+
+    name_idx: int | None = None
+    for idx in range(1, quantity_idx):
+        cell_clean = header[idx].strip().replace(" ", "")
+        if "名称" in cell_clean or "公司" in cell_clean:
+            name_idx = idx
+            break
+    if name_idx is None:
+        return None
+
+    # 代码列位于数量列之前，数据形如「700 HK」「MSFT US」（短 token + 两位大写
+    # 交易所后缀）；名称/市场/国家列不满足该模式，避免误绑。
+    code_pattern = re.compile(r"^\S+ [A-Z]{2}$")
+    code_idx: int | None = None
+    for idx in range(1, quantity_idx):
+        cells = [row[idx] for row in rows[1:] if idx < len(row) and row[idx].strip()]
+        if sum(1 for cell in cells if code_pattern.match(cell)) >= 2:
+            code_idx = idx
+            break
+    if code_idx is None:
+        return None
+
+    return {
+        "stock_code": code_idx,
+        "stock_name": name_idx,
+        "quantity": quantity_idx,
+        "fair_value": fair_value_idx,
+        "percentage": percentage_idx,
+    }
 
 
 def _bond_holdings_column_indexes(rows: tuple[tuple[str, ...], ...]) -> dict[str, int] | None:

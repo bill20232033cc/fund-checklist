@@ -732,6 +732,35 @@ interactive 问答的检索与终答语义（Mimo review ACCEPTED，用户按推
 - 9.4 区间表不存在（实测 519696-2025）→ 回退 9.2 从业人员整体持有（table-80「基金管理人所有从业人员持有本基金 7,312.84 份 / 0.01%」），口径标注**直接嵌入 holds_fund 字符串**（如「基金经理区间未披露；从业人员整体持有 7,312.84 份（0.01%）」），3 处渲染点（chapter_generator.py:418 / extraction.py:3720 / audit_pipeline.py:2621 的 `holds_fund or '未披露'`）零改动生效。
 - `FundManagerInfo.holds_fund` docstring（models.py:624）同步更新回退语义。
 
+### 6.16 A 股持仓表级鉴别 + 直接扫描 fallback（2026-08-07 裁决）
+
+004393 持仓 0 行修复（R1，Mimo review ACCEPTED）：
+
+- 根因（A/B 实证）：2022/2024 年报中行业配置表（table-0103/table-0079，表头 行业类别/公允价值/占净值比例）与真实持仓表同 section，且 caption 回填 section 标题后排序高于真实持仓表（caption 为「金额单位：人民币元」），Agent 首位 TABLE citation 命中行业配置表；`_extract_holdings_from_agent_result` 无表级鉴别，经相邻表头查找后消费 → 数据行全被列宽过滤 → 0 行 → break。
+- 表级鉴别：`_extract_holdings_from_agent_result` 消费每个 citation 表前先过 `_is_holdings_table_candidate`（自身表头须含 stock_code 或 quantity + stock_name + percentage；或为债券持仓表；或为无表头续表），不满足则跳过该 citation 继续遍历，而非 break。
+- 直接扫描 fallback：A 股基金（非 bond/index_feeder/QDII）agent 路径持仓为空时，`_extract_stock_holdings_from_tables` 按 list_tables 顺序扫描表头特征，命中后解析并复用 `_extract_holdings_continuations` 跨页续表合并，同步把 citation 校正到真实持仓表。
+- 验收：004393 2021-2025 各年 top-10 非空（2022 首行 01088 中国神华 6.19；2024 首行 00939 建设银行 6.08）；163415/519696 持仓不回退；行业配置表不再被当作持仓表消费。
+
+### 6.17 519696-2025 持仓第 6 名跨页断裂验证结论（2026-08-07 裁决）
+
+R2（Mimo review ACCEPTED 计划）定位结论：
+
+- 定位（Docling JSON + 分支跟踪）：2025 主表 table-0061（section-0599/page 49/9 列）表头完整 → `_extract_qdii_table_with_continuations` 不进 `_find_qdii_header_continuation`，走「主表 1-5 名 + `_extract_qdii_continuation_rows` 同 section 同列数续表合并」；续表 table-0062（page 50/9 列）命中，首行表头碎片（首列非序号）跳过、6-10 名数据行补齐。2024 为表头截断分支：table-0061 仅截断表头（1 行）、table-0062 承载碎片+全量数据行，合并后同样 10 行完整。
+- 结论：计划所载「第 6 名仍断裂」在当前 fixture/代码上不可复现（`.fund_e2e_519696` 为 gitignored 本地再生成数据，观察可能来自 S1 开发中间态）；验收真值全部满足：2025 持仓 10 行、rank 1-10 连续、第 6 名 1209 HK/华润万象生活/2.82% 代码与占比非空；2024 不回退。
+- 未采用计划修复方向 2 的字面规则（仅首列非序号且全行无代码/名称特征才算碎片）：实测续表表头碎片含名称残片（如「资源有 限公司」）而无代码/占比，按该规则会被消费为残缺持仓行，反而复现「第 6 名代码/占比丢失」；当前「首列非序号即跳过」是正确且必要的保护。修复方向 1（放宽候选范围）经定位确认为非 section/列数判定问题，未改动。
+- 交付：真实 fixture 测试新增 rank 1-10 连续 + 第 6 名代码/占比非空断言；新增最小表结构模拟回归测试 `test_extract_qdii_holdings_cross_page_rank6_complete`（去掉续表合并立即失败）。生产代码零改动。
+
+### 6.18 519696-2023 持仓表头截断修复（2026-08-07 实施）
+
+R3（Mimo review ACCEPTED 计划）实施结论：
+
+- 定位（Docling JSON 复核）：2023 持仓表头被 Docling 截断为「序 | 公司名称 | 公司名 | 证券代 | 所在证 | 所属 | 数量 | 公允价值 | 占基」（table-0064/page 48，仅表头 1 行），数据在续表 table-0065（page 49，首行碎片「号 | （英文） | 称（中文） | 码 | 券市场 | …」+ 11 行数据）。与 2024 不同，主表自身无数据行，且预检 `_QDII_COLUMN_KEYWORDS`（完整「证券代码」「公司名称」）直接把截断表头挡在 `_extract_qdii_holdings_from_tables` 扫描入口之外。
+- 修复 1（截断前缀识别）：`_holdings_column_indexes` 对 `stock_code` 增加「证券代」前缀匹配、对 `percentage` 增加「占基」「占基金」前缀匹配；前缀匹配必须通过 `_column_has_digits` 校验（该列其余单元格含数字），表头仅一行或无数字列时 fail-closed，防行业配置表/估值表误绑。
+- 修复 2（扫描入口预检放宽）：`_extract_qdii_holdings_from_tables` 改用 `_is_qdii_header_text`，接受「证券代码/证券代」与「公司名称/公司名」截断形态；真正的表级鉴别仍由 `_extract_qdii_table_with_continuations` 内 `_holdings_column_indexes` 完成（买入/卖出明细表可过预检但缺 percentage/数量列，被下游拒绝）。
+- 修复 3（列位置推断兜底）：前缀识别仍失败时，`_infer_qdii_column_indexes_by_position` 按 QDII 固定列序推断——首列为序号、存在「数量」「公允价值」相邻列、占比为末列且含数字、代码列数据匹配 `\S+ [A-Z]{2}`（QDII 代码形如 700 HK / MSFT US）；任一条件不满足即返回 None。
+- 链路：2023 主表（仅截断表头，前缀匹配因无数据行 fail-closed）→ `_find_qdii_header_continuation` 命中同 section 下一页 9 列表格 → `_merge_qdii_header_fragments` 拼接为完整表头 → 完整子串匹配命中 → 从续表数据行抽取 10 行。2024 主表（截断表头 + 数据行）直接由前缀识别命中。
+- 验收：519696-2023 持仓 10 行（首行 3808 HK 中国重汽 4.17%，与 2025 正常表头年份行数对齐）；2021/2022/2024/2025 真实 fixture 均 10 行不回退；行业配置表/估值表/资产组合表（占基金总资产）/买卖明细表负例全部拒绝。
+
 
 ## 7. dayu 可迁移部分
 

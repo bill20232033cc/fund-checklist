@@ -4756,6 +4756,194 @@ def test_extract_holdings_real_docling_fixture_top10(
     assert holdings[0].percentage == pct
 
 
+@pytest.mark.parametrize(
+    ("rows", "expected"),
+    [
+        (
+            (("行业类别", "公允价值（人民币）", "占基金资产净值比例（%）"),),
+            False,
+        ),
+        (
+            (("金融", "33,232,890.09", "11.12"),),
+            False,
+        ),
+        (
+            (("序号", "股票代码", "股票名称", "数量（股）", "公允价值（元）", "占基金资产净值比例（%）"),),
+            True,
+        ),
+        (
+            (("1", "300750", "宁德时代", "2,750,252", "1,010,057,549.52", "6.86"),),
+            True,
+        ),
+        (
+            (("序号", "债券品种", "公允价值", "占基金资产净值比例（%）"),),
+            True,
+        ),
+    ],
+)
+def test_is_holdings_table_candidate_discrimination(rows, expected) -> None:
+    """表级鉴别：行业配置表不满足股票/债券特征列，持仓表与续表候选满足。"""
+    from fund_agent.service.extraction import _is_holdings_table_candidate
+
+    assert _is_holdings_table_candidate(rows) is expected
+
+
+def test_extract_holdings_skips_industry_table_citation() -> None:
+    """首位 citation 为行业配置表时必须跳过并继续遍历，不能 break 消费非持仓表。"""
+    from fund_agent.service.extraction import _extract_holdings_from_agent_result
+    from fund_agent.fund.document_tools.models import TableContent
+
+    def _make_locator(kind, section_ref=None, table_ref=None):
+        return Locator(
+            document_id="test-doc",
+            locator_kind=kind,
+            section_ref=section_ref,
+            table_ref=table_ref,
+            page_no=None,
+            page_range=None,
+            internal_ref=None,
+            internal_ref_available=False,
+        )
+
+    def _citation(table_ref: str) -> Citation:
+        return Citation(
+            document_id="test-doc",
+            fund_code="004393",
+            fund_name="安信企业价值优选混合A",
+            year=2022,
+            report_type="annual_report",
+            locator=_make_locator(LocatorKind.TABLE, section_ref="section-stock", table_ref=table_ref),
+        )
+
+    industry_rows = (
+        ("行业类别", "公允价值（人民币）", "占基金资产净值比例（%）"),
+        ("农、林、牧、渔业", "664,200.00", "1.34"),
+        ("制造业", "10,000,000.00", "20.00"),
+    )
+    stock_rows = (
+        ("序号", "股票代码", "股票名称", "数量（股）", "公允价值（元）", "占基金资产净值比例（%）"),
+        ("1", "300750", "宁德时代", "2,750,252", "1,010,057,549.52", "6.86"),
+        *(
+            (str(i + 2), f"600000{i}", f"股票{i}", "1,000", "100,000.00", f"{i + 1}.00")
+            for i in range(1, 10)
+        ),
+    )
+    industry_citation = _citation("table-industry")
+    stock_citation = _citation("table-stock")
+    result = AgentRunResult(
+        answer="8.3 期末按公允价值占基金资产净值比例大小排序的所有股票投资明细",
+        citations=(industry_citation, stock_citation),
+        tool_trace=(),
+    )
+
+    class MockToolService:
+        def read_table(self, document_id, table_ref, max_rows=15):
+            rows = industry_rows if table_ref == "table-industry" else stock_rows
+            return TableContent(
+                table_ref=table_ref,
+                caption=None,
+                section_ref="section-stock",
+                rows=rows,
+                truncated=False,
+                locator=_make_locator(LocatorKind.TABLE, section_ref="section-stock", table_ref=table_ref),
+                citation=_citation(table_ref),
+            )
+
+        def list_tables(self, document_id):
+            return ()
+
+    holdings = _extract_holdings_from_agent_result(
+        document_id="test-doc",
+        result=result,
+        tool_service=MockToolService(),
+    )
+
+    assert len(holdings) == 10
+    assert holdings[0].stock_code == "300750"
+    assert holdings[0].stock_name == "宁德时代"
+    assert holdings[0].percentage == "6.86"
+
+
+def test_extract_stock_holdings_from_tables_direct_scan() -> None:
+    """A 股直接扫描兜底：跳过行业配置表，命中真实持仓表并解析 10 行。"""
+    from fund_agent.service.extraction import _extract_stock_holdings_from_tables
+    from fund_agent.fund.document_tools.models import TableContent, TableSummary
+
+    def _make_locator(kind, section_ref=None, table_ref=None):
+        return Locator(
+            document_id="test-doc",
+            locator_kind=kind,
+            section_ref=section_ref,
+            table_ref=table_ref,
+            page_no=None,
+            page_range=None,
+            internal_ref=None,
+            internal_ref_available=False,
+        )
+
+    def _citation(table_ref: str) -> Citation:
+        return Citation(
+            document_id="test-doc",
+            fund_code="004393",
+            fund_name="安信企业价值优选混合A",
+            year=2022,
+            report_type="annual_report",
+            locator=_make_locator(LocatorKind.TABLE, section_ref="section-stock", table_ref=table_ref),
+        )
+
+    industry_rows = (
+        ("行业类别", "公允价值（人民币）", "占基金资产净值比例（%）"),
+        ("制造业", "10,000,000.00", "20.00"),
+    )
+    stock_rows = (
+        ("序号", "股票代码", "股票名称", "数量（股）", "公允价值（元）", "占基金资产净值比例（%）"),
+        *(
+            (str(i + 1), f"600000{i}", f"股票{i}", "1,000", "100,000.00", f"{i + 1}.00")
+            for i in range(10)
+        ),
+    )
+
+    class MockToolService:
+        def list_tables(self, document_id):
+            return tuple(
+                TableSummary(
+                    table_ref=ref,
+                    caption=None,
+                    section_ref="section-stock",
+                    locator=_make_locator(LocatorKind.TABLE, section_ref="section-stock", table_ref=ref),
+                    row_count=len(rows),
+                    column_count=len(rows[0]),
+                )
+                for ref, rows in (("table-industry", industry_rows), ("table-stock", stock_rows))
+            )
+
+        def read_table(self, document_id, table_ref, max_rows=15):
+            rows = industry_rows if table_ref == "table-industry" else stock_rows
+            return TableContent(
+                table_ref=table_ref,
+                caption=None,
+                section_ref="section-stock",
+                rows=rows,
+                truncated=False,
+                locator=_make_locator(LocatorKind.TABLE, section_ref="section-stock", table_ref=table_ref),
+                citation=_citation(table_ref),
+            )
+
+    direct = _extract_stock_holdings_from_tables(
+        document_id="test-doc",
+        tool_service=MockToolService(),
+    )
+
+    assert direct is not None
+    holdings, citation = direct
+    assert len(holdings) == 10
+    assert holdings[0].stock_code == "6000000"
+    assert holdings[0].stock_name == "股票0"
+    assert holdings[0].percentage == "1.00"
+    assert citation is not None
+    assert citation.locator.table_ref == "table-stock"
+
+
 # ── S1: QDII 持仓抽取适配（主动 QDII fallback + 跨页分裂表）────────────
 
 
@@ -4766,6 +4954,18 @@ _QDII_2024_DOCLING_JSON = Path(
 _QDII_2025_DOCLING_JSON = Path(
     ".fund_e2e_519696/docling_json/519696-2025-annual_report-916f45f0b922ba07"
     "/519696-2025-annual_report-916f45f0b922ba07.docling.json"
+)
+_QDII_2021_DOCLING_JSON = Path(
+    ".fund_e2e_519696/docling_json/519696-2021-annual_report-4b01ce532e65385d"
+    "/519696-2021-annual_report-4b01ce532e65385d.docling.json"
+)
+_QDII_2022_DOCLING_JSON = Path(
+    ".fund_e2e_519696/docling_json/519696-2022-annual_report-15f819d80df0c95f"
+    "/519696-2022-annual_report-15f819d80df0c95f.docling.json"
+)
+_QDII_2023_DOCLING_JSON = Path(
+    ".fund_e2e_519696/docling_json/519696-2023-annual_report-19d8de646241b0fc"
+    "/519696-2023-annual_report-19d8de646241b0fc.docling.json"
 )
 
 
@@ -4821,6 +5021,99 @@ def test_holdings_column_indexes_stock_name_unaffected() -> None:
     assert mapping["percentage"] == 5
 
 
+def test_holdings_column_indexes_qdii_truncated_header_prefix() -> None:
+    """519696-2023 截断表头（「证券代」「占基」）前缀识别：列数据含数字时可绑定。"""
+    from fund_agent.service.extraction import _holdings_column_indexes
+
+    rows = (
+        ("序", "公司名称", "公司名", "证券代", "所在证", "所属", "数量", "公允价值", "占基"),
+        ("1", "Sinotruk Hong Kong Ltd", "中国重 汽", "3808 HK", "香港联 合交易 所", "中 国 香港", "232,000", "3,223,733.22", "4.17"),
+        ("2", "Tencent Holdings Ltd", "腾讯控 股", "700 HK", "香港联 合交易 所", "中 国 香港", "10,600", "2,822,761.99", "3.66"),
+    )
+    mapping = _holdings_column_indexes(rows)
+    assert mapping is not None
+    assert mapping["stock_code"] == 3
+    assert mapping["stock_name"] == 1
+    assert mapping["quantity"] == 6
+    assert mapping["fair_value"] == 7
+    assert mapping["percentage"] == 8
+
+
+def test_holdings_column_indexes_truncated_header_requires_digit_cells() -> None:
+    """截断前缀匹配必须校验列数据含数字：仅表头或无数字列不得绑定。"""
+    from fund_agent.service.extraction import _holdings_column_indexes
+
+    # 跨页主表仅含截断表头（519696-2023 table-0064 形态）：无数据单元格，fail-closed。
+    header_only = (
+        ("序", "公司名称", "公司名", "证券代", "所在证", "所属", "数量", "公允价值", "占基"),
+    )
+    assert _holdings_column_indexes(header_only) is None
+
+    # 「占基」列数据不含数字（如行业名称），前缀不得误绑。
+    no_digits = (
+        ("序", "公司名称", "证券代", "数量", "公允价值", "占基"),
+        ("1", "某某公司", "700 HK", "17,000", "9,195,862.26", "行业A"),
+        ("2", "另一公司", "700 HK", "10,000", "8,000,000.00", "行业B"),
+    )
+    assert _holdings_column_indexes(no_digits) is None
+
+
+def test_holdings_column_indexes_qdii_position_fallback() -> None:
+    """列位置推断兜底：代码/占比截断到前缀无法识别时，按 QDII 固定列序推断。"""
+    from fund_agent.service.extraction import _holdings_column_indexes
+
+    rows = (
+        ("序", "名称英", "名称中", "证券", "市场", "国家", "数量", "公允价值", "占"),
+        ("1", "Tencent Holdings Ltd", "腾讯控 股", "700 HK", "港交所", "中国香港", "17,000", "9,195,862.26", "5.01"),
+        ("2", "Alphabet Inc", "Alphabet 公司", "GOOGL US", "美交所", "美国", "145", "2,678,245.40", "2.87"),
+        ("3", "Microsoft Corp", "微软公 司", "MSFT US", "美交所", "美国", "938", "2,498,249.04", "3.24"),
+    )
+    mapping = _holdings_column_indexes(rows)
+    assert mapping is not None
+    assert mapping["stock_code"] == 3
+    assert mapping["stock_name"] == 1
+    assert mapping["quantity"] == 6
+    assert mapping["fair_value"] == 7
+    assert mapping["percentage"] == 8
+
+
+def test_holdings_column_indexes_rejects_non_holdings_tables() -> None:
+    """前缀放宽/位置推断不得误判行业配置表、估值表、资产组合表、买卖明细表。"""
+    from fund_agent.service.extraction import _holdings_column_indexes
+
+    # 行业配置表（行业类别/公允价值/占净值比例）
+    industry = (
+        ("行业类别", "公允价值", "占基金资产净值比例(%)"),
+        ("通讯", "9,946,487.28", "12.88"),
+        ("非必需消费品", "13,391,509.48", "17.34"),
+    )
+    assert _holdings_column_indexes(industry) is None
+
+    # 估值表（公允价值计量层次）
+    valuation = (
+        ("公允价值计量结果所属的层次", "本期末 2023年12月31日", "上年度末 2022年12月31日"),
+        ("第一层次", "70,231,733.87", "67,070,372.17"),
+        ("第二层次", "-", "-"),
+    )
+    assert _holdings_column_indexes(valuation) is None
+
+    # 资产组合表（占基金总资产的比例）：「占基金」前缀可命中但无名称列，仍应拒绝。
+    portfolio = (
+        ("序号", "项目", "金额", "占基金总资产的比例（%）"),
+        ("1", "权益投资", "70,231,733.87", "90.43"),
+        ("2", "固定收益投资", "1,000,000.00", "1.29"),
+    )
+    assert _holdings_column_indexes(portfolio) is None
+
+    # 买卖明细表（占期初基金资产净值比例）：前缀不匹配且无数量/公允价值列。
+    buy_sell = (
+        ("序号", "公司名称（英文）", "证券代码", "本期累计买入金额", "占期初基金资产净值比例(%)"),
+        ("1", "Tencent Holdings Ltd", "700 HK", "3,080,419.00", "4.26"),
+        ("2", "Sinotruk Hong Kong Ltd", "3808 HK", "2,442,281.20", "3.38"),
+    )
+    assert _holdings_column_indexes(buy_sell) is None
+
+
 def test_extract_holdings_from_store_active_qdii_triggers_qdii_fallback(tmp_path: Path) -> None:
     """主动 QDII（infer_fund_type=active_fund）在股票查询失败时进入 QDII fallback 分支。"""
     _FakeConverter.calls.clear()
@@ -4868,6 +5161,30 @@ def test_extract_holdings_from_store_active_qdii_triggers_qdii_fallback(tmp_path
     ("year", "json_path", "first_name", "first_code", "first_pct", "second_name"),
     [
         (
+            2021,
+            _QDII_2021_DOCLING_JSON,
+            "安踏体育",
+            "2020 HK",
+            "3.28",
+            "Alphabet 公司",
+        ),
+        (
+            2022,
+            _QDII_2022_DOCLING_JSON,
+            "周大福",
+            "1929 HK",
+            "4.79",
+            "比亚迪",
+        ),
+        (
+            2023,
+            _QDII_2023_DOCLING_JSON,
+            "中国重 汽",
+            "3808 HK",
+            "4.17",
+            "腾讯控 股",
+        ),
+        (
             2025,
             _QDII_2025_DOCLING_JSON,
             "腾讯控 股",
@@ -4908,6 +5225,131 @@ def test_extract_qdii_holdings_from_tables_real_fixture_top10(
     assert holdings[0].stock_code == first_code
     assert holdings[0].percentage == first_pct
     assert holdings[1].stock_name == second_name
+    # R2 验收：rank 1-10 连续，第 6 名（跨页续表首行数据）代码/占比非空。
+    assert [h.rank for h in holdings] == list(range(1, 11))
+    rank6 = holdings[5]
+    assert rank6.stock_code
+    assert rank6.percentage
+
+
+def test_extract_qdii_holdings_from_tables_2023_truncated_header() -> None:
+    """519696-2023 表头截断（「证券代」「占基」）回归：真实 fixture 抽取 10 行。
+
+    截断表头经前缀识别 + 跨页续表碎片合并后抽取，行数与 2025 正常表头年份对齐。
+    """
+    from fund_agent.service.extraction import _extract_qdii_holdings_from_tables
+
+    assert _QDII_2023_DOCLING_JSON.is_file(), "2023 现成 QDII docling JSON fixture 缺失"
+    store = _qdii_fixture_store(year=2023, json_path=_QDII_2023_DOCLING_JSON)
+    holdings = _extract_qdii_holdings_from_tables(
+        document_id="519696-2023-annual_report-fixture",
+        tool_service=_StoreBackedToolService(store),
+    )
+    assert holdings is not None
+    assert len(holdings) == 10
+    assert [h.rank for h in holdings] == list(range(1, 11))
+    assert holdings[0].stock_name == "中国重 汽"
+    assert holdings[0].stock_code == "3808 HK"
+    assert holdings[0].percentage == "4.17"
+    assert holdings[1].stock_name == "腾讯控 股"
+
+
+def test_extract_qdii_holdings_cross_page_rank6_complete() -> None:
+    """第 6 名跨页断裂回归：主表（表头+1-5 名）+ 续表（碎片行+6-10 名）合并后 rank 连续、第 6 名代码/占比非空。"""
+    from fund_agent.service.extraction import _extract_qdii_holdings_from_tables
+    from fund_agent.fund.document_tools.models import TableContent, TableSummary
+
+    main_header = (
+        "序 号",
+        "公司名称 （英文）",
+        "公司名 称（中 文）",
+        "证券代 码",
+        "所在证 券市场",
+        "所属 国家 （地 区）",
+        "数量 （股）",
+        "公允价值",
+        "占基 金资 产净 值比 例 （%）",
+    )
+    main_rows = (main_header,) + tuple(
+        (str(i), f"Company {i}", f"名称{i}", f"{1000 + i} HK", "香港联 合交易 所", "中 国 香港", "1,000", "100,000.00", f"{i}.00")
+        for i in range(1, 6)
+    )
+    # 续表首行为表头碎片（含名称残片、无代码/占比），其后才是 6-10 名数据行。
+    fragment_row = ("", "Internati onal Resources Corp Ltd", "资源有 限公司", "", "所", "", "", "", "")
+    cont_rows = (fragment_row,) + tuple(
+        (str(i), f"Company {i}", f"名称{i}", f"{1000 + i} HK", "香港联 合交易 所", "中 国 香港", "1,000", "100,000.00", f"{i}.00")
+        for i in range(6, 11)
+    )
+
+    def _locator(table_ref: str, page_no: int) -> Locator:
+        return Locator(
+            document_id="test-doc",
+            locator_kind=LocatorKind.TABLE,
+            section_ref="section-qdii",
+            table_ref=table_ref,
+            page_no=page_no,
+            page_range=None,
+            internal_ref=None,
+            internal_ref_available=False,
+        )
+
+    def _citation(table_ref: str, page_no: int) -> Citation:
+        return Citation(
+            document_id="test-doc",
+            fund_code="519696",
+            fund_name="交银环球精选混合(QDII)",
+            year=2025,
+            report_type="annual_report",
+            locator=_locator(table_ref, page_no),
+        )
+
+    class _QdiiContinuationToolService:
+        def read_table(self, document_id, table_ref, max_rows=15):
+            rows = main_rows if table_ref == "table-main" else cont_rows
+            page_no = 49 if table_ref == "table-main" else 50
+            return TableContent(
+                table_ref=table_ref,
+                caption=None,
+                section_ref="section-qdii",
+                rows=rows,
+                truncated=False,
+                locator=_locator(table_ref, page_no),
+                citation=_citation(table_ref, page_no),
+            )
+
+        def list_tables(self, document_id):
+            return (
+                TableSummary(
+                    table_ref="table-main",
+                    caption=None,
+                    section_ref="section-qdii",
+                    locator=_locator("table-main", 49),
+                    row_count=len(main_rows),
+                    column_count=9,
+                ),
+                TableSummary(
+                    table_ref="table-cont",
+                    caption=None,
+                    section_ref="section-qdii",
+                    locator=_locator("table-cont", 50),
+                    row_count=len(cont_rows),
+                    column_count=9,
+                ),
+            )
+
+    holdings = _extract_qdii_holdings_from_tables(
+        document_id="test-doc",
+        tool_service=_QdiiContinuationToolService(),
+    )
+    assert holdings is not None
+    assert len(holdings) == 10
+    assert [h.rank for h in holdings] == list(range(1, 11))
+    assert holdings[5].stock_code == "1006 HK"
+    assert holdings[5].stock_name == "名称6"
+    assert holdings[5].percentage == "6.00"
+    # 碎片行不得被消费为持仓（其名称残片不能顶替第 6 名）。
+    assert holdings[4].rank == 5
+    assert holdings[5].stock_code != ""
 
 
 def test_extract_multi_year_holdings_qdii_519696_top10() -> None:
@@ -4935,6 +5377,76 @@ def test_extract_multi_year_holdings_qdii_519696_top10() -> None:
     assert by_year[2025][0].stock_name == "腾讯控 股"
     assert by_year[2025][2].stock_name == "中芯国 际集成 电路制 造有限 公司"
     assert by_year[2024][0].stock_name == "腾讯控 股"
+
+
+_A_SHARE_HOLDINGS_004393_YEAR_DOCLING_JSON = {
+    2021: Path(
+        ".fund_e2e_004393/docling_json/004393-2021-annual_report-686a3e733e4ae6cb"
+        "/004393-2021-annual_report-686a3e733e4ae6cb.docling.json"
+    ),
+    2022: Path(
+        ".fund_e2e_004393/docling_json/004393-2022-annual_report-045987cad6e956ad"
+        "/004393-2022-annual_report-045987cad6e956ad.docling.json"
+    ),
+    2023: Path(
+        ".fund_e2e_004393/docling_json/004393-2023-annual_report-f8bba920647aa6d8"
+        "/004393-2023-annual_report-f8bba920647aa6d8.docling.json"
+    ),
+    2024: Path(
+        ".fund_e2e_004393/docling_json/004393-2024-annual_report-bc6b0a1ae2f709f4"
+        "/004393-2024-annual_report-bc6b0a1ae2f709f4.docling.json"
+    ),
+    2025: Path(
+        ".fund_e2e_004393/docling_json/004393-2025-annual_report-dc38aae8770e0071"
+        "/004393-2025-annual_report-dc38aae8770e0071.docling.json"
+    ),
+}
+
+
+def test_extract_multi_year_holdings_004393_top10_regression() -> None:
+    """004393（主动 A 股）2021-2025 各抽取 10 行，行业配置表不再被当作持仓表消费。"""
+    for year, json_path in _A_SHARE_HOLDINGS_004393_YEAR_DOCLING_JSON.items():
+        assert json_path.is_file(), f"{year} 现成 004393 docling JSON fixture 缺失"
+
+    service = FundReadingService()
+    result = service.extract_multi_year_holdings(
+        ExtractHoldingsRequest(
+            fund_code="004393",
+            fund_name="安信企业价值优选混合A",
+            requested_years=[2021, 2022, 2023, 2024, 2025],
+            annual_report_documents=[
+                AnnualReportDocument(
+                    year=year,
+                    document_id=f"004393-{year}-annual_report-{fingerprint}",
+                )
+                for year, fingerprint in (
+                    (2021, "686a3e733e4ae6cb"),
+                    (2022, "045987cad6e956ad"),
+                    (2023, "f8bba920647aa6d8"),
+                    (2024, "bc6b0a1ae2f709f4"),
+                    (2025, "dc38aae8770e0071"),
+                )
+            ],
+            work_dir=Path(".fund_e2e_004393"),
+        )
+    )
+    assert result.failure is None
+    assert result.series is not None
+    assert tuple(result.series.missing_years) == ()
+    by_year = {annual.year: annual.holdings for annual in result.series.annual_holdings}
+    citations = {annual.year: annual.citation for annual in result.series.annual_holdings}
+    for year in (2021, 2022, 2023, 2024, 2025):
+        assert len(by_year[year]) == 10
+    assert by_year[2022][0].stock_code == "01088"
+    assert by_year[2022][0].stock_name == "中国神华"
+    assert by_year[2022][0].percentage == "6.19"
+    assert by_year[2022][1].stock_name == "中国海外发展"
+    assert by_year[2024][0].stock_code == "00939"
+    assert by_year[2024][0].stock_name == "建设银行"
+    assert by_year[2024][0].percentage == "6.08"
+    # citation 必须是真实持仓表，而不是行业配置表
+    assert citations[2022].locator.table_ref == "table-0104"
+    assert citations[2024].locator.table_ref == "table-0080"
 
 
 # ── S2: QDII 费率「管理人报酬」措辞 + 托管费路由 ─────────────────────

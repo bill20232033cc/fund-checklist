@@ -17,7 +17,9 @@ import pytest
 
 from fund_agent.agent.llm_tool_loop import (
     ChatResponse,
+    FakeLlmClient,
     FinalAnswer,
+    LlmToolLoopRunner,
     TokenUsage,
 )
 from fund_agent.agent.tool_loop import AgentRunResult, ToolTraceEntry
@@ -902,3 +904,45 @@ class TestBuildContributionsRuntimeDocumentId:
         contributions = service._build_contributions(session)
 
         assert "document_id" not in contributions["runtime"]
+
+
+def test_interactive_nonstream_long_answer_truncated_by_final_guard(tmp_path: Path) -> None:
+    """interactive 非流式路径：chat_turn -> runner.run(scene=interactive) 时终答守卫生效。
+
+    R5 live e2e 暴露 Q4 1705 字原文粘贴未截断；此处锁死 INTERACTIVE_SCENE_CONFIG
+    场景下非流式 interactive 必须经 runner 终答守卫截断为前 200 字摘要。
+    """
+
+    long_answer = ("3.2.1 基金份额净值增长率及其与同期业绩比较基准收益率的比较\n" * 200)
+
+    def factory(llm_client, tool_service, max_steps: int = 8) -> LlmToolLoopRunner:
+        return LlmToolLoopRunner(
+            tool_service=tool_service,
+            llm_client=FakeLlmClient(
+                [FinalAnswer(answer=long_answer, citations=(), key_facts=())] * 2
+            ),
+            max_steps=max_steps,
+        )
+
+    session_store = SessionStore(tmp_path / "sessions")
+    prompt_composer = PromptComposer(template_dir=_template_dir())
+    service = ChatService(
+        session_store=session_store,
+        prompt_composer=prompt_composer,
+        scene_config=INTERACTIVE_SCENE_CONFIG,
+        runner_factory=factory,
+    )
+    session = session_store.create(fund_code="007466")
+    ps = PinnedState(
+        fund_code="007466",
+        active_document_id="007466-2025-annual_report-ee23d4b8070dce1a",
+        active_year=2025,
+    )
+    session_store.save(session.with_pinned_state(ps))
+
+    result = service.chat_turn(
+        ChatTurnRequest(session_id=session.session_id, user_text="2021-2025 份额净值增长率")
+    )
+
+    assert len(result.answer) <= 225
+    assert "截断" in result.answer
