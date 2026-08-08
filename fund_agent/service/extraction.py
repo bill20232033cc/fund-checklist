@@ -3921,7 +3921,14 @@ class FundReadingService:
         sidecar_path = output_dir / f"{base_name}.meta.json"
 
         lines = [f"# {report.fund_name}（{report.fund_code}）{report.report_year} 年度分析报告\n"]
-        lines.append("**风险警示**：本报告由 AI 辅助生成，仅供参考，不构成投资建议。\n")
+        lines.append(
+            f"**风险警示与免责声明**：本文由 AI/大模型基于 {report.fund_name}（{report.fund_code}）"
+            "已公开披露且可核查的基金年报、半年度报告、季度报告、招募说明书及其他监管披露文件辅助生成，"
+            "仅用于个人投资研究与信息交流之目的。因 AI/大模型存在幻觉，本文不可避免地会产生不完全符合年报原文的情况，"
+            "严重程度视 AI/大模型的幻觉程度而定，阅读本文后产生的任何观点需核对原文，"
+            "使用本文内容所产生的任何直接或间接后果，均由使用者自行承担。\n\n"
+            "**风险提示**：本文所提到的观点仅代表个人的意见，所涉及标的不作推荐，据此买卖，风险自负。\n"
+        )
 
         for chapter in report.chapters:
             lines.append(f"\n---\n\n## 第 {chapter.chapter_id + 1} 章：{chapter.title}\n")
