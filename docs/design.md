@@ -761,6 +761,10 @@ R3（Mimo review ACCEPTED 计划）实施结论：
 - 链路：2023 主表（仅截断表头，前缀匹配因无数据行 fail-closed）→ `_find_qdii_header_continuation` 命中同 section 下一页 9 列表格 → `_merge_qdii_header_fragments` 拼接为完整表头 → 完整子串匹配命中 → 从续表数据行抽取 10 行。2024 主表（截断表头 + 数据行）直接由前缀识别命中。
 - 验收：519696-2023 持仓 10 行（首行 3808 HK 中国重汽 4.17%，与 2025 正常表头年份行数对齐）；2021/2022/2024/2025 真实 fixture 均 10 行不回退；行业配置表/估值表/资产组合表（占基金总资产）/买卖明细表负例全部拒绝。
 
+### 6.19 持仓 direct 扫描 citation 校正（2026-08-08 裁决）
+
+- 持仓 direct 扫描路径（A 股 `_extract_stock_holdings_from_tables` 与 QDII `_extract_qdii_holdings_from_tables`）的 citation 必须指向实际消费的持仓主表；调用方命中 direct 时同步校正 `table_citation`，不得停留在国家（地区）/行业类别/续表碎片表。
+
 
 ## 7. dayu 可迁移部分
 

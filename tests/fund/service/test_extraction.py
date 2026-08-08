@@ -5158,7 +5158,7 @@ def test_extract_holdings_from_store_active_qdii_triggers_qdii_fallback(tmp_path
 
 
 @pytest.mark.parametrize(
-    ("year", "json_path", "first_name", "first_code", "first_pct", "second_name"),
+    ("year", "json_path", "first_name", "first_code", "first_pct", "second_name", "expected_table_ref"),
     [
         (
             2021,
@@ -5167,6 +5167,7 @@ def test_extract_holdings_from_store_active_qdii_triggers_qdii_fallback(tmp_path
             "2020 HK",
             "3.28",
             "Alphabet 公司",
+            "table-0067",
         ),
         (
             2022,
@@ -5175,6 +5176,7 @@ def test_extract_holdings_from_store_active_qdii_triggers_qdii_fallback(tmp_path
             "1929 HK",
             "4.79",
             "比亚迪",
+            "table-0069",
         ),
         (
             2023,
@@ -5183,6 +5185,7 @@ def test_extract_holdings_from_store_active_qdii_triggers_qdii_fallback(tmp_path
             "3808 HK",
             "4.17",
             "腾讯控 股",
+            "table-0064",
         ),
         (
             2025,
@@ -5191,6 +5194,7 @@ def test_extract_holdings_from_store_active_qdii_triggers_qdii_fallback(tmp_path
             "700 HK",
             "5.01",
             "中国宏 桥集团 有限公 司",
+            "table-0061",
         ),
         (
             2024,
@@ -5199,6 +5203,7 @@ def test_extract_holdings_from_store_active_qdii_triggers_qdii_fallback(tmp_path
             "700 HK",
             "3.33",
             "微软",
+            "table-0061",
         ),
     ],
 )
@@ -5209,17 +5214,19 @@ def test_extract_qdii_holdings_from_tables_real_fixture_top10(
     first_code: str,
     first_pct: str,
     second_name: str,
+    expected_table_ref: str,
 ) -> None:
-    """现成 QDII docling JSON fixture：直接扫描跨页分裂表抽取 10 行。"""
+    """现成 QDII docling JSON fixture：直接扫描跨页分裂表抽取 10 行，citation 指向持仓主表。"""
     from fund_agent.service.extraction import _extract_qdii_holdings_from_tables
 
     assert json_path.is_file(), f"{year} 现成 QDII docling JSON fixture 缺失"
     store = _qdii_fixture_store(year=year, json_path=json_path)
-    holdings = _extract_qdii_holdings_from_tables(
+    direct = _extract_qdii_holdings_from_tables(
         document_id=f"519696-{year}-annual_report-fixture",
         tool_service=_StoreBackedToolService(store),
     )
-    assert holdings is not None
+    assert direct is not None
+    holdings, citation = direct
     assert len(holdings) == 10
     assert holdings[0].stock_name == first_name
     assert holdings[0].stock_code == first_code
@@ -5230,6 +5237,7 @@ def test_extract_qdii_holdings_from_tables_real_fixture_top10(
     rank6 = holdings[5]
     assert rank6.stock_code
     assert rank6.percentage
+    assert citation.locator.table_ref == expected_table_ref
 
 
 def test_extract_qdii_holdings_from_tables_2023_truncated_header() -> None:
@@ -5241,17 +5249,19 @@ def test_extract_qdii_holdings_from_tables_2023_truncated_header() -> None:
 
     assert _QDII_2023_DOCLING_JSON.is_file(), "2023 现成 QDII docling JSON fixture 缺失"
     store = _qdii_fixture_store(year=2023, json_path=_QDII_2023_DOCLING_JSON)
-    holdings = _extract_qdii_holdings_from_tables(
+    direct = _extract_qdii_holdings_from_tables(
         document_id="519696-2023-annual_report-fixture",
         tool_service=_StoreBackedToolService(store),
     )
-    assert holdings is not None
+    assert direct is not None
+    holdings, citation = direct
     assert len(holdings) == 10
     assert [h.rank for h in holdings] == list(range(1, 11))
     assert holdings[0].stock_name == "中国重 汽"
     assert holdings[0].stock_code == "3808 HK"
     assert holdings[0].percentage == "4.17"
     assert holdings[1].stock_name == "腾讯控 股"
+    assert citation.locator.table_ref == "table-0064"
 
 
 def test_extract_qdii_holdings_cross_page_rank6_complete() -> None:
@@ -5337,11 +5347,12 @@ def test_extract_qdii_holdings_cross_page_rank6_complete() -> None:
                 ),
             )
 
-    holdings = _extract_qdii_holdings_from_tables(
+    direct = _extract_qdii_holdings_from_tables(
         document_id="test-doc",
         tool_service=_QdiiContinuationToolService(),
     )
-    assert holdings is not None
+    assert direct is not None
+    holdings, citation = direct
     assert len(holdings) == 10
     assert [h.rank for h in holdings] == list(range(1, 11))
     assert holdings[5].stock_code == "1006 HK"
@@ -5350,17 +5361,20 @@ def test_extract_qdii_holdings_cross_page_rank6_complete() -> None:
     # 碎片行不得被消费为持仓（其名称残片不能顶替第 6 名）。
     assert holdings[4].rank == 5
     assert holdings[5].stock_code != ""
+    assert citation.locator.table_ref == "table-main"
 
 
 def test_extract_multi_year_holdings_qdii_519696_top10() -> None:
-    """519696（主动 QDII）2024/2025 各抽取 10 行且 failure=None。"""
+    """519696（主动 QDII）2022-2025 各抽取 10 行且 failure=None，citation 指向各年持仓主表。"""
     service = FundReadingService()
     result = service.extract_multi_year_holdings(
         ExtractHoldingsRequest(
             fund_code="519696",
             fund_name="交银环球精选混合(QDII)",
-            requested_years=[2024, 2025],
+            requested_years=[2022, 2023, 2024, 2025],
             annual_report_documents=[
+                AnnualReportDocument(year=2022, document_id="519696-2022-annual_report-15f819d80df0c95f"),
+                AnnualReportDocument(year=2023, document_id="519696-2023-annual_report-19d8de646241b0fc"),
                 AnnualReportDocument(year=2024, document_id="519696-2024-annual_report-3ce5b5d45892aebb"),
                 AnnualReportDocument(year=2025, document_id="519696-2025-annual_report-916f45f0b922ba07"),
             ],
@@ -5369,14 +5383,92 @@ def test_extract_multi_year_holdings_qdii_519696_top10() -> None:
     )
     assert result.failure is None
     assert result.series is not None
-    assert tuple(result.series.covered_years) == (2024, 2025)
+    assert tuple(result.series.covered_years) == (2022, 2023, 2024, 2025)
     assert tuple(result.series.missing_years) == ()
     by_year = {annual.year: annual.holdings for annual in result.series.annual_holdings}
-    for year in (2024, 2025):
+    citations = {annual.year: annual.citation for annual in result.series.annual_holdings}
+    for year in (2022, 2023, 2024, 2025):
         assert len(by_year[year]) == 10
+    assert by_year[2022][0].stock_name == "周大福"
+    assert by_year[2022][0].stock_code == "1929 HK"
+    assert by_year[2022][0].percentage == "4.79"
+    assert by_year[2023][0].stock_name == "中国重 汽"
+    assert by_year[2023][0].stock_code == "3808 HK"
+    assert by_year[2023][0].percentage == "4.17"
     assert by_year[2025][0].stock_name == "腾讯控 股"
     assert by_year[2025][2].stock_name == "中芯国 际集成 电路制 造有限 公司"
     assert by_year[2024][0].stock_name == "腾讯控 股"
+    # R6 验收：citation 必须指向各年 QDII 持仓主表，而不是国家（地区）/行业类别/续表碎片表。
+    assert citations[2022].locator.table_ref == "table-0069"
+    assert citations[2023].locator.table_ref == "table-0064"
+    assert citations[2024].locator.table_ref == "table-0061"
+    assert citations[2025].locator.table_ref == "table-0061"
+
+
+def test_extract_holdings_from_store_qdii_direct_syncs_citation_to_holdings_table() -> None:
+    """QDII 直扫命中真实持仓表后，AnnualHoldingsResult.citation 必须同步为持仓主表。"""
+    from fund_agent.service.extraction import FundReadingService
+
+    assert _QDII_2023_DOCLING_JSON.is_file(), "2023 现成 QDII docling JSON fixture 缺失"
+    store = _qdii_fixture_store(year=2023, json_path=_QDII_2023_DOCLING_JSON)
+
+    class _QdiiCountryFirstCitationHost:
+        """QDII 路由成功但首个 TABLE citation 指向国家（地区）表（table-0062）。"""
+
+        def __init__(self, tool_service) -> None:
+            """保存 tool service 但不访问其内部 store。"""
+
+            self._tool_service = tool_service
+
+        def run(self, *, document_id: str, query: str) -> AgentRunResult:
+            """股票/前十名候选失败；QDII query 成功并返回国家（地区）表 citation。"""
+
+            if query == "所有权益投资明细":
+                return AgentRunResult(
+                    answer="8.2 期末按地区分类的所有权益投资明细",
+                    citations=(
+                        Citation(
+                            document_id=document_id,
+                            fund_code="519696",
+                            fund_name="交银环球精选混合(QDII)",
+                            year=2023,
+                            report_type="annual_report",
+                            locator=Locator(
+                                document_id=document_id,
+                                locator_kind=LocatorKind.TABLE,
+                                section_ref="section-qdii",
+                                table_ref="table-0062",
+                                page_no=None,
+                                page_range=None,
+                                internal_ref=None,
+                                internal_ref_available=False,
+                            ),
+                        ),
+                    ),
+                    tool_trace=(_trace_search(document_id, query, "success"),),
+                    failure=None,
+                )
+            return AgentRunResult(
+                answer="",
+                citations=(),
+                tool_trace=(_trace_search(document_id, query, "failure", FailureCode.NOT_FOUND),),
+                failure=ToolFailure(code=FailureCode.NOT_FOUND, message="未找到可读取的匹配章节"),
+            )
+
+    service = FundReadingService(host_factory=_QdiiCountryFirstCitationHost)
+    result = service._extract_holdings_from_store(
+        document_id="519696-2023-annual_report-fixture",
+        store=store,
+        report_year=2023,
+        fund_name="交银环球精选混合(QDII)",
+    )
+    assert result.failure is None
+    assert len(result.holdings) == 10
+    assert result.holdings[0].stock_name == "中国重 汽"
+    assert result.holdings[0].stock_code == "3808 HK"
+    assert result.holdings[0].percentage == "4.17"
+    assert result.citation is not None
+    assert result.citation.locator.table_ref == "table-0064"
 
 
 _A_SHARE_HOLDINGS_004393_YEAR_DOCLING_JSON = {

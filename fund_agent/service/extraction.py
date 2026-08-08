@@ -1522,7 +1522,7 @@ class FundReadingService:
                         tool_service=tool_service,
                     )
                     if direct:
-                        holdings = list(direct)
+                        holdings, table_citation = direct
                     elif not holdings:
                         qdii_routed = self._run_with_query_candidates(
                             host=host,
@@ -6187,19 +6187,22 @@ def _extract_qdii_holdings_from_tables(
     *,
     document_id: str,
     tool_service: FundDocumentToolService,
-) -> tuple[HoldingExtraction, ...] | None:
+) -> tuple[tuple[HoldingExtraction, ...], Citation] | None:
     """直接扫描文档表格，查找 QDII 格式持仓表并抽取数据。
 
     当 Agent citation 未能正确引用 QDII 持仓表时的兜底方案。
     支持跨页分裂表：主表（QDII 表头）+ 续表（碎片行 + 数据行）；
     表头被跨页截断时用续表首行碎片补齐，碎片行（首列非序号）跳过。
+    命中时返回 (持仓列表, 主表 citation)；主表 citation 与 A 股 direct 分支同约定：
+    跨页续表合并 / 表头截断补齐时，citation 仍以主表（表头通过 _is_qdii_header_text
+    识别的那张表）为准。
 
     参数:
         document_id: 文档 ID。
         tool_service: 文档工具服务。
 
     返回:
-        持仓列表；未找到 QDII 表时返回 None。
+        (持仓列表, 命中主表 citation)；未找到 QDII 表时返回 None。
     """
     tables = tool_service.list_tables(document_id)
     for table_meta in tables:
@@ -6222,7 +6225,7 @@ def _extract_qdii_holdings_from_tables(
             primary_table=full_table,
         )
         if holdings:
-            return tuple(holdings[:_HOLDINGS_TOP_N])
+            return tuple(holdings[:_HOLDINGS_TOP_N]), full_table.citation
     return None
 
 
