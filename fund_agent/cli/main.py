@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sys
+from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
 from typing import Sequence, TextIO
@@ -19,9 +20,10 @@ from fund_agent.fund.document_tools.persistent_repository import (
     CATALOG_FILENAME,
     FilesystemReportRepository,
 )
-from fund_agent.agent.deepseek_llm import DeepSeekLlmClient
+from fund_agent.agent.deepseek_llm import DeepSeekLlmClient, resolve_provider_model
 from fund_agent.agent.stream_events import StreamEventType
 from fund_agent.service import (
+    AggregateMultiYearAnnualPerformanceResult,
     AggregateMultiYearAnnualPerformanceRequest,
     AnnualReportDocument,
     AskQuestionRequest,
@@ -221,6 +223,7 @@ def build_parser() -> argparse.ArgumentParser:
     interactive_parser.add_argument("--no-stream", action="store_true", default=False, help="禁用流式输出")
     interactive_parser.add_argument("--enable-tool-trace", action="store_true", default=False, help="显示工具调用详情")
     interactive_parser.add_argument("--plain", action="store_true", default=False, help="保留原始 Markdown 文本，禁用 Rich 格式化")
+    interactive_parser.add_argument("--year", type=int, default=None, help="指定年报年份（默认取可用年份中最新；非交互输入自动默认）")
 
     fix_parser = subparsers.add_parser("fix")
     fix_parser.add_argument("--fund-code", required=True, help="基金代码")
@@ -277,6 +280,70 @@ def _collect_matching_docs(
 
     matching_docs = [AnnualReportDocument(year=year, document_id=doc_id) for year, doc_id in sorted(seen_years.items())]
     return matching_docs if matching_docs else None
+
+
+def _build_aggregate_handler(work_dir: Path) -> Callable[..., AggregateMultiYearAnnualPerformanceResult]:
+    """构造 interactive 场景的 aggregate_multi_year_annual_performance 回调。
+
+    参数:
+        work_dir: 现有受控 repository 工作目录。
+
+    返回:
+        handler(document_id, fund_code, requested_years, annual_report_documents,
+        share_class) -> AggregateMultiYearAnnualPerformanceResult；以 catalog 重解析
+        annual_report_documents（last-wins），忽略 LLM 提供的 document_id 列表
+        （防幻觉 document_id 注入）。
+    """
+
+    repository = FilesystemReportRepository(
+        catalog_path=work_dir / CATALOG_FILENAME,
+        blob_root=work_dir / "pdf_blobs",
+        docling_json_root=work_dir / "docling_json",
+    )
+    service = FundReadingService()
+
+    def handler(
+        document_id: str,
+        fund_code: object,
+        requested_years: object,
+        annual_report_documents: object,
+        share_class: object,
+    ) -> AggregateMultiYearAnnualPerformanceResult:
+        try:
+            if not isinstance(requested_years, (list, tuple)):
+                return AggregateMultiYearAnnualPerformanceResult(
+                    series=(),
+                    failure=ToolFailure(
+                        code=FailureCode.UNAVAILABLE,
+                        message="multi-year annual performance 请求年度不合法",
+                    ),
+                )
+            years = tuple(sorted(int(y) for y in requested_years))
+            matching_docs = _collect_matching_docs(work_dir, str(fund_code), years)
+            if not matching_docs:
+                return AggregateMultiYearAnnualPerformanceResult(
+                    series=(),
+                    failure=ToolFailure(
+                        code=FailureCode.NOT_FOUND,
+                        message=f"catalog 中匹配 {fund_code} 的年报不足 3 年",
+                    ),
+                )
+            return service.aggregate_multi_year_annual_performance(
+                AggregateMultiYearAnnualPerformanceRequest(
+                    fund_code=str(fund_code),
+                    requested_years=years,
+                    annual_report_documents=tuple(matching_docs),
+                    work_dir=work_dir,
+                    share_class=str(share_class) if share_class else None,
+                )
+            )
+        except Exception:
+            return AggregateMultiYearAnnualPerformanceResult(
+                series=(),
+                failure=ToolFailure(code=FailureCode.UNAVAILABLE, message="多年度业绩聚合暂不可用"),
+            )
+
+    return handler
 
 
 def _run_read_command(args: argparse.Namespace, *, stdout: TextIO, stderr: TextIO) -> int:
@@ -1072,8 +1139,22 @@ def _run_interactive_command(
 
     # 2. 选择年份
     default_year = resolution.available_years[-1]
-    year_str = input(f"请选择年份 [{default_year}]: ").strip()
-    selected_year = int(year_str) if year_str.isdigit() else default_year
+    year_arg = getattr(args, "year", None)
+    if year_arg is not None:
+        if year_arg not in resolution.available_years:
+            print(
+                f"年份 {year_arg} 不在可用年份内（可用: {', '.join(str(y) for y in resolution.available_years)}）。",
+                file=stderr,
+            )
+            return CLASSIFIED_FAILURE_EXIT_CODE
+        selected_year = year_arg
+    elif not sys.stdin.isatty():
+        # 管道/重定向输入：不得调用 input() 消费首行命令
+        selected_year = default_year
+        print(f"非交互输入，默认选择 {default_year} 年", file=stdout)
+    else:
+        year_str = input(f"请选择年份 [{default_year}]: ").strip()
+        selected_year = int(year_str) if year_str.isdigit() else default_year
 
     selected_doc = next((d for d in resolution.documents if d.year == selected_year), None)
     if selected_doc is None:
@@ -1140,13 +1221,14 @@ def _run_interactive_command(
         prompt_composer=prompt_composer,
         scene_config=INTERACTIVE_SCENE_CONFIG,
         tool_service=_tool_svc,
+        aggregate_handler=_build_aggregate_handler(work_dir),
     )
 
     print(f"\n已选择 {selected_year} 年年报。输入问题开始对话，/help 查看命令，exit 退出。", file=stdout)
     print("提示：支持多轮对话，可以追问上一个问题的细节。输入 /help 查看命令。", file=stdout)
 
     verbose = getattr(args, "enable_tool_trace", False)
-    current_model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
+    current_model = resolve_provider_model(os.environ)
 
     while True:
         try:

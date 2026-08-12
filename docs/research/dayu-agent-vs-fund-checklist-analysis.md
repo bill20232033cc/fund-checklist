@@ -1,6 +1,9 @@
 # Dayu Agent vs Fund-Checklist 对比研究报告
 
 更新时间：2026-07-11
+
+> 状态：2026-07-11 研究快照，非设计真源。本文「缺失/差距」类现状断言多数已被后续 Phase 实现取代（interactive / ask / streaming / ContextBudget / regenerate / repair / fix / memory 注入 / 多 provider / PDF 渲染）；dayu 侧描述基于旧版 `noho/dayu-agent`（本地 2026-05-04 停更，`dayu-agent-r` 已于 2026-08-09 重构）。最新研究见 `docs/research/dayu-agent-r-research-20260810.md`；fc 当前状态以 `docs/implementation-control.md` 为准。
+
 研究范围：Agent 问答能力、分析报告生成能力、架构层面差距分析
 数据来源：dayu-agent GitHub 公开代码（v0.1.4）、fund-checklist 本地代码库
 
@@ -212,6 +215,8 @@ fund-checklist 的 AGENTS.md 明确定位为"基金年报阅读工具层"，不�
 
 ## 六、优先级修复建议
 
+> 过时提示（2026-08-11）：本节 Phase 1（LLM-driven Agent loop / 多轮对话）与 Phase 2（上下文治理 / Prompt Framework / streaming）已全部按后续裁决实现；Phase 3 的联网搜索已裁决不采用，单章重写已由 regenerate/repair/fix 实现。本节仅作历史路线记录，不再作为当前 roadmap。
+
 ### 6.1 Phase 1：Agent 核心能力补齐
 
 **目标**：让 fc 从"确定性检索工具"升级为"真正的 Agent"
@@ -262,6 +267,8 @@ fund-checklist 的 AGENTS.md 明确定位为"基金年报阅读工具层"，不�
 ---
 
 ## 七、关键结论
+
+> 过时提示（2026-08-11）：结论 2「fc 的 Agent 能力远落后于 Dayu」已被 Phase 5/7 实现推翻；结论 5「最值得追赶的能力」均已落地。仅结论 1/3/4（reading tools 对齐、信号评分与审计管道为 fc 独有优势、差距根因是定位差异）仍成立。
 
 1. **fc 的 reading tools 已经与 Dayu 对齐**：7 个文档读取工具 + Locator/Citation + 失败分类体系，这是 fc 的核心竞争力。
 

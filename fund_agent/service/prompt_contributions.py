@@ -69,6 +69,9 @@ def build_memory_contribution(
 ) -> str:
     """构建记忆贡献（episodic memory + pinned facts）。
 
+    注入内容显式标注「历史摘要，非当前证据」：历史摘要仅作上下文提示，
+    回答与引用必须来自本轮工具返回（interactive 方案 E 不变）。
+
     参数:
         episode_summaries_text: episode summary 的预格式化文本。
         pinned_facts: 已确认的事实列表。
@@ -78,7 +81,7 @@ def build_memory_contribution(
     """
     if not episode_summaries_text and not pinned_facts:
         return ""
-    parts = ["## 会话记忆"]
+    parts = ["## 会话记忆", "- 历史摘要，非当前证据；引用以本轮工具返回为准。"]
     if episode_summaries_text:
         parts.append(episode_summaries_text)
     if pinned_facts:

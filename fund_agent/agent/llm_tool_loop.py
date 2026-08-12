@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import asdict, dataclass, replace
@@ -30,6 +31,8 @@ from fund_agent.agent.context_budget import ContextBudgetState
 from fund_agent.agent.tool_result import ToolResult as ToolResultEnvelope, project_for_llm
 from fund_agent.fund.document_tools.service import FundDocumentToolService
 
+logger = logging.getLogger(__name__)
+
 ControlledToolOutput: TypeAlias = (
     "tuple[SearchResult, ...] | SectionContent | tuple[TableSummary, ...] | TableContent | ExcerptContent | AggregateMultiYearAnnualPerformanceResult"
 )
@@ -54,17 +57,21 @@ _EVIDENCE_TAIL_CHARS = 1024
 # interactive 空结果强制收敛：search 连续 2 次 0 命中后不再等待模型。
 _INTERACTIVE_EMPTY_SEARCH_CONVERGE_ANSWER = "未找到相关数据"
 _INTERACTIVE_EMPTY_SEARCH_CONVERGE_LIMIT = 2
-# interactive 终答质量：原文粘贴检测（连续重叠 ≥40 字符）与摘要截断（前 200 字）。
-_INTERACTIVE_FINAL_ANSWER_MAX_CHARS = 800
+# interactive 终答质量：原文粘贴检测（连续重叠 ≥40 字符）与 ≤200 字硬约束（含截断兜底）。
+_INTERACTIVE_FINAL_ANSWER_MAX_CHARS = 200
 _INTERACTIVE_FINAL_ANSWER_TARGET_CHARS = 200
 _INTERACTIVE_EVIDENCE_OVERLAP_MIN_CHARS = 40
-_INTERACTIVE_SUMMARY_TRUNCATE_NOTE = "\n\n（内容过长，已截断为前 200 字摘要）"
+_INTERACTIVE_SUMMARY_TRUNCATE_NOTE = "\n\n（内容过长，已截断为摘要）"
 _INTERACTIVE_QUALITY_RETRY_MESSAGE = (
     "你的上一条回答粘贴了工具返回原文或超过 200 字，"
     "请用自己的话概括年报事实，首次回答不超过 200 字。"
 )
 _TOOL_NOT_ALLOWED_MESSAGE = "LLM 工具调用不被允许"
 _TOOL_ARGUMENT_MESSAGE = "LLM 工具调用参数不完整"
+_FAILED_CALL_SHORT_CIRCUIT_MESSAGE = "该调用此前已失败，不再重跑；请修改参数后重试或直接收尾"
+_READ_TABLE_UNLISTED_MESSAGE = (
+    "table_ref 未在当前已列出章节的表格中，请先 list_tables 并复制返回的表号"
+)
 _NO_EVIDENCE_MESSAGE = "LLM 最终回答缺少受控工具证据"
 _MISSING_CITATION_MESSAGE = "LLM 最终回答缺少受控 citation"
 _UNSUPPORTED_FACT_MESSAGE = "LLM 最终回答包含未由工具结果支持的关键事实"
@@ -445,12 +452,15 @@ class LlmToolLoopRunner:
         max_steps: int = _MAX_LLM_STEPS,
         aggregate_handler: Callable[..., AggregateMultiYearAnnualPerformanceResult] | None = None,
         budget: ContextBudgetState | None = None,
+        failed_call_keys: frozenset[tuple] | None = None,
     ) -> None:
         """初始化受控 LLM tool loop runner。
 
         参数:
             aggregate_handler: 可选回调，签名 (document_id, fund_code, requested_years,
                 annual_report_documents, share_class)；document_id 由 runner 用 expected 注入。
+            failed_call_keys: 跨轮已失败调用去重键集合（构造期注入）；run/run_stream
+                可再按调用级覆盖。
         """
 
         self._tool_service = tool_service
@@ -458,6 +468,7 @@ class LlmToolLoopRunner:
         self._max_steps = max_steps
         self._aggregate_handler = aggregate_handler
         self._budget = budget
+        self._failed_call_keys = failed_call_keys
 
     def run(
         self,
@@ -466,15 +477,19 @@ class LlmToolLoopRunner:
         query: str,
         scene: str = "ask",
         candidate_queries: tuple[str, ...] | None = None,
+        failed_call_keys: frozenset[tuple] | None = None,
     ) -> AgentRunResult:
         """运行 injected LLM 工具调用循环。
 
         参数:
             document_id: public reading tools 使用的内容身份。
             query: 用户查询。
-            scene: 调用场景（"ask"/"interactive"/"generate"），影响 citation 校验策略。
+            scene: 调用场景（"ask"/"interactive"/"generate"），影响 citation 校验
+                策略与 read_table section 一致性校验（interactive 生效）。
             candidate_queries: 受控候选检索词（Service 层路由注入，interactive 场景
                 空结果时 runner 自动重试；runner 不 import service，只消费该列表）。
+            failed_call_keys: 跨轮已失败调用的去重键集合；LLM 请求命中的 key 直接
+                短路（不调用工具、不消耗真实调用），追加失败标记 ToolResult。
 
         返回:
             AgentRunResult；成功时 answer/citations 通过 evidence/citation 校验。
@@ -486,11 +501,24 @@ class LlmToolLoopRunner:
         trace: list[ToolTraceEntry] = []
         tool_results: list[ToolResult] = []
         seen_calls: dict[tuple, ToolResult] = {}
+        round_failed_keys: list[tuple] = []
+        effective_failed_call_keys = (
+            failed_call_keys if failed_call_keys is not None else self._failed_call_keys
+        )
         total_usage = TokenUsage()
         budget = self._budget
         empty_search_count = 0
         auto_retry_rounds_used = False
         used_search_queries: set[str] = set()
+        listed_table_refs: frozenset[str] = frozenset()
+
+        def _attach_failed_keys(result: AgentRunResult) -> AgentRunResult:
+            """把本轮失败调用 key 附加到 AgentRunResult（无失败时保持默认空元组）。"""
+
+            if not round_failed_keys:
+                return result
+            return replace(result, failed_call_keys=tuple(dict.fromkeys(round_failed_keys)))
+
         for i in range(self._max_steps):
             try:
                 chat_response = self._llm_client.next_step(
@@ -500,9 +528,14 @@ class LlmToolLoopRunner:
                     remaining_budget=self._max_steps - i,
                 )
             except LlmClientFailure as exc:
-                return _failed_result(tuple(trace), exc.code, exc.safe_message, token_usage=total_usage)
+                return _attach_failed_keys(
+                    _failed_result(tuple(trace), exc.code, exc.safe_message, token_usage=total_usage)
+                )
             except Exception:
-                return _failed_result(tuple(trace), FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE, token_usage=total_usage)
+                logger.warning("LLM tool loop run 未分类异常，fail-closed 为 unavailable", exc_info=True)
+                return _attach_failed_keys(
+                    _failed_result(tuple(trace), FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE, token_usage=total_usage)
+                )
 
             if chat_response.usage is not None:
                 total_usage += chat_response.usage
@@ -525,9 +558,21 @@ class LlmToolLoopRunner:
                         budget=budget,
                         scene=scene,
                     )
-                return final
+                return _attach_failed_keys(final)
             if isinstance(step, ToolCall):
                 call_key = _dedup_key(step)
+                if effective_failed_call_keys is not None and call_key in effective_failed_call_keys:
+                    # 跨轮失败短路：不调用工具、不消耗真实调用，追加失败标记回喂 LLM。
+                    short_circuit_result = _failure_tool_result(
+                        step,
+                        ToolFailure(
+                            code=FailureCode.UNAVAILABLE,
+                            message=_FAILED_CALL_SHORT_CIRCUIT_MESSAGE,
+                        ),
+                    )
+                    tool_results.append(short_circuit_result)
+                    seen_calls[call_key] = short_circuit_result
+                    continue
                 if call_key in seen_calls:
                     tool_results.append(seen_calls[call_key])
                     if scene == "interactive" and _coerce_tool_name(step.tool_name) is ToolName.SEARCH_DOCUMENT:
@@ -535,13 +580,22 @@ class LlmToolLoopRunner:
                         if _is_empty_search_result(cached):
                             empty_search_count += 1
                             if empty_search_count >= _INTERACTIVE_EMPTY_SEARCH_CONVERGE_LIMIT:
-                                return _empty_search_converged_result(tuple(trace), token_usage=total_usage)
+                                return _attach_failed_keys(
+                                    _empty_search_converged_result(tuple(trace), token_usage=total_usage)
+                                )
                         else:
                             empty_search_count = 0
                     continue
-                tool_result = self._invoke_tool_call(step, expected_document_id=document_id, trace=trace)
+                tool_result = self._invoke_tool_call(
+                    step,
+                    expected_document_id=document_id,
+                    trace=trace,
+                    scene=scene,
+                    listed_table_refs=listed_table_refs,
+                )
                 if isinstance(tool_result, ToolFailure):
                     # 失败回喂：转为带 failure 标记的 ToolResult，不终止整轮
+                    round_failed_keys.append(call_key)
                     tool_result = _failure_tool_result(step, tool_result)
                     tool_results.append(tool_result)
                     seen_calls[call_key] = tool_result
@@ -552,7 +606,10 @@ class LlmToolLoopRunner:
                 seen_calls[call_key] = tool_result
                 if budget is not None:
                     tool_results = _cap_tool_results(tool_results, budget)
+                if scene == "interactive" and _coerce_tool_name(step.tool_name) is ToolName.LIST_TABLES:
+                    listed_table_refs |= _listed_table_refs(tool_result)
                 if scene == "interactive" and _coerce_tool_name(step.tool_name) is ToolName.SEARCH_DOCUMENT:
+                    listed_table_refs |= _search_hit_table_refs(tool_result)
                     search_query = step.query or ""
                     used_search_queries.add(search_query)
                     if _is_empty_search_result(tool_result):
@@ -577,7 +634,10 @@ class LlmToolLoopRunner:
                                     auto_call, expected_document_id=document_id, trace=trace
                                 )
                                 if isinstance(auto_result, ToolFailure):
+                                    round_failed_keys.append(auto_key)
                                     auto_result = _failure_tool_result(auto_call, auto_result)
+                                else:
+                                    listed_table_refs |= _search_hit_table_refs(auto_result)
                                 tool_results.append(auto_result)
                                 seen_calls[auto_key] = auto_result
                                 if budget is not None:
@@ -589,13 +649,30 @@ class LlmToolLoopRunner:
                                 else:
                                     empty_search_count = 0
                         if empty_search_count >= _INTERACTIVE_EMPTY_SEARCH_CONVERGE_LIMIT:
-                            return _empty_search_converged_result(tuple(trace), token_usage=total_usage)
+                            return _attach_failed_keys(
+                                _empty_search_converged_result(tuple(trace), token_usage=total_usage)
+                            )
                     else:
                         empty_search_count = 0
                 continue
-            return _failed_result(tuple(trace), FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE, token_usage=total_usage)
+            return _attach_failed_keys(
+                _failed_result(tuple(trace), FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE, token_usage=total_usage)
+            )
 
-        return _force_answer_from_evidence(tuple(trace), tuple(tool_results), token_usage=total_usage)
+        # max_steps 耗尽：用已收集证据拼成回答（降级）；interactive 与正常 FinalAnswer 同走终答守卫。
+        force_result = _force_answer_from_evidence(tuple(trace), tuple(tool_results), token_usage=total_usage)
+        if scene == "interactive":
+            force_result = self._apply_interactive_final_guards(
+                final=force_result,
+                document_id=document_id,
+                query=query,
+                tool_results=tool_results,
+                trace=trace,
+                total_usage=total_usage,
+                budget=budget,
+                scene=scene,
+            )
+        return _attach_failed_keys(force_result)
 
     def run_stream(
         self,
@@ -604,12 +681,16 @@ class LlmToolLoopRunner:
         query: str,
         scene: str = "ask",
         candidate_queries: tuple[str, ...] | None = None,
+        failed_call_keys: frozenset[tuple] | None = None,
     ) -> Iterator[StreamEvent]:
         """运行 LLM 工具调用循环并产出 StreamEvent 流。
 
         tool call/result → TOOL_EVENT
         final answer → CONTENT_DELTA + METADATA + DONE
         失败 → ERROR
+
+        scene 为 interactive 时，read_table 的 table_ref 必须属于本轮
+        list_tables 成功结果收集的表格集合（Fix C section 一致性校验）。
         """
 
         seq = 0
@@ -624,11 +705,15 @@ class LlmToolLoopRunner:
         trace: list[ToolTraceEntry] = []
         tool_results: list[ToolResult] = []
         seen_calls: dict[tuple, ToolResult] = {}
+        effective_failed_call_keys = (
+            failed_call_keys if failed_call_keys is not None else self._failed_call_keys
+        )
         total_usage = TokenUsage()
         budget = self._budget
         empty_search_count = 0
         auto_retry_rounds_used = False
         used_search_queries: set[str] = set()
+        listed_table_refs: frozenset[str] = frozenset()
         for i in range(self._max_steps):
             try:
                 chat_response = self._llm_client.next_step(
@@ -645,6 +730,7 @@ class LlmToolLoopRunner:
                 )
                 return
             except Exception:
+                logger.warning("LLM tool loop run_stream 未分类异常，fail-closed 为 unavailable", exc_info=True)
                 yield StreamEvent(
                     type=StreamEventType.ERROR,
                     payload={"code": FailureCode.UNAVAILABLE.value, "message": _UNAVAILABLE_MESSAGE},
@@ -709,6 +795,29 @@ class LlmToolLoopRunner:
 
             if isinstance(step, ToolCall):
                 call_key = _dedup_key(step)
+                if effective_failed_call_keys is not None and call_key in effective_failed_call_keys:
+                    # 跨轮失败短路：不调用工具、不消耗真实调用，追加失败标记回喂 LLM。
+                    short_circuit_result = _failure_tool_result(
+                        step,
+                        ToolFailure(
+                            code=FailureCode.UNAVAILABLE,
+                            message=_FAILED_CALL_SHORT_CIRCUIT_MESSAGE,
+                        ),
+                    )
+                    tool_results.append(short_circuit_result)
+                    seen_calls[call_key] = short_circuit_result
+                    yield StreamEvent(
+                        type=StreamEventType.TOOL_EVENT,
+                        payload={
+                            "phase": "result",
+                            "tool_name": str(short_circuit_result.tool_name),
+                            "failure_code": FailureCode.UNAVAILABLE.value,
+                            "message": _FAILED_CALL_SHORT_CIRCUIT_MESSAGE,
+                        },
+                        sequence=seq,
+                    )
+                    seq += 1
+                    continue
                 if call_key in seen_calls:
                     tool_results.append(seen_calls[call_key])
                     if scene == "interactive" and _coerce_tool_name(step.tool_name) is ToolName.SEARCH_DOCUMENT:
@@ -727,7 +836,13 @@ class LlmToolLoopRunner:
                     sequence=seq,
                 )
                 seq += 1
-                tool_result = self._invoke_tool_call(step, expected_document_id=document_id, trace=trace)
+                tool_result = self._invoke_tool_call(
+                    step,
+                    expected_document_id=document_id,
+                    trace=trace,
+                    scene=scene,
+                    listed_table_refs=listed_table_refs,
+                )
                 if isinstance(tool_result, ToolFailure):
                     # 失败回喂：发 TOOL_EVENT(result) 并继续循环，不在此处发 ERROR
                     tool_result = _failure_tool_result(step, tool_result)
@@ -751,6 +866,8 @@ class LlmToolLoopRunner:
                 seen_calls[call_key] = tool_result
                 if budget is not None:
                     tool_results = _cap_tool_results(tool_results, budget)
+                if scene == "interactive" and _coerce_tool_name(step.tool_name) is ToolName.LIST_TABLES:
+                    listed_table_refs |= _listed_table_refs(tool_result)
                 yield StreamEvent(
                     type=StreamEventType.TOOL_EVENT,
                     payload={
@@ -763,6 +880,7 @@ class LlmToolLoopRunner:
                 )
                 seq += 1
                 if scene == "interactive" and _coerce_tool_name(step.tool_name) is ToolName.SEARCH_DOCUMENT:
+                    listed_table_refs |= _search_hit_table_refs(tool_result)
                     search_query = step.query or ""
                     used_search_queries.add(search_query)
                     if _is_empty_search_result(tool_result):
@@ -794,6 +912,8 @@ class LlmToolLoopRunner:
                                 )
                                 if isinstance(auto_result, ToolFailure):
                                     auto_result = _failure_tool_result(auto_call, auto_result)
+                                else:
+                                    listed_table_refs |= _search_hit_table_refs(auto_result)
                                 tool_results.append(auto_result)
                                 seen_calls[auto_key] = auto_result
                                 if budget is not None:
@@ -841,37 +961,47 @@ class LlmToolLoopRunner:
             )
             return
 
-        # max_steps 耗尽：用已收集证据拼成回答（降级）
+        # max_steps 耗尽：用已收集证据拼成回答（降级）；interactive 与正常 FinalAnswer 同走终答守卫。
         force_result = _force_answer_from_evidence(tuple(trace), tuple(tool_results), token_usage=total_usage)
+        if scene == "interactive":
+            force_result = self._apply_interactive_final_guards(
+                final=force_result,
+                document_id=document_id,
+                query=query,
+                tool_results=tool_results,
+                trace=trace,
+                total_usage=total_usage,
+                budget=budget,
+                scene=scene,
+            )
         if force_result.failure:
             yield StreamEvent(
                 type=StreamEventType.ERROR,
                 payload={"code": force_result.failure.code.value, "message": force_result.failure.message},
                 sequence=seq,
             )
-        else:
-            for delta in force_result.answer:
-                seq += 1
-                yield StreamEvent(
-                    type=StreamEventType.CONTENT_DELTA,
-                    payload={"delta": delta},
-                    sequence=seq,
-                )
-            seq += 1
-            yield StreamEvent(
-                type=StreamEventType.METADATA,
-                payload={
-                    "citations": [asdict(c) for c in force_result.citations],
-                    "tool_trace": [asdict(t) for t in force_result.tool_trace],
-                },
-                sequence=seq,
-            )
-            seq += 1
-            yield StreamEvent(
-                type=StreamEventType.DONE,
-                payload={},
-                sequence=seq,
-            )
+            return
+        seq += 1
+        yield StreamEvent(
+            type=StreamEventType.CONTENT_DELTA,
+            payload=force_result.answer,
+            sequence=seq,
+        )
+        seq += 1
+        yield StreamEvent(
+            type=StreamEventType.METADATA,
+            payload={
+                "citations": [asdict(c) for c in force_result.citations],
+                "tool_trace": [asdict(t) for t in force_result.tool_trace],
+            },
+            sequence=seq,
+        )
+        seq += 1
+        yield StreamEvent(
+            type=StreamEventType.DONE,
+            payload={},
+            sequence=seq,
+        )
 
     def _retry_final_answer_advice_guard(
         self,
@@ -919,6 +1049,7 @@ class LlmToolLoopRunner:
                 remaining_budget=max(0, self._max_steps - 1),
             )
         except Exception:
+            logger.warning("投资建议重答未分类异常，回退原始结果", exc_info=True)
             return original
         if chat_response.usage is not None:
             total_usage += chat_response.usage
@@ -954,8 +1085,8 @@ class LlmToolLoopRunner:
         """interactive 终答守卫：投资建议有界重答 + 原文粘贴/超长有界重答 + 摘要截断。
 
         投资建议守卫失败时最多重试 1 次（既有语义，重试仍失败则 fail-closed）；
-        原文粘贴（answer 与任一 evidence 连续重叠 ≥40 字符）或 answer >800 字时
-        最多重答 1 次，重答后仍超标则截断为前 200 字摘要格式。
+        原文粘贴（answer 与任一 evidence 连续重叠 ≥40 字符）或 answer >200 字时
+        最多重答 1 次，重答后仍超标则截断为摘要格式（含省略说明 ≤200 字）。
 
         参数:
             final: 已过 _final_result 的终答结果（interactive 方案 E，无证据校验）。
@@ -1043,6 +1174,7 @@ class LlmToolLoopRunner:
                 remaining_budget=max(0, self._max_steps - 1),
             )
         except Exception:
+            logger.warning("终答质量重答未分类异常，fail-closed 为 unavailable", exc_info=True)
             return _failed_result(tuple(trace), FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE, token_usage=total_usage)
         if chat_response.usage is not None:
             total_usage += chat_response.usage
@@ -1098,8 +1230,26 @@ class LlmToolLoopRunner:
         *,
         expected_document_id: str,
         trace: list[ToolTraceEntry],
+        scene: str | None = None,
+        listed_table_refs: frozenset[str] | None = None,
     ) -> ToolResult | ToolFailure:
-        """校验并执行单次 LLM 工具请求。"""
+        """校验并执行单次 LLM 工具请求。
+
+        参数:
+            call: LLM 请求的工具调用。
+            expected_document_id: 本轮 run 的内容身份；缺失时补全、不匹配时拒绝。
+            trace: 工具调用轨迹（调用方持有，追加本次调用结果）。
+            scene: 调用场景；interactive 时对 read_table 做 section 一致性校验。
+            listed_table_refs: 本轮 list_tables 成功结果收集的 table_ref 集合；
+                interactive 下 read_table 的 table_ref 必须属于该集合，否则
+                not_found 拒绝（防止 LLM 猜测任意表号）。
+
+        返回:
+            成功工具结果或可分类 ToolFailure。
+
+        异常:
+            不向调用方抛出业务异常；失败返回 ToolFailure。
+        """
 
         from fund_agent.service.extraction import AggregateMultiYearAnnualPerformanceResult
 
@@ -1115,6 +1265,18 @@ class LlmToolLoopRunner:
         if not _document_id_matches(call.document_id, expected_document_id):
             trace.append(_trace_entry(tool_name, trace_arguments, "failure", FailureCode.UNAVAILABLE))
             return ToolFailure(code=FailureCode.UNAVAILABLE, message=_TOOL_NOT_ALLOWED_MESSAGE)
+
+        # Fix C：read_table section 一致性校验（仅 interactive，控制 blast radius）。
+        # table_ref 必须来自本轮 list_tables 成功结果；未先 list_tables 的锚点表
+        # 同样被拒（「table_ref 一律复制不猜测」），回喂后 LLM 会先 list_tables。
+        if (
+            scene == "interactive"
+            and tool_name is ToolName.READ_TABLE
+            and call.table_ref is not None
+            and call.table_ref not in (listed_table_refs or frozenset())
+        ):
+            trace.append(_trace_entry(tool_name, trace_arguments, "failure", FailureCode.NOT_FOUND))
+            return ToolFailure(code=FailureCode.NOT_FOUND, message=_READ_TABLE_UNLISTED_MESSAGE)
 
         result = self._call_allowed_tool(tool_name, call, aggregate_handler=self._aggregate_handler)
         if isinstance(result, ToolFailure):
@@ -1184,6 +1346,49 @@ class LlmToolLoopRunner:
             return self._tool_service.get_excerpt(call.document_id, call.locator, max_chars=call.max_chars)
         return ToolFailure(code=FailureCode.UNAVAILABLE, message=_TOOL_NOT_ALLOWED_MESSAGE)
 
+
+
+def _listed_table_refs(result: ToolResult) -> frozenset[str]:
+    """从 list_tables 成功结果中收集 table_ref 集合（read_table section 一致性校验）。
+
+    参数:
+        result: list_tables 工具成功结果（result 为 TableSummary 元组）。
+
+    返回:
+        成功结果的 table_ref frozenset；非 list_tables 结果返回空集合。
+    """
+
+    output = result.result
+    if not isinstance(output, tuple):
+        return frozenset()
+    return frozenset(
+        summary.table_ref
+        for summary in output
+        if isinstance(summary, TableSummary) and summary.table_ref
+    )
+
+
+def _search_hit_table_refs(result: ToolResult) -> frozenset[str]:
+    """从 search_document 成功结果中收集命中表的 table_ref（read_table section 一致性校验）。
+
+    search_document 的 SearchResult 也携带合法 table_ref（table-backed first hit），
+    与 list_tables 结果共用同一放行集合，避免误伤 search -> read_table 合法流。
+
+    参数:
+        result: search_document 工具成功结果（result 为 SearchResult 元组）。
+
+    返回:
+        成功结果中命中表的 table_ref frozenset；非 search 结果返回空集合。
+    """
+
+    output = result.result
+    if not isinstance(output, tuple):
+        return frozenset()
+    return frozenset(
+        hit.table_ref
+        for hit in output
+        if isinstance(hit, SearchResult) and hit.table_ref
+    )
 
 
 def _is_empty_search_result(result: ToolResult) -> bool:
@@ -1257,7 +1462,7 @@ def _violates_final_answer_quality(
     answer: str,
     tool_results: list[ToolResult] | tuple[ToolResult, ...],
 ) -> bool:
-    """interactive 终答质量违规：answer >800 字或与任一 evidence 连续重叠 ≥40 字符。"""
+    """interactive 终答质量违规：answer >200 字或与任一 evidence 连续重叠 ≥40 字符。"""
 
     if len(answer) > _INTERACTIVE_FINAL_ANSWER_MAX_CHARS:
         return True
@@ -1268,11 +1473,15 @@ def _violates_final_answer_quality(
 
 
 def _truncate_final_answer_summary(answer: str) -> str:
-    """终答仍超标时截断为摘要格式（前 200 字 + 省略说明）。"""
+    """终答仍超标时截断为摘要格式，保证含省略说明 ≤200 字。
+
+    正文截断长度为 200-len(note)，note 文案不包含具体字数（避免与截断长度不一致）。
+    """
 
     if len(answer) <= _INTERACTIVE_FINAL_ANSWER_TARGET_CHARS:
         return answer
-    return answer[:_INTERACTIVE_FINAL_ANSWER_TARGET_CHARS] + _INTERACTIVE_SUMMARY_TRUNCATE_NOTE
+    body_limit = _INTERACTIVE_FINAL_ANSWER_TARGET_CHARS - len(_INTERACTIVE_SUMMARY_TRUNCATE_NOTE)
+    return answer[:body_limit] + _INTERACTIVE_SUMMARY_TRUNCATE_NOTE
 
 
 def _optional_envelope_str(payload: dict, key: str) -> str | None:
@@ -1587,8 +1796,61 @@ def _make_hashable(value: object) -> object:
     return value
 
 
+_CJK_PUNCTUATION_REMOVE = str.maketrans("", "", "，。、；：？！（）［］【】《》“”‘’—…·　")
+
+
+def _normalize_query_text(query: str) -> str:
+    """归一化检索词（去重键单一真源，可单测）。
+
+    去除全部空白（含全角空格）与 CJK 标点，使语义相近的不同
+    措辞（如「持有本基金」「持有本基金？」）映射到同一去重键。
+    """
+
+    return "".join(query.split()).translate(_CJK_PUNCTUATION_REMOVE)
+
+
 def _dedup_key(call: ToolCall) -> tuple:
-    """构造 tool call 去重键，用于检测 LLM 重复调用相同工具+参数。"""
+    """构造 tool call 去重键（轮内 seen_calls 与跨轮 failed_call_keys 共用）。
+
+    工具级归一化（D4-二）：
+    - search_document → (tool, document_id, 归一化 query)；
+    - read_section → (tool, document_id, section_ref, max_chars)；
+    - read_table → (tool, document_id, table_ref, max_rows)；
+    - get_excerpt → (tool, document_id, locator_key)；
+    - aggregate_multi_year_annual_performance → (tool, fund_code, years, share_class)；
+    其余工具保留全参数比较（兼容既有轮内去重语义）。
+    """
+
+    tool_name = _coerce_tool_name(call.tool_name)
+    if tool_name is ToolName.SEARCH_DOCUMENT:
+        return (str(tool_name), call.document_id, _normalize_query_text(call.query or ""))
+    if tool_name is ToolName.READ_SECTION:
+        return (str(tool_name), call.document_id, call.section_ref, call.max_chars)
+    if tool_name is ToolName.READ_TABLE:
+        return (str(tool_name), call.document_id, call.table_ref, call.max_rows)
+    if tool_name is ToolName.GET_EXCERPT:
+        locator_key = None
+        if call.locator is not None:
+            locator_key = (
+                call.locator.locator_kind.value,
+                call.locator.section_ref,
+                call.locator.table_ref,
+                call.locator.page_no,
+            )
+        return (str(tool_name), call.document_id, locator_key)
+    if tool_name is ToolName.AGGREGATE_MULTI_YEAR_ANNUAL_PERFORMANCE:
+        extra = call.extra or {}
+        requested_years = extra.get("requested_years")
+        if isinstance(requested_years, (list, tuple)):
+            years_key = tuple(str(year) for year in sorted(requested_years, key=str))
+        else:
+            years_key = (str(requested_years),)
+        return (
+            str(tool_name),
+            extra.get("fund_code"),
+            years_key,
+            extra.get("share_class") or "",
+        )
     locator_key = None
     if call.locator is not None:
         locator_key = (

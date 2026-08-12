@@ -84,6 +84,18 @@ class TestBuildMemoryContribution:
         assert "事实A" in result
         assert "已确认事实" in result
 
+    def test_historical_marker_present(self):
+        """注入内容显式标注「历史摘要，非当前证据」（P1 硬口径）。"""
+        result = build_memory_contribution(
+            episode_summaries_text="## 上一节\n讨论了持仓集中度。",
+            pinned_facts=("前十大持仓占净值60%",),
+        )
+        assert "历史摘要，非当前证据" in result
+
+    def test_empty_still_returns_empty_string(self):
+        """两参皆空仍返回空字符串（含标注也不注入）。"""
+        assert build_memory_contribution() == ""
+
 
 class TestSelectContributions:
     """select_contributions() 测试。"""

@@ -1,6 +1,9 @@
 # 刘成岗近两年 dayu agent 与 AI coding 开发路线图
 
 生成日期：2026-06-14  
+
+> 状态：2026-06-14 研究快照，非设计真源。方法论部分（先模板后 Agent、先降噪后推理、多 Agent 分工）不过时；但「继续向 Web UI / 微信入口 / durable memory 扩展」的收尾判断与 `dayu-agent-r`（2026-08-09 重构）现状不符（微信/Web 入口已移除、Conversation Memory 已实现）。最新研究见 `docs/research/dayu-agent-r-research-20260810.md`；fc 当前状态以 `docs/implementation-control.md` 为准。
+
 研究对象：雪球用户刘成岗（`https://xueqiu.com/u/6623660105`）近两年公开可检索发帖与回复  
 时间口径：2024-06-14 至 2026-06-14；当前可稳定检索到的关键材料主要集中在 2026-01 至 2026-05。  
 

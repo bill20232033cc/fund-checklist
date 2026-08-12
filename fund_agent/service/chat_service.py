@@ -14,7 +14,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from fund_agent.agent.deepseek_llm import DeepSeekLlmClient
+from fund_agent.agent.deepseek_llm import (
+    DeepSeekLlmClient,
+    provider_model_env_name,
+    resolve_provider,
+    translate_model_for_provider,
+)
 from fund_agent.agent.llm_tool_loop import (
     ChatResponse,
     FinalAnswer,
@@ -30,8 +35,10 @@ from fund_agent.fund.document_tools.constants import ToolName
 from fund_agent.fund.document_tools.service import FundDocumentToolService
 
 from .chat_contract import ChatTurnContract
-from .extraction import _route_plan_for_query
+from .extraction import _resolve_anchor_table_ref, _route_plan_for_query
+from .models import AggregateMultiYearAnnualPerformanceResult
 from .prompt_composer import PromptComposer
+from .prompt_contributions import build_memory_contribution
 from .session_models import EpisodeSummary, PinnedState, Session, ToolCallSummary, Turn
 from fund_agent.host.session_store import SessionStore
 
@@ -39,6 +46,19 @@ RunnerFactory = Callable[
     [LlmClientProtocol, FundDocumentToolService],
     LlmToolLoopRunner,
 ]  # 实现可额外接收 max_steps 关键字参数
+
+# D1/D2 硬口径：受控表锚点只注入这几类高误命中 profile，其余保持 LLM 自由选表。
+# Fix C（Mimo 根因 review 用户已批准）：performance_returns 加入锚点范围，
+# 锚点表号由 Service 层组合 public tools 解析（3.2.1 表头签名，A 类优先）。
+_ANCHOR_PROFILE_NAMES = ("manager_holdings", "holdings_top10", "performance_returns")
+
+# P1 记忆注入硬口径：最近 <=3 条 EpisodeSummary、单条 fact/question <=100 token、
+# 总长 <=500 token（超限丢最旧），超长单条截断加省略号（Mimo finding 003）。
+_MEMORY_MAX_EPISODES = 3
+_MEMORY_MAX_TOKENS = 500
+_MEMORY_ITEM_MAX_TOKENS = 100
+_MEMORY_MAX_CONFIRMED_FACTS = 5
+_MEMORY_MAX_OPEN_QUESTIONS = 3
 
 
 @dataclass(frozen=True)
@@ -131,13 +151,40 @@ def _default_runner_factory(
     llm_client: LlmClientProtocol,
     tool_service: FundDocumentToolService,
     max_steps: int = 8,
+    aggregate_handler: Callable[..., AggregateMultiYearAnnualPerformanceResult] | None = None,
+    failed_call_keys: frozenset[tuple] | None = None,
 ) -> LlmToolLoopRunner:
     """默认 runner 工厂。"""
     return LlmToolLoopRunner(
         llm_client=llm_client,
         tool_service=tool_service,
         max_steps=max_steps,
+        aggregate_handler=aggregate_handler,
+        failed_call_keys=failed_call_keys,
     )
+
+
+_MAX_FAILED_TOOL_CALL_KEYS = 50
+
+
+def _merge_failed_tool_call_keys(
+    current: tuple[tuple, ...],
+    round_keys: tuple[tuple, ...],
+    *,
+    limit: int = _MAX_FAILED_TOOL_CALL_KEYS,
+) -> tuple[tuple, ...]:
+    """合并跨轮失败调用去重键（去重 + 上限，超限丢最旧）。"""
+
+    merged: list[tuple] = []
+    seen: set[tuple] = set()
+    for key in (*current, *round_keys):
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(key)
+    if len(merged) > limit:
+        merged = merged[-limit:]
+    return tuple(merged)
 
 
 class ChatService:
@@ -148,6 +195,8 @@ class ChatService:
         prompt_composer: Prompt 模板渲染器。
         scene_config: Scene 配置（fragments + context_slots）。
         runner_factory: 可选 runner 工厂（测试注入）。
+        aggregate_handler: 可选 aggregate_multi_year_annual_performance 回调；
+            由 factory 透传给 LlmToolLoopRunner，None 时保持既有 unavailable 行为。
         enable_episode_summary: 是否启用 Episode Summary 异步压缩。
         compaction_trigger_turns: 触发压缩的最小轮数（默认 10）。
         compaction_tail_preserve_turns: 压缩时保留的最近轮数（默认 3）。
@@ -167,6 +216,7 @@ class ChatService:
         compaction_tail_preserve_turns: int = 3,
         compaction_model_context_window: int = 65536,
         history_max_tokens: int = 2000,
+        aggregate_handler: Callable[..., AggregateMultiYearAnnualPerformanceResult] | None = None,
     ) -> None:
         self._session_store = session_store
         self._prompt_composer = prompt_composer
@@ -178,6 +228,7 @@ class ChatService:
         self._compaction_tail_preserve_turns = compaction_tail_preserve_turns
         self._compaction_model_context_window = compaction_model_context_window
         self._history_max_tokens = history_max_tokens
+        self._aggregate_handler = aggregate_handler
         self._cumulative_tokens = 0
         self._compacting: set[str] = set()  # 正在压缩的 session_id 集合
         self._injected_compaction_result: dict | None = None  # 测试用
@@ -227,21 +278,27 @@ class ChatService:
         # 4. 运行 agent loop（或使用注入结果）
         if agent_result is None:
             if llm_client is None:
-                # 从 contract 或 scene config 取 model 配置
-                model_name = os.environ.get("DEEPSEEK_MODEL", "")
+                # 从 contract 或 scene config 取 model 配置（provider 感知）
+                provider = resolve_provider(os.environ)
+                model_env_name = provider_model_env_name(provider)
                 temperature = 0.7
                 if hasattr(self._scene_config, "model"):
                     temperature = self._scene_config.model.temperature
-                if contract is not None and contract.model_name:
-                    model_name = contract.model_name
-                elif hasattr(self._scene_config, "model"):
-                    model_name = self._scene_config.model.default_name
+                # 解析顺序：provider 对应 MODEL env 非空优先；
+                # 否则 scene/contract 模型名经翻译后写入 provider 对应 MODEL env。
+                model_name = os.environ.get(model_env_name, "").strip()
+                if not model_name:
+                    if contract is not None and contract.model_name:
+                        model_name = contract.model_name
+                    elif hasattr(self._scene_config, "model"):
+                        model_name = self._scene_config.model.default_name
+                    model_name = translate_model_for_provider(model_name, provider)
                 # 通过环境变量临时覆盖 model（DeepSeekLlmClient 内部读取环境变量）
                 llm_env: dict[str, str] | None = None
                 if model_name:
                     import os as _os
                     llm_env = dict(_os.environ)
-                    llm_env["DEEPSEEK_MODEL"] = model_name
+                    llm_env[model_env_name] = model_name
                 llm_client = DeepSeekLlmClient(
                     system_prompt=composed.system_message,
                     env=llm_env,
@@ -253,7 +310,13 @@ class ChatService:
                     max_steps = contract.max_iterations
                 elif hasattr(self._scene_config, "runtime"):
                     max_steps = self._scene_config.runtime.max_iterations
-                runner = self._runner_factory(llm_client, self._tool_service or _empty_tool_service(), max_steps=max_steps)
+                runner = self._runner_factory(
+                    llm_client,
+                    self._tool_service or _empty_tool_service(),
+                    max_steps=max_steps,
+                    aggregate_handler=self._aggregate_handler,
+                    failed_call_keys=frozenset(session.failed_tool_call_keys),
+                )
                 # 受控检索路由在 Service 层（候选词随 scene context 注入），
                 # 收敛执行在 Agent 层：runner 不 import service，只接收候选词。
                 route_plan = _route_plan_for_query(user_text)
@@ -268,6 +331,11 @@ class ChatService:
             except Exception:
                 return ChatTurnResponse(answer="LLM 服务暂不可用，请稍后重试。")
 
+        # 4.5 合并本轮失败调用 key（跨轮失败短路的数据基础，上限 50 条）
+        merged_failed_keys = _merge_failed_tool_call_keys(
+            session.failed_tool_call_keys, agent_result.failed_call_keys
+        )
+
         # 5. 失败轮：成对落盘（user + assistant），保留 tool_calls / tool_trace
         if agent_result.failure is not None:
             failure_message = f"LLM 处理失败：{agent_result.failure.message}"
@@ -279,6 +347,7 @@ class ChatService:
                 tool_calls=_tool_call_summaries(agent_result),
             )
             session = session.add_turn(user_turn).add_turn(assistant_turn)
+            session = session.with_failed_tool_call_keys(merged_failed_keys)
             self._session_store.save(session)
             return ChatTurnResponse(
                 answer=failure_message,
@@ -317,6 +386,7 @@ class ChatService:
             blocked_terms=blocked_terms,
         )
         session = session.add_turn(user_turn).add_turn(assistant_turn)
+        session = session.with_failed_tool_call_keys(merged_failed_keys)
         self._session_store.save(session)
 
         # 8. 检查 Episode Summary 触发条件
@@ -541,6 +611,114 @@ class ChatService:
         other_len = len(text) - cn_chars
         return int(cn_chars * 1.5 + other_len / 4)
 
+    def _truncate_to_token_bound(self, text: str, max_tokens: int) -> str:
+        """按 _estimate_token_count 口径截断文本到 token 上界，并追加省略号。
+
+        参数:
+            text: 待截断文本。
+            max_tokens: token 上界。
+
+        返回:
+            截断后文本；未超限时原样返回。
+        """
+        if not text or self._estimate_token_count(text) <= max_tokens:
+            return text
+        budget = max(max_tokens - 1, 0)  # 为省略号预留余量
+        total = 0.0
+        cutoff = 0
+        for i, ch in enumerate(text):
+            token = 1.5 if "一" <= ch <= "鿿" else 0.25
+            if total + token > budget:
+                break
+            total += token
+            cutoff = i + 1
+        return text[:cutoff] + "…"
+
+    def _format_episode_block(self, episode: EpisodeSummary) -> str:
+        """格式化单条 EpisodeSummary 为注入文本块。
+
+        每块最多包含 title / goal / confirmed_facts（<=5 条）/
+        open_questions（<=3 条）；单条 fact/question 超 100 token
+        截断加省略号（Mimo finding 003）。
+
+        参数:
+            episode: 待格式化的 EpisodeSummary。
+
+        返回:
+            Markdown 格式文本块；字段全空时返回空字符串。
+        """
+        parts: list[str] = []
+        if episode.title:
+            parts.append(f"- 主题: {episode.title}")
+        if episode.goal:
+            parts.append(f"- 目标: {episode.goal}")
+        facts = [
+            self._truncate_to_token_bound(f, _MEMORY_ITEM_MAX_TOKENS)
+            for f in episode.confirmed_facts[:_MEMORY_MAX_CONFIRMED_FACTS]
+            if f.strip()
+        ]
+        if facts:
+            parts.append("- 已确认事实:")
+            parts.extend(f"  - {f}" for f in facts)
+        questions = [
+            self._truncate_to_token_bound(q, _MEMORY_ITEM_MAX_TOKENS)
+            for q in episode.open_questions[:_MEMORY_MAX_OPEN_QUESTIONS]
+            if q.strip()
+        ]
+        if questions:
+            parts.append("- 待解决问题:")
+            parts.extend(f"  - {q}" for q in questions)
+        return "\n".join(parts)
+
+    def _format_episode_summaries(self, session: Session) -> str:
+        """格式化最近 <=3 条 EpisodeSummary，总长 <=500 token。
+
+        复用 _estimate_token_count；超限先丢最旧，仅剩单条仍超限时
+        截断到上界保证 <=500。全部为空时返回空字符串（不产生 memory slot）。
+
+        参数:
+            session: 当前会话。
+
+        返回:
+            格式化后的历史摘要文本；无可注入内容时返回空字符串。
+        """
+        episodes = session.episode_summaries[-_MEMORY_MAX_EPISODES:]
+        blocks: list[str] = []
+        for ep in episodes:
+            block = self._format_episode_block(ep)
+            if block.strip():
+                blocks.append(block)
+        if not blocks:
+            return ""
+        while (
+            len(blocks) > 1
+            and self._estimate_token_count("\n\n".join(blocks)) > _MEMORY_MAX_TOKENS
+        ):
+            blocks.pop(0)
+        text = "\n\n".join(blocks)
+        if self._estimate_token_count(text) > _MEMORY_MAX_TOKENS:
+            text = self._truncate_to_token_bound(text, _MEMORY_MAX_TOKENS)
+        return text
+
+    def _pinned_facts(self, session: Session) -> tuple[str, ...]:
+        """从 pinned_state.user_constraints["confirmed_facts"] 读取已确认事实。
+
+        参数:
+            session: 当前会话。
+
+        返回:
+            非空已确认事实元组；缺失或为空时返回空元组（跳过注入）。
+        """
+        value = session.pinned_state.user_constraints.get("confirmed_facts")
+        if value is None:
+            return ()
+        if isinstance(value, str):
+            stripped = value.strip()
+            return (stripped,) if stripped else ()
+        if isinstance(value, (list, tuple)):
+            return tuple(str(f).strip() for f in value if str(f).strip())
+        return ()
+
     def _build_contributions(
         self,
         session: Session,
@@ -588,6 +766,15 @@ class ChatService:
             if isinstance(value, str) and value.strip():
                 contributions[key] = value
 
+        # memory contribution（P1：EpisodeSummary / PinnedState → system prompt。
+        # 历史摘要仅作上下文提示，非当前证据；引用以本轮工具返回为准。）
+        memory_text = build_memory_contribution(
+            episode_summaries_text=self._format_episode_summaries(session),
+            pinned_facts=self._pinned_facts(session),
+        )
+        if memory_text:
+            contributions["memory"] = memory_text
+
         # history contribution
         history_text = self._build_history_contribution(session)
         if history_text:
@@ -599,11 +786,30 @@ class ChatService:
             route_plan = _route_plan_for_query(user_query)
             if route_plan.profile_name is not None:
                 candidates = "、".join(route_plan.candidate_queries)
-                contributions["retrieval"] = (
-                    "## 受控候选检索词\n"
-                    f"- 已识别披露主题: {route_plan.profile_name}\n"
-                    f"- 请优先按顺序尝试以下候选检索词（命中即可，不要自行改写）: {candidates}"
-                )
+                retrieval_parts = [
+                    "## 受控候选检索词",
+                    f"- 已识别披露主题: {route_plan.profile_name}",
+                    f"- 请优先按顺序尝试以下候选检索词（命中即可，不要自行改写）: {candidates}",
+                ]
+                # 候选表锚点：锚点为 prompt 数据，由 Service 层组合 public tools
+                # 解析（runner 不 import service），解析失败 fail-open 不注入。
+                if (
+                    route_plan.profile_name in _ANCHOR_PROFILE_NAMES
+                    and route_plan.locator_contract is not None
+                    and self._tool_service is not None
+                ):
+                    anchor_table_ref = _resolve_anchor_table_ref(
+                        active_document_id,
+                        route_plan.locator_contract,
+                        self._tool_service,
+                    )
+                    if anchor_table_ref:
+                        anchor_title = "、".join(route_plan.locator_contract.anchor_title_family)
+                        retrieval_parts.append(
+                            f"- 候选表锚点: {anchor_table_ref}（{anchor_title}）"
+                            "——请先 list_tables 确认该表号在列，再 read_table 该表，并以该表返回内容作为引用依据（勿自行猜测表号）"
+                        )
+                contributions["retrieval"] = "\n".join(retrieval_parts)
 
         return contributions
 

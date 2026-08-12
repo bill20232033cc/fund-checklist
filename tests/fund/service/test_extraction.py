@@ -16,6 +16,7 @@ from fund_agent.fund.document_tools.constants import DOCLING_JSON_SUFFIX, Failur
 from fund_agent.fund.document_tools.errors import DocumentToolError
 from fund_agent.fund.document_tools.models import Citation, Locator, ToolFailure
 from fund_agent.fund.document_tools.persistent_repository import CATALOG_FILENAME
+from fund_agent.fund.document_tools.service import FundDocumentToolService
 from fund_agent.service import (
     AggregateMultiYearAnnualPerformanceRequest,
     AnnualReportDocument,
@@ -841,6 +842,7 @@ def test_read_local_report_preserves_agent_failure_code(tmp_path: Path) -> None:
             "业绩比较基准收益率",
             (
                 "业绩比较基准收益率",
+                "净值增长率",
                 "基金份额净值增长率及其与同期业绩比较基准收益率的比较",
                 "基金净值表现",
             ),
@@ -849,6 +851,7 @@ def test_read_local_report_preserves_agent_failure_code(tmp_path: Path) -> None:
             "基金净值表现",
             (
                 "基金净值表现",
+                "净值增长率",
                 "基金份额净值增长率及其与同期业绩比较基准收益率的比较",
                 "业绩比较基准收益率",
             ),
@@ -903,6 +906,17 @@ def test_manager_holdings_profile_routes_hold_fund_query() -> None:
     assert "持有本基金" in route_plan.candidate_queries
 
 
+def test_performance_returns_candidate_order_prefers_nav_growth_rate_query() -> None:
+    """Fix E：净值增长率 候选位于 exact title 之前，供自动重试先命中含数字章节。"""
+
+    route_plan = reading_service_module._route_plan_for_query("近净值增长率是多少")
+
+    assert route_plan.profile_name == "performance_returns"
+    assert route_plan.candidate_queries.index("净值增长率") < route_plan.candidate_queries.index(
+        "基金份额净值增长率及其与同期业绩比较基准收益率的比较"
+    )
+
+
 def test_disclosure_locator_registry_has_only_reading_contract_fields() -> None:
     """11B registry 只表达披露定位 contract，不开放抽取或 public DTO。"""
 
@@ -914,6 +928,7 @@ def test_disclosure_locator_registry_has_only_reading_contract_fields() -> None:
         "requires_table_citation",
         "extraction_allowed",
         "aggregate_all_matches",
+        "anchor_title_family",
     }
     registry = {
         contract.profile_name: contract
@@ -930,6 +945,7 @@ def test_disclosure_locator_registry_has_only_reading_contract_fields() -> None:
     assert registry["holdings_top10"].candidate_queries == ("股票投资明细", "前十名股票投资明细")
     assert registry["holdings_top10"].acceptable_title_family == ("股票投资明细", "前十名股票投资明细")
     assert registry["holdings_top10"].requires_table_citation is True
+    assert registry["holdings_top10"].anchor_title_family == ("序号", "股票名称", "公允价值")
     assert registry["asset_allocation"].aliases == ("资产配置", "资产组合")
     assert registry["asset_allocation"].candidate_queries == ("期末基金资产组合情况", "基金资产组合情况")
     assert registry["asset_allocation"].acceptable_title_family == (
@@ -948,6 +964,10 @@ def test_disclosure_locator_registry_has_only_reading_contract_fields() -> None:
         "期末基金管理人的从业人员持有本基金的情况",
     )
     assert registry["manager_holdings"].requires_table_citation is True
+    assert registry["manager_holdings"].anchor_title_family == (
+        "本基金基金经理持有本开放式基金",
+        "基金管理人所有从业人员持有本基金",
+    )
     assert registry["fee_rates"].aliases == ("费用", "费率", "管理费", "托管费", "销售服务费")
     assert registry["fee_rates"].candidate_queries == ("基金管理费", "基金托管费", "销售服务费")
     assert registry["fee_rates"].acceptable_title_family == ("基金管理费", "基金托管费", "销售服务费")
@@ -961,6 +981,7 @@ def test_disclosure_locator_registry_has_only_reading_contract_fields() -> None:
         "基金净值表现",
     )
     assert registry["performance_returns"].candidate_queries == (
+        "净值增长率",
         "基金份额净值增长率及其与同期业绩比较基准收益率的比较",
         "基金净值表现",
         "业绩比较基准收益率",
@@ -970,7 +991,17 @@ def test_disclosure_locator_registry_has_only_reading_contract_fields() -> None:
         "基金净值表现",
     )
     assert registry["performance_returns"].requires_table_citation is True
+    assert registry["performance_returns"].anchor_title_family == (
+        "阶段",
+        "份额净值增长率",
+        "业绩比较基准收益率",
+    )
     assert all(contract.extraction_allowed is False for contract in registry.values())
+    assert {
+        profile_name
+        for profile_name, contract in registry.items()
+        if contract.anchor_title_family
+    } == {"holdings_top10", "manager_holdings", "performance_returns"}
     assert all(
         contract.aggregate_all_matches is False
         for profile_name, contract in registry.items()
@@ -1918,6 +1949,52 @@ def test_extract_annual_performance_fails_without_table_citation(tmp_path: Path)
     assert result.fields == ()
     assert result.failure is not None
     assert result.failure.code is FailureCode.NOT_FOUND
+
+
+def test_extract_annual_performance_missing_past_year_row_carries_explainable_message(tmp_path: Path) -> None:
+    """10F 业绩表存在但无「过去一年」行时，not_found message 必须携带可解释说明。"""
+
+    target_title = "基金份额净值增长率及其与同期业绩比较基准收益率的比较"
+    _PerformanceExtractionHost.calls.clear()
+    _PerformanceExtractionHost.include_table_citation = True
+    _PerformanceExtractionHost.cited_table_refs = ("table-0000",)
+    _PerformanceExtractionHost.source_title_line = f"来源章节: {target_title}"
+    rows = (
+        (
+            ("阶段", "份额净值 增长率①", "份额净值增长率标准差②", "业绩比较基准收益率③", "业绩比较基准收益率标准差④", "①－③", "②－④"),
+            ("过去三个月", "2.33%", "1.42%", "3.72%", "1.18%", "-1.39%", "0.24%"),
+            ("自基金转型起至今", "2.39%", "1.24%", "-3.68%", "1.03%", "6.07%", "0.21%"),
+        ),
+    )
+    _PerformanceConverter.payload = staticmethod(
+        lambda: _performance_docling_payload(section_lines=(), table_rows=rows)
+    )
+    pdf_path = tmp_path / "report.pdf"
+    work_dir = tmp_path / "work"
+    _write_pdf(pdf_path)
+    service = FundReadingService(
+        converter_factory=_PerformanceConverter,
+        host_factory=_PerformanceExtractionHost,
+    )
+
+    try:
+        result = service.extract_annual_performance(
+            reading_service_module.ExtractAnnualPerformanceRequest(
+                pdf_path=pdf_path,
+                fund_code="004393",
+                fund_name="安信企业价值优选混合型证券投资基金",
+                year=2024,
+                work_dir=work_dir,
+            )
+        )
+    finally:
+        _PerformanceExtractionHost.source_title_line = None
+
+    assert result.fields == ()
+    assert result.failure is not None
+    assert result.failure.code is FailureCode.NOT_FOUND
+    assert "无「过去一年」行" in result.failure.message
+    assert "自基金转型起至今" in result.failure.message
 
 
 def test_extract_annual_performance_uses_signature_table_inside_title_section(tmp_path: Path) -> None:
@@ -6812,3 +6889,207 @@ def test_generate_report_without_holdings_source_keeps_target_holdings(tmp_path:
     ch3 = next(c.content for c in result.report.chapters if c.chapter_id == 3)
     assert "目标ETF" in ch3
     assert "来源：标的 ETF" not in ch3
+
+
+# ── P0-1 检索命中质量：受控表锚点（interactive）─────────────────────
+
+_ANCHOR_FIXTURE_DOC_ID = "007466-2025-annual_report-ee23d4b8070dce1a"
+_ANCHOR_FIXTURE_JSON = Path(
+    ".fund_e2e_007466/docling_json/007466-2025-annual_report-ee23d4b8070dce1a"
+    "/007466-2025-annual_report-ee23d4b8070dce1a.docling.json"
+)
+
+
+def _anchor_fixture_tool_service() -> FundDocumentToolService:
+    """构造 007466-2025 真实 docling JSON fixture 对应的 tool service。"""
+    from fund_agent.fund.document_tools.docling_store import DoclingDocumentStore
+    from fund_agent.fund.document_tools.models import ReportIdentity, ReportType, SourceKind
+
+    assert _ANCHOR_FIXTURE_JSON.is_file(), "007466-2025 现成 docling JSON fixture 缺失"
+    store = DoclingDocumentStore(
+        identity=ReportIdentity(
+            fund_code="007466",
+            fund_name="华泰柏瑞中证红利低波ETF联接",
+            year=2025,
+            report_type=ReportType.ANNUAL_REPORT,
+            source_kind=SourceKind.LOCAL_PDF,
+            local_import_id="fixture",
+            content_fingerprint="fixture",
+            document_id=_ANCHOR_FIXTURE_DOC_ID,
+        ),
+        json_path=_ANCHOR_FIXTURE_JSON,
+    )
+    return FundDocumentToolService({_ANCHOR_FIXTURE_DOC_ID: store})
+
+
+def _anchor_contract(profile_name: str) -> reading_service_module._DisclosureLocatorContract:
+    """按 profile 名取受控披露定位 contract。"""
+    return next(
+        contract
+        for contract in reading_service_module.DISCLOSURE_LOCATOR_CONTRACT_REGISTRY
+        if contract.profile_name == profile_name
+    )
+
+
+def test_resolve_anchor_table_ref_manager_holdings_real_fixture() -> None:
+    """007466-2025 真实 fixture：manager_holdings 锚点命中行头含 9.4 标题族的表。"""
+
+    tool_service = _anchor_fixture_tool_service()
+    table_ref = reading_service_module._resolve_anchor_table_ref(
+        _ANCHOR_FIXTURE_DOC_ID,
+        _anchor_contract("manager_holdings"),
+        tool_service,
+    )
+
+    assert table_ref == "table-0098"
+    content = tool_service.read_table(_ANCHOR_FIXTURE_DOC_ID, table_ref, max_rows=10)
+    rows_text = "".join(
+        reading_service_module._normalize_cell_text("".join(str(cell) for cell in row))
+        for row in content.rows
+    )
+    assert reading_service_module._ANCHOR_MANAGER_HOLDS_9_4_TITLE_FAMILY in rows_text
+
+
+def test_resolve_anchor_table_ref_holdings_top10_real_fixture() -> None:
+    """007466-2025 真实 fixture：holdings_top10 锚点命中表头签名表且 row_count >= 10。"""
+
+    tool_service = _anchor_fixture_tool_service()
+    table_ref = reading_service_module._resolve_anchor_table_ref(
+        _ANCHOR_FIXTURE_DOC_ID,
+        _anchor_contract("holdings_top10"),
+        tool_service,
+    )
+
+    assert table_ref == "table-0087"
+    summary = next(
+        table
+        for table in tool_service.list_tables(_ANCHOR_FIXTURE_DOC_ID)
+        if table.table_ref == table_ref
+    )
+    assert summary.row_count >= reading_service_module._ANCHOR_HOLDINGS_TOP10_MIN_ROWS
+    content = tool_service.read_table(_ANCHOR_FIXTURE_DOC_ID, table_ref, max_rows=2)
+    header = reading_service_module._normalize_cell_text(
+        "".join(str(cell) for cell in content.rows[0])
+    )
+    for keyword in reading_service_module._ANCHOR_HOLDINGS_TOP10_HEADER_SIGNATURE:
+        assert keyword in header
+
+
+_PERF_ANCHOR_FIXTURE_DOC_ID = "004393-2025-annual_report-dc38aae8770e0071"
+_PERF_ANCHOR_FIXTURE_JSON = Path(
+    ".fund_e2e_004393/docling_json/004393-2025-annual_report-dc38aae8770e0071"
+    "/004393-2025-annual_report-dc38aae8770e0071.docling.json"
+)
+
+
+def _performance_anchor_fixture_tool_service() -> FundDocumentToolService:
+    """构造 004393-2025 真实 docling JSON fixture 对应的 tool service（Fix C）。"""
+    from fund_agent.fund.document_tools.docling_store import DoclingDocumentStore
+    from fund_agent.fund.document_tools.models import ReportIdentity, ReportType, SourceKind
+
+    assert _PERF_ANCHOR_FIXTURE_JSON.is_file(), "004393-2025 现成 docling JSON fixture 缺失"
+    store = DoclingDocumentStore(
+        identity=ReportIdentity(
+            fund_code="004393",
+            fund_name="安信企业价值优选混合",
+            year=2025,
+            report_type=ReportType.ANNUAL_REPORT,
+            source_kind=SourceKind.LOCAL_PDF,
+            local_import_id="fixture",
+            content_fingerprint="fixture",
+            document_id=_PERF_ANCHOR_FIXTURE_DOC_ID,
+        ),
+        json_path=_PERF_ANCHOR_FIXTURE_JSON,
+    )
+    return FundDocumentToolService({_PERF_ANCHOR_FIXTURE_DOC_ID: store})
+
+
+def test_resolve_performance_returns_anchor_table_ref_real_fixture() -> None:
+    """004393-2025 真实 fixture：performance_returns 锚点命中 table-0009（A 类优先）。"""
+
+    tool_service = _performance_anchor_fixture_tool_service()
+    table_ref = reading_service_module._resolve_anchor_table_ref(
+        _PERF_ANCHOR_FIXTURE_DOC_ID,
+        _anchor_contract("performance_returns"),
+        tool_service,
+    )
+
+    assert table_ref == "table-0009"
+    tables = tool_service.list_tables(
+        _PERF_ANCHOR_FIXTURE_DOC_ID, within_section_ref="section-0044"
+    )
+    by_ref = {table.table_ref: table for table in tables}
+    assert "A" in (by_ref["table-0009"].caption or "") and "C" not in (by_ref["table-0009"].caption or "")
+    assert "C" in (by_ref["table-0010"].caption or "")
+    content = tool_service.read_table(_PERF_ANCHOR_FIXTURE_DOC_ID, table_ref, max_rows=2)
+    header = reading_service_module._normalize_cell_text(
+        "".join(str(cell) for cell in content.rows[0])
+    )
+    for keyword in reading_service_module._ANCHOR_PERFORMANCE_RETURNS_HEADER_SIGNATURE:
+        assert keyword in header
+
+
+def test_resolve_performance_returns_anchor_table_ref_fail_open() -> None:
+    """004393 fixture 上未知 document_id：锚点解析失败返回 None（fail-open）。"""
+
+    tool_service = _performance_anchor_fixture_tool_service()
+    assert (
+        reading_service_module._resolve_anchor_table_ref(
+            "unknown-2025-annual_report-fixture",
+            _anchor_contract("performance_returns"),
+            tool_service,
+        )
+        is None
+    )
+
+
+def test_resolve_anchor_table_ref_document_id_none_returns_none() -> None:
+    """Mimo finding 001：document_id 为 None 时直接返回 None，不抛异常。"""
+
+    tool_service = _anchor_fixture_tool_service()
+    assert (
+        reading_service_module._resolve_anchor_table_ref(
+            None,
+            _anchor_contract("manager_holdings"),
+            tool_service,
+        )
+        is None
+    )
+    assert (
+        reading_service_module._resolve_anchor_table_ref(
+            None,
+            _anchor_contract("holdings_top10"),
+            tool_service,
+        )
+        is None
+    )
+
+
+def test_resolve_anchor_table_ref_fail_open_on_unknown_document() -> None:
+    """未知 document_id：工具不可用 → None，不抛异常（fail-open 到候选词路径）。"""
+
+    tool_service = _anchor_fixture_tool_service()
+    for profile_name in ("manager_holdings", "holdings_top10"):
+        assert (
+            reading_service_module._resolve_anchor_table_ref(
+                "unknown-2025-annual_report-fixture",
+                _anchor_contract(profile_name),
+                tool_service,
+            )
+            is None
+        )
+
+
+def test_resolve_anchor_table_ref_unconfigured_profile_returns_none() -> None:
+    """未配置锚点的 profile 直接返回 None，不做任何 I/O（保持 LLM 自由选表）。"""
+
+    tool_service = _anchor_fixture_tool_service()
+    for profile_name in ("asset_allocation", "fee_rates"):
+        assert (
+            reading_service_module._resolve_anchor_table_ref(
+                _ANCHOR_FIXTURE_DOC_ID,
+                _anchor_contract(profile_name),
+                tool_service,
+            )
+            is None
+        )

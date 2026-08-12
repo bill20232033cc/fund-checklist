@@ -1,5 +1,7 @@
 # dayu-agent vs fund-checklist 比较报告
 
+> 状态：2026-07-15 研究快照，非设计真源。本文「无 X 能力」类断言多数已被后续 Phase 实现取代（LLM 自主工具调用 / interactive / 会话记忆 / ContextBudget / streaming / regenerate / repair / fix / PDF 渲染 / 多 provider）；dayu 侧描述基于旧版 `noho/dayu-agent`（本地 2026-05-04 停更，`dayu-agent-r` 已于 2026-08-09 重构）。最新研究见 `docs/research/dayu-agent-r-research-20260810.md`；fc 当前状态以 `docs/implementation-control.md` 为准。
+
 > 文档定位: 外部能力对标研究输入材料，不是已承诺 roadmap
 > 比较时间: 2026-07-15
 > 比较范围: Agent 问答能力、分析报告生成
@@ -217,6 +219,8 @@
 ---
 
 ## 九、关键差距总结
+
+> 过时提示（2026-08-11）：本节 9.1 的「无 LLM 自主工具调用 / 无多轮对话 / 无会话记忆 / 无上下文治理 / 无 streaming」均已被 Phase 5/7 实现推翻；「仅 DeepSeek」已被 deepseek/mimo 自由切换取代。仅 9.2 工具系统与文档绑定/参数校验的差距对比仍成立。本节仅作历史记录。
 
 ### 9.1 Agent 问答能力候选差距（对照观察）
 

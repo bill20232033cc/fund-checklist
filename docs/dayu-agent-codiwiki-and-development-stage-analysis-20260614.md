@@ -1,6 +1,9 @@
 # dayu-agent CodiWiki 与刘成岗开发阶段分析
 
 生成日期：2026-06-14  
+
+> 状态：2026-06-14 研究快照，非设计真源。dayu 侧描述基于旧版 `noho/dayu-agent`（本地 2026-05-04 停更）；`dayu-agent-r`（2026-08-09 重构）已将分层改为 `UI -> Service -> Host -> Engine`、移除顶层 gui/web/wechat 入口、并已实现 durable EventLog / Conversation Memory 等本文列为开放问题的能力。最新研究见 `docs/research/dayu-agent-r-research-20260810.md`；fc 当前状态以 `docs/implementation-control.md` 为准。
+
 研究对象：`noho/dayu-agent` 总览手册、Host / Engine / Fins / Config 手册、贡献指南，以及本仓库既有《刘成岗近两年 dayu agent 与 AI coding 开发路线图》。  
 文档性质：代码维基 + 综合分析。  
 

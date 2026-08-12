@@ -191,6 +191,34 @@ _BOND_HOLDINGS_QUERY = "前五名债券投资明细"
 _QDII_HOLDINGS_QUERY = "所有权益投资明细"
 _HOLDINGS_TABLE_MAX_ROWS = 15
 
+# P0-1/Fix C 受控表锚点（interactive 检索命中质量，D1/D2 硬口径）：
+# manager_holdings 按 9.4/9.2 行头标题族匹配（9.4 优先、9.2 回退），
+# holdings_top10 按表头签名（序号/股票名称/公允价值，row_count >= 10）匹配，
+# performance_returns 按 3.2.1 表头签名（阶段/份额净值增长率/业绩比较基准
+# 收益率）匹配且 A 类标题优先（Mimo 根因 review Fix C）。
+_ANCHOR_TABLE_MAX_ROWS = 10
+_ANCHOR_MANAGER_HOLDS_9_4_TITLE_FAMILY = "本基金基金经理持有本开放式基金"
+_ANCHOR_MANAGER_HOLDS_9_2_TITLE_FAMILY = "基金管理人所有从业人员持有本基金"
+_ANCHOR_MANAGER_HOLDS_TITLE_FAMILY = (
+    _ANCHOR_MANAGER_HOLDS_9_4_TITLE_FAMILY,
+    _ANCHOR_MANAGER_HOLDS_9_2_TITLE_FAMILY,
+)
+_ANCHOR_MANAGER_HOLDS_SECTION_QUERIES = (
+    "期末基金管理人的从业人员持有本基金的情况",
+    _ANCHOR_MANAGER_HOLDS_9_4_TITLE_FAMILY,
+    _ANCHOR_MANAGER_HOLDS_9_2_TITLE_FAMILY,
+)
+_ANCHOR_HOLDINGS_TOP10_HEADER_SIGNATURE = ("序号", "股票名称", "公允价值")
+_ANCHOR_HOLDINGS_TOP10_MIN_ROWS = 10
+_ANCHOR_HOLDINGS_TOP10_SECTION_QUERIES = (
+    "前十名股票投资明细",
+    "股票投资明细",
+)
+_ANCHOR_PERFORMANCE_RETURNS_HEADER_SIGNATURE = ("阶段", "份额净值增长率", "业绩比较基准收益率")
+_ANCHOR_PERFORMANCE_RETURNS_SECTION_QUERIES = (
+    "基金份额净值增长率及其与同期业绩比较基准收益率的比较",
+)
+
 
 DISCLOSURE_LOCATOR_CONTRACT_REGISTRY = (
     _DisclosureLocatorContract(
@@ -200,6 +228,7 @@ DISCLOSURE_LOCATOR_CONTRACT_REGISTRY = (
         acceptable_title_family=("股票投资明细", "前十名股票投资明细"),
         requires_table_citation=True,
         extraction_allowed=False,
+        anchor_title_family=_ANCHOR_HOLDINGS_TOP10_HEADER_SIGNATURE,
     ),
     _DisclosureLocatorContract(
         profile_name="asset_allocation",
@@ -221,6 +250,7 @@ DISCLOSURE_LOCATOR_CONTRACT_REGISTRY = (
         acceptable_title_family=("期末基金管理人的从业人员持有本基金的情况",),
         requires_table_citation=True,
         extraction_allowed=False,
+        anchor_title_family=_ANCHOR_MANAGER_HOLDS_TITLE_FAMILY,
     ),
     _DisclosureLocatorContract(
         profile_name="fee_rates",
@@ -235,6 +265,7 @@ DISCLOSURE_LOCATOR_CONTRACT_REGISTRY = (
         profile_name="performance_returns",
         aliases=("净值增长率", "业绩比较基准收益率", "基准收益率", "收益表现", "基金净值表现"),
         candidate_queries=(
+            "净值增长率",
             "基金份额净值增长率及其与同期业绩比较基准收益率的比较",
             "基金净值表现",
             "业绩比较基准收益率",
@@ -245,6 +276,7 @@ DISCLOSURE_LOCATOR_CONTRACT_REGISTRY = (
         ),
         requires_table_citation=True,
         extraction_allowed=False,
+        anchor_title_family=_ANCHOR_PERFORMANCE_RETURNS_HEADER_SIGNATURE,
     ),
 )
 
@@ -4621,6 +4653,233 @@ def _validated_locator_contracts() -> tuple[_DisclosureLocatorContract, ...]:
     return tuple(DISCLOSURE_LOCATOR_CONTRACT_REGISTRY)
 
 
+def _resolve_anchor_table_ref(
+    document_id: str | None,
+    contract: _DisclosureLocatorContract,
+    tool_service: FundDocumentToolService,
+) -> str | None:
+    """解析受控 profile 的候选表锚点 table_ref（Service 层私有，fail-open）。
+
+    组合 public tools：search_document 定位 section → list_tables(within_section_ref)
+    → read_table（有界行）扫描行头/表头签名。manager_holdings 命中 9.4 行头优先、
+    9.2 行头回退；holdings_top10 按表头签名（序号/股票名称/公允价值，row_count
+    >= 10）匹配；performance_returns 按 3.2.1 表头签名匹配且 A 类标题优先
+    （Fix C）。解析失败 / 工具不可用 / 无候选表 / document_id 为 None 时返回
+    None（fail-open 到既有候选词路径，不抛异常）。
+
+    参数:
+        document_id: public reading tools 使用的内容身份；None 时直接返回 None。
+        contract: 命中的受控披露定位 contract。
+        tool_service: 组合 public reading tools 的 tool service。
+
+    返回:
+        解析成功的 table_ref；否则返回 None。
+
+    异常:
+        本函数不向 public caller 抛出业务异常；工具调用失败一律视为无锚点。
+    """
+
+    if document_id is None:
+        return None
+    if contract.profile_name == "manager_holdings":
+        return _resolve_manager_holdings_anchor_table_ref(document_id, tool_service)
+    if contract.profile_name == "holdings_top10":
+        return _resolve_holdings_top10_anchor_table_ref(document_id, tool_service)
+    if contract.profile_name == "performance_returns":
+        return _resolve_performance_returns_anchor_table_ref(document_id, tool_service)
+    return None
+
+
+def _anchor_section_refs(
+    document_id: str,
+    tool_service: FundDocumentToolService,
+    queries: tuple[str, ...],
+) -> tuple[str, ...]:
+    """按查询顺序收集 search_document 命中的去重 section_ref。
+
+    search_document 失败 / 工具不可用时跳过该查询，不阻断后续查询。
+    """
+
+    section_refs: list[str] = []
+    seen: set[str] = set()
+    for query in queries:
+        try:
+            hits = tool_service.search_document(document_id, query)
+        except Exception:
+            continue
+        if isinstance(hits, ToolFailure):
+            continue
+        for hit in hits:
+            section_ref = getattr(hit, "section_ref", None)
+            if section_ref and section_ref not in seen:
+                seen.add(section_ref)
+                section_refs.append(section_ref)
+    return tuple(section_refs)
+
+
+def _anchor_row_contains_title_family(rows: tuple[tuple[str, ...], ...], family: str) -> bool:
+    """判断表格行头（任意一行归一化文本）是否包含标题族短语。"""
+
+    normalized_family = _normalize_cell_text(family)
+    if not normalized_family:
+        return False
+    for row in rows:
+        row_text = _normalize_cell_text("".join(str(cell) for cell in row))
+        if normalized_family in row_text:
+            return True
+    return False
+
+
+def _resolve_manager_holdings_anchor_table_ref(
+    document_id: str,
+    tool_service: FundDocumentToolService,
+) -> str | None:
+    """manager_holdings 锚点：9.4 行头优先、9.2 行头回退。
+
+    先扫描全部候选 section 找 9.4 行头表；无 9.4 时返回首个 9.2 行头表
+    （两遍语义：文档中先出现的 9.2 整体表不会抢占 9.4 区间结果）。
+    """
+
+    fallback: str | None = None
+    for section_ref in _anchor_section_refs(
+        document_id, tool_service, _ANCHOR_MANAGER_HOLDS_SECTION_QUERIES
+    ):
+        try:
+            tables = tool_service.list_tables(document_id, within_section_ref=section_ref)
+        except Exception:
+            continue
+        if isinstance(tables, ToolFailure):
+            continue
+        for summary in tables:
+            try:
+                content = tool_service.read_table(
+                    document_id, summary.table_ref, max_rows=_ANCHOR_TABLE_MAX_ROWS
+                )
+            except Exception:
+                continue
+            if isinstance(content, ToolFailure) or not hasattr(content, "rows"):
+                continue
+            if _anchor_row_contains_title_family(
+                content.rows, _ANCHOR_MANAGER_HOLDS_9_4_TITLE_FAMILY
+            ):
+                return summary.table_ref
+            if fallback is None and _anchor_row_contains_title_family(
+                content.rows, _ANCHOR_MANAGER_HOLDS_9_2_TITLE_FAMILY
+            ):
+                fallback = summary.table_ref
+    return fallback
+
+
+def _resolve_holdings_top10_anchor_table_ref(
+    document_id: str,
+    tool_service: FundDocumentToolService,
+) -> str | None:
+    """holdings_top10 锚点：表头签名匹配（序号/股票名称/公允价值，row_count >= 10）。"""
+
+    for section_ref in _anchor_section_refs(
+        document_id, tool_service, _ANCHOR_HOLDINGS_TOP10_SECTION_QUERIES
+    ):
+        try:
+            tables = tool_service.list_tables(document_id, within_section_ref=section_ref)
+        except Exception:
+            continue
+        if isinstance(tables, ToolFailure):
+            continue
+        for summary in tables:
+            if summary.row_count < _ANCHOR_HOLDINGS_TOP10_MIN_ROWS:
+                continue
+            try:
+                content = tool_service.read_table(
+                    document_id, summary.table_ref, max_rows=_ANCHOR_TABLE_MAX_ROWS
+                )
+            except Exception:
+                continue
+            if isinstance(content, ToolFailure) or not hasattr(content, "rows"):
+                continue
+            for row in content.rows[:_ANCHOR_HOLDINGS_TOP10_MIN_ROWS]:
+                header = _normalize_cell_text("".join(str(cell) for cell in row))
+                if all(
+                    _normalize_cell_text(keyword) in header
+                    for keyword in _ANCHOR_HOLDINGS_TOP10_HEADER_SIGNATURE
+                ):
+                    return summary.table_ref
+    return None
+
+
+def _anchor_row_has_header_signature(
+    rows: tuple[tuple[str, ...], ...],
+    signature: tuple[str, ...],
+) -> bool:
+    """判断有界表格行中是否存在包含全部表头签名关键词的归一化行。
+
+    Docling 单元格可能含空白（如「份额净值 增长率①」），比较前对整行与
+    关键词均做去空白归一化；命中判定为关键词子串包含（与 holdings_top10
+    锚点一致）。
+    """
+
+    if not signature:
+        return False
+    for row in rows:
+        row_text = _normalize_cell_text("".join(str(cell) for cell in row))
+        if all(_normalize_cell_text(keyword) in row_text for keyword in signature):
+            return True
+    return False
+
+
+def _resolve_performance_returns_anchor_table_ref(
+    document_id: str,
+    tool_service: FundDocumentToolService,
+) -> str | None:
+    """performance_returns 锚点：3.2.1 表头签名匹配，A 类标题优先（Fix C）。
+
+    定位流程：3.2.1 exact title 查询定位 section → list_tables(within_section_ref)
+    → 逐表 read_table（有界行）扫描表头签名（阶段/份额净值增长率/业绩比较
+    基准收益率，去空白归一化）→ 签名命中表中标题含 A 且不含 C 的 A 类表优先，
+    无 A 类候选时返回首个签名命中表（两遍语义：非 A 类表不抢占 A 类结果）；
+    任何失败 / 无候选返回 None（fail-open 到既有候选词路径，不抛异常）。
+
+    参数:
+        document_id: public reading tools 使用的内容身份。
+        tool_service: 组合 public reading tools 的 tool service。
+
+    返回:
+        解析成功的 table_ref；否则返回 None。
+
+    异常:
+        本函数不向 public caller 抛出业务异常；工具调用失败一律视为无锚点。
+    """
+
+    first_signature_hit: str | None = None
+    for section_ref in _anchor_section_refs(
+        document_id, tool_service, _ANCHOR_PERFORMANCE_RETURNS_SECTION_QUERIES
+    ):
+        try:
+            tables = tool_service.list_tables(document_id, within_section_ref=section_ref)
+        except Exception:
+            continue
+        if isinstance(tables, ToolFailure):
+            continue
+        for summary in tables:
+            try:
+                content = tool_service.read_table(
+                    document_id, summary.table_ref, max_rows=_ANCHOR_TABLE_MAX_ROWS
+                )
+            except Exception:
+                continue
+            if isinstance(content, ToolFailure) or not hasattr(content, "rows"):
+                continue
+            if not _anchor_row_has_header_signature(
+                content.rows, _ANCHOR_PERFORMANCE_RETURNS_HEADER_SIGNATURE
+            ):
+                continue
+            if first_signature_hit is None:
+                first_signature_hit = summary.table_ref
+            title = summary.caption or ""
+            if _SHARE_SCOPE_A in title and _SHARE_SCOPE_C not in title:
+                return summary.table_ref
+    return first_signature_hit
+
+
 def _requires_all_target_titles(contract: _DisclosureLocatorContract | None) -> bool:
     """判断 locator contract 是否要求可接受标题族全量命中。"""
 
@@ -5174,7 +5433,13 @@ def _extract_annual_performance_fields(
                 fields.extend(share_fields)
 
     if not fields:
-        raise DocumentToolError(FailureCode.NOT_FOUND, "annual performance 过去一年完整字段缺失")
+        missing_row_note = ""
+        if not any(_has_performance_past_year_row(table.rows) for table in header_tables):
+            missing_row_note = (
+                "：业绩阶段表存在但无「过去一年」行"
+                + _performance_missing_past_year_note(header_tables)
+            )
+        raise DocumentToolError(FailureCode.NOT_FOUND, "annual performance 过去一年完整字段缺失" + missing_row_note)
     return tuple(fields)
 
 
@@ -5309,7 +5574,13 @@ def _extract_annual_excess_return_fields(
             )
 
     if not fields:
-        raise DocumentToolError(FailureCode.NOT_FOUND, "annual excess return 过去一年 ①－③ 字段缺失")
+        missing_row_note = ""
+        if not any(_has_performance_past_year_row(table.rows) for table in header_tables):
+            missing_row_note = (
+                "：业绩阶段表存在但无「过去一年」行"
+                + _performance_missing_past_year_note(header_tables)
+            )
+        raise DocumentToolError(FailureCode.NOT_FOUND, "annual excess return 过去一年 ①－③ 字段缺失" + missing_row_note)
     return tuple(fields)
 
 
@@ -5618,6 +5889,29 @@ def _has_performance_past_year_row(rows: tuple[tuple[str, ...], ...]) -> bool:
         row and _normalize_disclosure_text(row[0]) == _PERFORMANCE_RETURN_PERIOD_TEXT
         for row in rows[1:]
     )
+
+
+def _performance_missing_past_year_note(tables: tuple[TableContent, ...]) -> str:
+    """构造「业绩表存在但无过去一年行」的附加可解释说明。
+
+    参数:
+        tables: 已满足 10F/10G 列签名的候选业绩表。
+
+    返回:
+        以表内受控行标签为依据的说明后缀；无转型/合同生效期间标记时返回空串。
+    """
+
+    normalized = {
+        _normalize_disclosure_text(cell)
+        for table in tables
+        for row in table.rows
+        for cell in row
+    }
+    if any("自基金转型起至今" in cell for cell in normalized):
+        return "（表内仅披露「自基金转型起至今」等期间，转型当年无全年份额净值增长率）"
+    if any("自基金合同生效起至今" in cell for cell in normalized):
+        return "（表内仅披露「自基金合同生效起至今」等期间，合同生效当年无全年份额净值增长率）"
+    return ""
 
 
 _PERFORMANCE_SHARE_SEGMENT_RE = re.compile(r"([ACINY])(?:类)?$")

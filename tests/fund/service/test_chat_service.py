@@ -10,30 +10,51 @@
 - 空输入/空白输入边界
 """
 
+import time
 from pathlib import Path
 from unittest import mock
 
 import pytest
 
+from fund_agent.agent.deepseek_llm import (
+    DEEPSEEK_MODEL_ENV,
+    LLM_PROVIDER_ENV,
+    MIMO_MODEL_ENV,
+)
 from fund_agent.agent.llm_tool_loop import (
     ChatResponse,
     FakeLlmClient,
     FinalAnswer,
     LlmToolLoopRunner,
     TokenUsage,
+    ToolCall,
 )
 from fund_agent.agent.tool_loop import AgentRunResult, ToolTraceEntry
-from fund_agent.fund.document_tools.constants import FailureCode
+from fund_agent.fund.document_tools.constants import FailureCode, ToolName
 from fund_agent.fund.document_tools.models import Citation, ToolFailure
+from fund_agent.fund.document_tools.service import FundDocumentToolService
 from fund_agent.host.session_store import SessionStore
+from fund_agent.service import chat_service as chat_service_module
 from fund_agent.service.chat_service import (
     ChatService,
     ChatTurnRequest,
     ChatTurnResponse,
 )
+from fund_agent.service.chat_contract import ChatTurnContract
 from fund_agent.service.prompt_composer import PromptComposer
+from fund_agent.service.models import (
+    AggregateMultiYearAnnualPerformanceResult,
+    MultiYearAnnualPerformanceRow,
+    MultiYearAnnualPerformanceSeries,
+)
 from fund_agent.service.scene_config import ASK_SCENE_CONFIG, INTERACTIVE_SCENE_CONFIG
-from fund_agent.service.session_models import PinnedState, Session, ToolCallSummary, Turn
+from fund_agent.service.session_models import (
+    EpisodeSummary,
+    PinnedState,
+    Session,
+    ToolCallSummary,
+    Turn,
+)
 
 
 # ── helpers ──────────────────────────────────────────────────────
@@ -71,12 +92,21 @@ def _make_agent_result(answer: str) -> AgentRunResult:
 class _RecordingRunner:
     """记录 run() 参数的假 runner，返回固定成功 AgentRunResult。"""
 
-    def __init__(self, llm_client=None, tool_service=None, max_steps: int = 8) -> None:
+    def __init__(
+        self,
+        llm_client=None,
+        tool_service=None,
+        max_steps: int = 8,
+        aggregate_handler=None,
+        failed_call_keys: frozenset[tuple] | None = None,
+    ) -> None:
         """初始化并保存注入对象。"""
 
         self.llm_client = llm_client
         self.tool_service = tool_service
         self.max_steps = max_steps
+        self.aggregate_handler = aggregate_handler
+        self.failed_call_keys = failed_call_keys
         self.calls: list[dict] = []
 
     def run(
@@ -119,6 +149,22 @@ class _RecordingSessionStore(SessionStore):
 def _template_dir() -> Path:
     """返回真实的 prompt 模板目录。"""
     return Path(__file__).parent.parent.parent.parent / "fund_agent" / "service" / "prompts"
+
+
+def _create_turned_session(store: SessionStore, turn_count: int) -> Session:
+    """创建包含指定轮数（user + assistant 成对）的 session。"""
+    session = store.create(fund_code="011649")
+    ps = PinnedState(
+        fund_code="011649",
+        active_document_id="011649-2025-annual_report-abc123",
+        active_year=2025,
+    )
+    session = session.with_pinned_state(ps)
+    for i in range(turn_count):
+        session = session.add_turn(Turn(role="user", content=f"问题{i+1}"))
+        session = session.add_turn(Turn(role="assistant", content=f"回答{i+1}"))
+    store.save(session)
+    return session
 
 
 # ── tests ────────────────────────────────────────────────────────
@@ -406,7 +452,7 @@ class TestChatTurn:
 
         failure = ToolFailure(
             code=FailureCode.LLM_MALFORMED_RESPONSE,
-            message="DeepSeek LLM provider response 不符合受控结构",
+            message="LLM provider response 不符合受控结构",
         )
         failed_result = AgentRunResult(answer="", citations=(), tool_trace=(), failure=failure)
 
@@ -569,8 +615,20 @@ class TestInteractiveQualityWiring:
 
         captured: list[_RecordingRunner] = []
 
-        def factory(llm_client, tool_service, max_steps: int = 8) -> _RecordingRunner:
-            runner = _RecordingRunner(llm_client, tool_service, max_steps=max_steps)
+        def factory(
+            llm_client,
+            tool_service,
+            max_steps: int = 8,
+            aggregate_handler=None,
+            failed_call_keys: frozenset[tuple] | None = None,
+        ) -> _RecordingRunner:
+            runner = _RecordingRunner(
+                llm_client,
+                tool_service,
+                max_steps=max_steps,
+                aggregate_handler=aggregate_handler,
+                failed_call_keys=failed_call_keys,
+            )
             captured.append(runner)
             return runner
 
@@ -601,8 +659,20 @@ class TestInteractiveQualityWiring:
 
         captured: list[_RecordingRunner] = []
 
-        def factory(llm_client, tool_service, max_steps: int = 8) -> _RecordingRunner:
-            runner = _RecordingRunner(llm_client, tool_service, max_steps=max_steps)
+        def factory(
+            llm_client,
+            tool_service,
+            max_steps: int = 8,
+            aggregate_handler=None,
+            failed_call_keys: frozenset[tuple] | None = None,
+        ) -> _RecordingRunner:
+            runner = _RecordingRunner(
+                llm_client,
+                tool_service,
+                max_steps=max_steps,
+                aggregate_handler=aggregate_handler,
+                failed_call_keys=failed_call_keys,
+            )
             captured.append(runner)
             return runner
 
@@ -661,6 +731,222 @@ class TestInteractiveQualityWiring:
         )
 
         assert "retrieval" not in contributions
+
+
+class TestInteractiveAnchorInjection:
+    """P0-1/Fix C：retrieval contribution 候选表锚点注入（manager_holdings / holdings_top10 / performance_returns）。"""
+
+    _ANCHOR_FIXTURE_DOC_ID = "007466-2025-annual_report-ee23d4b8070dce1a"
+    _ANCHOR_FIXTURE_JSON = Path(
+        ".fund_e2e_007466/docling_json/007466-2025-annual_report-ee23d4b8070dce1a"
+        "/007466-2025-annual_report-ee23d4b8070dce1a.docling.json"
+    )
+    _PERF_ANCHOR_FIXTURE_DOC_ID = "004393-2025-annual_report-dc38aae8770e0071"
+    _PERF_ANCHOR_FIXTURE_JSON = Path(
+        ".fund_e2e_004393/docling_json/004393-2025-annual_report-dc38aae8770e0071"
+        "/004393-2025-annual_report-dc38aae8770e0071.docling.json"
+    )
+
+    @pytest.fixture
+    def session_store(self, tmp_path: Path) -> SessionStore:
+        return SessionStore(tmp_path / "sessions")
+
+    @pytest.fixture
+    def prompt_composer(self) -> PromptComposer:
+        return PromptComposer(template_dir=_template_dir())
+
+    def _tool_service(self) -> FundDocumentToolService:
+        """构造 007466-2025 真实 docling JSON fixture 对应的 tool service。"""
+        from fund_agent.fund.document_tools.docling_store import DoclingDocumentStore
+        from fund_agent.fund.document_tools.models import ReportIdentity, ReportType, SourceKind
+
+        assert self._ANCHOR_FIXTURE_JSON.is_file(), "007466-2025 现成 docling JSON fixture 缺失"
+        store = DoclingDocumentStore(
+            identity=ReportIdentity(
+                fund_code="007466",
+                fund_name="华泰柏瑞中证红利低波ETF联接",
+                year=2025,
+                report_type=ReportType.ANNUAL_REPORT,
+                source_kind=SourceKind.LOCAL_PDF,
+                local_import_id="fixture",
+                content_fingerprint="fixture",
+                document_id=self._ANCHOR_FIXTURE_DOC_ID,
+            ),
+            json_path=self._ANCHOR_FIXTURE_JSON,
+        )
+        return FundDocumentToolService({self._ANCHOR_FIXTURE_DOC_ID: store})
+
+    def _performance_tool_service(self) -> FundDocumentToolService:
+        """构造 004393-2025 真实 docling JSON fixture 对应的 tool service（Fix C）。"""
+        from fund_agent.fund.document_tools.docling_store import DoclingDocumentStore
+        from fund_agent.fund.document_tools.models import ReportIdentity, ReportType, SourceKind
+
+        assert self._PERF_ANCHOR_FIXTURE_JSON.is_file(), "004393-2025 现成 docling JSON fixture 缺失"
+        store = DoclingDocumentStore(
+            identity=ReportIdentity(
+                fund_code="004393",
+                fund_name="安信企业价值优选混合",
+                year=2025,
+                report_type=ReportType.ANNUAL_REPORT,
+                source_kind=SourceKind.LOCAL_PDF,
+                local_import_id="fixture",
+                content_fingerprint="fixture",
+                document_id=self._PERF_ANCHOR_FIXTURE_DOC_ID,
+            ),
+            json_path=self._PERF_ANCHOR_FIXTURE_JSON,
+        )
+        return FundDocumentToolService({self._PERF_ANCHOR_FIXTURE_DOC_ID: store})
+
+    def _service(
+        self,
+        session_store: SessionStore,
+        prompt_composer: PromptComposer,
+        tool_service: FundDocumentToolService | None,
+    ) -> ChatService:
+        return ChatService(
+            session_store=session_store,
+            prompt_composer=prompt_composer,
+            scene_config=INTERACTIVE_SCENE_CONFIG,
+            tool_service=tool_service,
+        )
+
+    def _session(self, store: SessionStore, *, document_id: str, fund_code: str = "007466") -> Session:
+        session = store.create(fund_code=fund_code)
+        ps = PinnedState(
+            fund_code=fund_code,
+            active_document_id=document_id,
+            active_year=2025,
+        )
+        session = session.with_pinned_state(ps)
+        store.save(session)
+        return session
+
+    def test_manager_holdings_injects_anchor(
+        self, session_store: SessionStore, prompt_composer: PromptComposer
+    ) -> None:
+        """manager_holdings 命中且锚点解析成功：retrieval 含 候选表锚点 table-0098。"""
+
+        service = self._service(session_store, prompt_composer, self._tool_service())
+        session = self._session(session_store, document_id=self._ANCHOR_FIXTURE_DOC_ID)
+
+        contributions = service._build_contributions(
+            session,
+            document_id=self._ANCHOR_FIXTURE_DOC_ID,
+            user_query="基金经理持有本产品吗",
+        )
+
+        assert "候选表锚点: table-0098（本基金基金经理持有本开放式基金、基金管理人所有从业人员持有本基金）" in contributions["retrieval"]
+        assert "请先 list_tables 确认该表号在列，再 read_table 该表" in contributions["retrieval"]
+        assert "勿自行猜测表号" in contributions["retrieval"]
+
+    def test_holdings_top10_injects_anchor(
+        self, session_store: SessionStore, prompt_composer: PromptComposer
+    ) -> None:
+        """holdings_top10 命中且锚点解析成功：retrieval 含 候选表锚点 table-0087。"""
+
+        service = self._service(session_store, prompt_composer, self._tool_service())
+        session = self._session(session_store, document_id=self._ANCHOR_FIXTURE_DOC_ID)
+
+        contributions = service._build_contributions(
+            session,
+            document_id=self._ANCHOR_FIXTURE_DOC_ID,
+            user_query="基金前十大持仓是什么",
+        )
+
+        assert "候选表锚点: table-0087（序号、股票名称、公允价值）" in contributions["retrieval"]
+        assert "请先 list_tables 确认该表号在列，再 read_table 该表" in contributions["retrieval"]
+
+    def test_performance_returns_injects_anchor(
+        self, session_store: SessionStore, prompt_composer: PromptComposer
+    ) -> None:
+        """performance_returns 命中且锚点解析成功：retrieval 含 候选表锚点 table-0009。"""
+
+        service = self._service(session_store, prompt_composer, self._performance_tool_service())
+        session = self._session(
+            session_store,
+            document_id=self._PERF_ANCHOR_FIXTURE_DOC_ID,
+            fund_code="004393",
+        )
+
+        contributions = service._build_contributions(
+            session,
+            document_id=self._PERF_ANCHOR_FIXTURE_DOC_ID,
+            user_query="近净值增长率是多少",
+        )
+
+        assert "performance_returns" in contributions["retrieval"]
+        assert "候选表锚点: table-0009（阶段、份额净值增长率、业绩比较基准收益率）" in contributions["retrieval"]
+        assert "请先 list_tables 确认该表号在列，再 read_table 该表" in contributions["retrieval"]
+        assert "勿自行猜测表号" in contributions["retrieval"]
+
+    def test_other_profile_no_anchor(
+        self, session_store: SessionStore, prompt_composer: PromptComposer
+    ) -> None:
+        """非两类 profile（asset_allocation）命中：有 retrieval 候选词但无锚点。"""
+
+        service = self._service(session_store, prompt_composer, self._tool_service())
+        session = self._session(session_store, document_id=self._ANCHOR_FIXTURE_DOC_ID)
+
+        contributions = service._build_contributions(
+            session,
+            document_id=self._ANCHOR_FIXTURE_DOC_ID,
+            user_query="期末基金资产组合情况",
+        )
+
+        assert "asset_allocation" in contributions["retrieval"]
+        assert "候选表锚点" not in contributions["retrieval"]
+
+    def test_no_profile_no_anchor(
+        self, session_store: SessionStore, prompt_composer: PromptComposer
+    ) -> None:
+        """无 profile 命中：不注入 retrieval slot（既有口径）。"""
+
+        service = self._service(session_store, prompt_composer, self._tool_service())
+        session = self._session(session_store, document_id=self._ANCHOR_FIXTURE_DOC_ID)
+
+        contributions = service._build_contributions(
+            session,
+            document_id=self._ANCHOR_FIXTURE_DOC_ID,
+            user_query="基金经理是谁",
+        )
+
+        assert "retrieval" not in contributions
+
+    def test_anchor_skipped_without_tool_service(
+        self, session_store: SessionStore, prompt_composer: PromptComposer
+    ) -> None:
+        """无 tool_service：候选词照常注入，锚点跳过。"""
+
+        service = self._service(session_store, prompt_composer, None)
+        session = self._session(session_store, document_id=self._ANCHOR_FIXTURE_DOC_ID)
+
+        contributions = service._build_contributions(
+            session,
+            document_id=self._ANCHOR_FIXTURE_DOC_ID,
+            user_query="基金经理持有本产品吗",
+        )
+
+        assert "manager_holdings" in contributions["retrieval"]
+        assert "候选表锚点" not in contributions["retrieval"]
+
+    def test_anchor_fail_open_on_unknown_document(
+        self, session_store: SessionStore, prompt_composer: PromptComposer
+    ) -> None:
+        """锚点解析失败（未知 document_id）：无锚点且不抛异常（fail-open）。"""
+
+        service = self._service(session_store, prompt_composer, self._tool_service())
+        session = self._session(
+            session_store, document_id="007466-2025-annual_report-missing"
+        )
+
+        contributions = service._build_contributions(
+            session,
+            document_id="007466-2025-annual_report-missing",
+            user_query="基金经理持有本产品吗",
+        )
+
+        assert "manager_holdings" in contributions["retrieval"]
+        assert "候选表锚点" not in contributions["retrieval"]
 
 
 class TestBuildHistoryContribution:
@@ -906,6 +1192,255 @@ class TestBuildContributionsRuntimeDocumentId:
         assert "document_id" not in contributions["runtime"]
 
 
+# ── P1 记忆注入（EpisodeSummary / PinnedState → system prompt） ──────────
+
+
+class TestMemoryContribution:
+    """P1：_build_contributions memory slot 注入 + 有界格式化。"""
+
+    @pytest.fixture
+    def session_store(self, tmp_path: Path) -> SessionStore:
+        return SessionStore(tmp_path / "sessions")
+
+    @pytest.fixture
+    def prompt_composer(self) -> PromptComposer:
+        return PromptComposer(template_dir=_template_dir())
+
+    def _service(
+        self,
+        session_store: SessionStore,
+        prompt_composer: PromptComposer,
+        **kwargs,
+    ) -> ChatService:
+        return ChatService(
+            session_store=session_store,
+            prompt_composer=prompt_composer,
+            scene_config=INTERACTIVE_SCENE_CONFIG,
+            **kwargs,
+        )
+
+    def _session_with_memory(self, store: SessionStore) -> Session:
+        """构造带 episode_summaries + confirmed_facts 的 session。"""
+        session = store.create(fund_code="011649")
+        ps = PinnedState(
+            fund_code="011649",
+            active_document_id="011649-2025-annual_report-abc123",
+            active_year=2025,
+            user_constraints={"confirmed_facts": "基金经理任期5年"},
+        )
+        session = session.with_pinned_state(ps)
+        session = session.add_episode_summary(
+            EpisodeSummary(
+                episode_id="ep-1",
+                start_turn_id=0,
+                end_turn_id=3,
+                title="持仓分析",
+                goal="分析持仓变化",
+                confirmed_facts=("前十大持仓占净值60%",),
+                open_questions=("未来调仓方向？",),
+            )
+        )
+        store.save(session)
+        return session
+
+    def test_memory_slot_injected(
+        self, session_store: SessionStore, prompt_composer: PromptComposer
+    ) -> None:
+        """episode_summaries + confirmed_facts → 注入 memory slot。"""
+        service = self._service(session_store, prompt_composer)
+        session = self._session_with_memory(session_store)
+
+        contributions = service._build_contributions(session)
+
+        memory = contributions.get("memory", "")
+        assert memory
+        assert "## 会话记忆" in memory
+        assert "历史摘要，非当前证据" in memory
+        assert "持仓分析" in memory
+        assert "分析持仓变化" in memory
+        assert "前十大持仓占净值60%" in memory
+        assert "基金经理任期5年" in memory
+
+    def test_no_memory_slot_for_old_session(
+        self, session_store: SessionStore, prompt_composer: PromptComposer
+    ) -> None:
+        """旧 session（无 episode_summaries / 无 confirmed_facts）不产生 memory slot。"""
+        service = self._service(session_store, prompt_composer)
+        session = session_store.create(fund_code="011649")
+
+        contributions = service._build_contributions(session)
+
+        assert "memory" not in contributions
+
+    def test_format_episode_summaries_recent_three_only(
+        self, session_store: SessionStore, prompt_composer: PromptComposer
+    ) -> None:
+        """超过 3 条时只取最近 3 条（最旧丢弃）。"""
+        service = self._service(session_store, prompt_composer)
+        session = session_store.create(fund_code="011649")
+        for i in range(4):
+            session = session.add_episode_summary(
+                EpisodeSummary(
+                    episode_id=f"ep-{i}",
+                    start_turn_id=i,
+                    end_turn_id=i,
+                    title=f"主题{i}",
+                )
+            )
+
+        text = service._format_episode_summaries(session)
+
+        assert "主题0" not in text
+        assert "主题1" in text
+        assert "主题3" in text
+
+    def test_overlong_fact_question_truncated(
+        self, session_store: SessionStore, prompt_composer: PromptComposer
+    ) -> None:
+        """单条 fact/question 超 100 token 截断加省略号（Mimo finding 003）。"""
+        service = self._service(session_store, prompt_composer)
+        long_fact = "已确认事实" + "持仓集中度分析说明" * 60
+        long_question = "待解决问题" + "调仓方向与风险评估细节" * 60
+        assert service._estimate_token_count(long_fact) > 100
+        assert service._estimate_token_count(long_question) > 100
+        session = session_store.create(fund_code="011649")
+        session = session.add_episode_summary(
+            EpisodeSummary(
+                episode_id="ep-1",
+                start_turn_id=0,
+                end_turn_id=1,
+                title="主题",
+                goal="目标",
+                confirmed_facts=(long_fact,),
+                open_questions=(long_question,),
+            )
+        )
+
+        text = service._format_episode_summaries(session)
+
+        assert "…" in text
+        for item in (long_fact, long_question):
+            truncated = service._truncate_to_token_bound(item, 100)
+            assert truncated.endswith("…")
+            assert service._estimate_token_count(truncated) <= 100
+        assert long_fact not in text
+        assert long_question not in text
+
+    def test_token_upper_bound_drops_oldest(
+        self, session_store: SessionStore, prompt_composer: PromptComposer
+    ) -> None:
+        """总长超 500 token 时丢最旧，直到 <=500。"""
+        service = self._service(session_store, prompt_composer)
+        session = session_store.create(fund_code="011649")
+        for i in range(3):
+            facts = tuple(
+                f"事实{i}-{j}" + "长期持仓集中度分析数据" * 4
+                for j in range(3)
+            )
+            session = session.add_episode_summary(
+                EpisodeSummary(
+                    episode_id=f"ep-{i}",
+                    start_turn_id=i,
+                    end_turn_id=i,
+                    title=f"主题{i}",
+                    confirmed_facts=facts,
+                )
+            )
+
+        text = service._format_episode_summaries(session)
+
+        assert service._estimate_token_count(text) <= 500
+        assert "主题0" not in text  # 最旧被丢弃
+        assert "主题2" in text
+
+    def test_single_giant_episode_still_bounded(
+        self, session_store: SessionStore, prompt_composer: PromptComposer
+    ) -> None:
+        """仅剩单条仍超限时截断，保证 <=500 上界。"""
+        service = self._service(session_store, prompt_composer)
+        long_fact = "巨型事实" + "长文本内容" * 200
+        session = session_store.create(fund_code="011649")
+        session = session.add_episode_summary(
+            EpisodeSummary(
+                episode_id="ep-1",
+                start_turn_id=0,
+                end_turn_id=1,
+                title="巨型主题",
+                confirmed_facts=(long_fact,) * 5,
+            )
+        )
+
+        text = service._format_episode_summaries(session)
+
+        assert service._estimate_token_count(text) <= 500
+
+    def test_all_empty_returns_empty_string(
+        self, session_store: SessionStore, prompt_composer: PromptComposer
+    ) -> None:
+        """无 episode / episode 字段全空 → 空字符串（不产生 slot）。"""
+        service = self._service(session_store, prompt_composer)
+        session = session_store.create(fund_code="011649")
+        assert service._format_episode_summaries(session) == ""
+        session = session.add_episode_summary(
+            EpisodeSummary(episode_id="ep-1", start_turn_id=0, end_turn_id=0)
+        )
+        assert service._format_episode_summaries(session) == ""
+
+    def test_pinned_facts_empty_when_missing(
+        self, session_store: SessionStore, prompt_composer: PromptComposer
+    ) -> None:
+        """confirmed_facts 缺失或空白 → 空元组（跳过注入）。"""
+        service = self._service(session_store, prompt_composer)
+        session = session_store.create(fund_code="011649")
+        assert service._pinned_facts(session) == ()
+        ps = PinnedState(
+            fund_code="011649", user_constraints={"confirmed_facts": "   "}
+        )
+        assert service._pinned_facts(session.with_pinned_state(ps)) == ()
+
+    def test_compaction_write_read_loop(self, tmp_path: Path) -> None:
+        """compaction 写 → 下一轮 _build_contributions 读：闭环注入（inject 不联网）。"""
+        store = SessionStore(tmp_path / "sessions")
+        session = _create_turned_session(store, turn_count=3)
+        service = self._service(
+            store,
+            PromptComposer(template_dir=_template_dir()),
+            enable_episode_summary=True,
+            compaction_trigger_turns=3,
+        )
+        service.inject_compaction_result(
+            {
+                "episode_summary": {
+                    "title": "持仓分析摘要",
+                    "goal": "分析持仓变化",
+                    "confirmed_facts": ["事实1"],
+                    "open_questions": ["问题1"],
+                },
+                "pinned_state_patch": {"confirmed_facts": "基金经理任期5年"},
+            }
+        )
+
+        service.chat_turn(
+            ChatTurnRequest(session_id=session.session_id, user_text="新问题"),
+            agent_result=AgentRunResult(
+                answer="新回答", citations=(), tool_trace=(), failure=None
+            ),
+        )
+
+        deadline = time.monotonic() + 2.0
+        updated = store.load(session.session_id)
+        while len(updated.episode_summaries) == 0 and time.monotonic() < deadline:
+            time.sleep(0.05)
+            updated = store.load(session.session_id)
+        assert len(updated.episode_summaries) >= 1
+
+        contributions = service._build_contributions(updated)
+
+        assert "memory" in contributions
+        assert "持仓分析摘要" in contributions["memory"]
+        assert "基金经理任期5年" in contributions["memory"]
+
+
 def test_interactive_nonstream_long_answer_truncated_by_final_guard(tmp_path: Path) -> None:
     """interactive 非流式路径：chat_turn -> runner.run(scene=interactive) 时终答守卫生效。
 
@@ -915,13 +1450,21 @@ def test_interactive_nonstream_long_answer_truncated_by_final_guard(tmp_path: Pa
 
     long_answer = ("3.2.1 基金份额净值增长率及其与同期业绩比较基准收益率的比较\n" * 200)
 
-    def factory(llm_client, tool_service, max_steps: int = 8) -> LlmToolLoopRunner:
+    def factory(
+        llm_client,
+        tool_service,
+        max_steps: int = 8,
+        aggregate_handler=None,
+        failed_call_keys: frozenset[tuple] | None = None,
+    ) -> LlmToolLoopRunner:
         return LlmToolLoopRunner(
             tool_service=tool_service,
             llm_client=FakeLlmClient(
                 [FinalAnswer(answer=long_answer, citations=(), key_facts=())] * 2
             ),
             max_steps=max_steps,
+            aggregate_handler=aggregate_handler,
+            failed_call_keys=failed_call_keys,
         )
 
     session_store = SessionStore(tmp_path / "sessions")
@@ -946,3 +1489,378 @@ def test_interactive_nonstream_long_answer_truncated_by_final_guard(tmp_path: Pa
 
     assert len(result.answer) <= 225
     assert "截断" in result.answer
+
+
+# ── P0-2 aggregate 接线 + 跨轮失败短路 ─────────────────────────────
+
+
+def _fake_aggregate_series_result() -> AggregateMultiYearAnnualPerformanceResult:
+    """构造 5 年 complete coverage 的 fake aggregate 结果。"""
+
+    years = (2021, 2022, 2023, 2024, 2025)
+    rows = tuple(
+        MultiYearAnnualPerformanceRow(
+            year=year,
+            annual_nav_growth_rate="17.32%",
+            annual_benchmark_return_rate="12.50%",
+            annual_excess_return="4.82%",
+            citations=(),
+        )
+        for year in years
+    )
+    series = MultiYearAnnualPerformanceSeries(
+        fund_code="007466",
+        requested_years=years,
+        covered_years=years,
+        missing_years=(),
+        coverage_status="complete",
+        coverage_count=5,
+        minimum_required_count=3,
+        share_class_scope="A",
+        rows=rows,
+        citations=(),
+    )
+    return AggregateMultiYearAnnualPerformanceResult(series=(series,), failure=None)
+
+
+def _aggregate_tool_call(
+    document_id: str,
+    *,
+    fund_code: str = "007466",
+    share_class: str = "A",
+) -> ToolCall:
+    """构造 aggregate_multi_year_annual_performance 的 ToolCall。"""
+
+    return ToolCall(
+        tool_name=ToolName.AGGREGATE_MULTI_YEAR_ANNUAL_PERFORMANCE,
+        document_id=document_id,
+        extra={
+            "fund_code": fund_code,
+            "requested_years": (2021, 2022, 2023, 2024, 2025),
+            "annual_report_documents": [{"year": 2021, "document_id": "doc-2021"}],
+            "share_class": share_class,
+        },
+    )
+
+
+def test_aggregate_handler_injected_returns_structured_result(tmp_path: Path) -> None:
+    """ChatService 注入 aggregate_handler 后，aggregate 调用返回结构化结果。"""
+
+    captured: dict[str, object] = {}
+
+    def fake_aggregate_handler(document_id, fund_code, requested_years, annual_report_documents, share_class):
+        captured["document_id"] = document_id
+        captured["fund_code"] = fund_code
+        captured["requested_years"] = tuple(requested_years)
+        captured["share_class"] = share_class
+        return _fake_aggregate_series_result()
+
+    document_id = "007466-2025-annual_report-ee23d4b8070dce1a"
+
+    def factory(
+        llm_client,
+        tool_service,
+        max_steps: int = 8,
+        aggregate_handler=None,
+        failed_call_keys: frozenset[tuple] | None = None,
+    ) -> LlmToolLoopRunner:
+        assert aggregate_handler is fake_aggregate_handler
+        return LlmToolLoopRunner(
+            tool_service=tool_service,
+            llm_client=FakeLlmClient(
+                [
+                    _aggregate_tool_call(document_id),
+                    FinalAnswer(
+                        answer="2021-2025 年度净值增长率均为 17.32%，显著高于基准的 12.50%。",
+                        citations=(),
+                        key_facts=("17.32%",),
+                    ),
+                ]
+            ),
+            max_steps=max_steps,
+            aggregate_handler=aggregate_handler,
+            failed_call_keys=failed_call_keys,
+        )
+
+    session_store = SessionStore(tmp_path / "sessions")
+    prompt_composer = PromptComposer(template_dir=_template_dir())
+    service = ChatService(
+        session_store=session_store,
+        prompt_composer=prompt_composer,
+        scene_config=INTERACTIVE_SCENE_CONFIG,
+        runner_factory=factory,
+        aggregate_handler=fake_aggregate_handler,
+    )
+    session = session_store.create(fund_code="007466")
+    ps = PinnedState(fund_code="007466", active_document_id=document_id, active_year=2025)
+    session_store.save(session.with_pinned_state(ps))
+
+    result = service.chat_turn(
+        ChatTurnRequest(session_id=session.session_id, user_text="2021-2025 份额净值增长率")
+    )
+
+    assert result.answer == "2021-2025 年度净值增长率均为 17.32%，显著高于基准的 12.50%。"
+    assert captured["fund_code"] == "007466"
+    assert captured["requested_years"] == (2021, 2022, 2023, 2024, 2025)
+    assert captured["share_class"] == "A"
+    assert captured["document_id"] == document_id
+
+
+def test_no_aggregate_handler_keeps_unavailable_failure(tmp_path: Path) -> None:
+    """未注入 aggregate_handler 时 aggregate 调用保持既有 unavailable 行为。"""
+
+    document_id = "007466-2025-annual_report-ee23d4b8070dce1a"
+
+    def factory(
+        llm_client,
+        tool_service,
+        max_steps: int = 8,
+        aggregate_handler=None,
+        failed_call_keys: frozenset[tuple] | None = None,
+    ) -> LlmToolLoopRunner:
+        assert aggregate_handler is None
+        return LlmToolLoopRunner(
+            tool_service=tool_service,
+            llm_client=FakeLlmClient(
+                [
+                    _aggregate_tool_call(document_id),
+                    FinalAnswer(
+                        answer="根据已有信息，未找到相关数据。",
+                        citations=(),
+                        key_facts=(),
+                    ),
+                ]
+            ),
+            max_steps=max_steps,
+            aggregate_handler=aggregate_handler,
+            failed_call_keys=failed_call_keys,
+        )
+
+    session_store = SessionStore(tmp_path / "sessions")
+    prompt_composer = PromptComposer(template_dir=_template_dir())
+    service = ChatService(
+        session_store=session_store,
+        prompt_composer=prompt_composer,
+        scene_config=INTERACTIVE_SCENE_CONFIG,
+        runner_factory=factory,
+    )
+    session = session_store.create(fund_code="007466")
+    ps = PinnedState(fund_code="007466", active_document_id=document_id, active_year=2025)
+    session_store.save(session.with_pinned_state(ps))
+
+    result = service.chat_turn(
+        ChatTurnRequest(session_id=session.session_id, user_text="2021-2025 份额净值增长率")
+    )
+
+    assert result.answer == "根据已有信息，未找到相关数据。"
+    saved = session_store.load(session.session_id)
+    assert saved.turns[1].tool_calls[0].tool_name == ToolName.AGGREGATE_MULTI_YEAR_ANNUAL_PERFORMANCE.value
+    assert saved.turns[1].tool_calls[0].success is False
+    assert saved.turns[1].tool_calls[0].failure_code == FailureCode.UNAVAILABLE.value
+    # 本轮失败调用 key 合并进 session
+    assert saved.failed_tool_call_keys != ()
+
+
+def test_failed_call_keys_merged_and_passed_to_next_round(tmp_path: Path) -> None:
+    """跨轮：上一轮失败调用 key 落 session，下一轮以 frozenset 传入 runner 短路。"""
+
+    document_id = "007466-2025-annual_report-ee23d4b8070dce1a"
+    handler_calls = 0
+    received_failed_keys: list[frozenset[tuple] | None] = []
+
+    def failing_handler(document_id, fund_code, requested_years, annual_report_documents, share_class):
+        nonlocal handler_calls
+        handler_calls += 1
+        return AggregateMultiYearAnnualPerformanceResult(
+            series=(),
+            failure=ToolFailure(code=FailureCode.NOT_FOUND, message="multi-year annual performance 覆盖不足 3 年"),
+        )
+
+    def factory(
+        llm_client,
+        tool_service,
+        max_steps: int = 8,
+        aggregate_handler=None,
+        failed_call_keys: frozenset[tuple] | None = None,
+    ) -> LlmToolLoopRunner:
+        received_failed_keys.append(failed_call_keys)
+        return LlmToolLoopRunner(
+            tool_service=tool_service,
+            llm_client=llm_client,
+            max_steps=max_steps,
+            aggregate_handler=aggregate_handler,
+            failed_call_keys=failed_call_keys,
+        )
+
+    session_store = SessionStore(tmp_path / "sessions")
+    prompt_composer = PromptComposer(template_dir=_template_dir())
+    service = ChatService(
+        session_store=session_store,
+        prompt_composer=prompt_composer,
+        scene_config=INTERACTIVE_SCENE_CONFIG,
+        runner_factory=factory,
+        aggregate_handler=failing_handler,
+    )
+    session = session_store.create(fund_code="007466")
+    ps = PinnedState(fund_code="007466", active_document_id=document_id, active_year=2025)
+    session_store.save(session.with_pinned_state(ps))
+
+    # 第一轮：aggregate 失败 1 次后模型收尾
+    first_client = FakeLlmClient(
+        [
+            _aggregate_tool_call(document_id),
+            FinalAnswer(answer="根据已有信息，未找到相关数据。", citations=(), key_facts=()),
+        ]
+    )
+    first = service.chat_turn(
+        ChatTurnRequest(session_id=session.session_id, user_text="2021-2025 份额净值增长率"),
+        llm_client=first_client,
+    )
+    assert first.answer == "根据已有信息，未找到相关数据。"
+    assert handler_calls == 1
+    saved = session_store.load(session.session_id)
+    assert len(saved.failed_tool_call_keys) == 1
+
+    # 第二轮：相同 aggregate 调用被短路，handler 不再被调用
+    second_client = FakeLlmClient(
+        [
+            _aggregate_tool_call(document_id),
+            FinalAnswer(answer="根据已有信息，未找到相关数据。", citations=(), key_facts=()),
+        ]
+    )
+    second = service.chat_turn(
+        ChatTurnRequest(session_id=session.session_id, user_text="2021-2025 份额净值增长率"),
+        llm_client=second_client,
+    )
+    assert second.answer == "根据已有信息，未找到相关数据。"
+    assert handler_calls == 1  # 第二轮未实际调用 handler
+    assert received_failed_keys[1] == frozenset(saved.failed_tool_call_keys)
+
+
+class TestProviderModelInjection:
+    """ChatService 注入层 provider 感知模型映射测试。"""
+
+    @pytest.fixture
+    def session_store(self, tmp_path: Path) -> SessionStore:
+        return SessionStore(tmp_path / "sessions")
+
+    @pytest.fixture
+    def prompt_composer(self) -> PromptComposer:
+        return PromptComposer(template_dir=_template_dir())
+
+    def _create_session(self, store: SessionStore) -> Session:
+        """创建带 active_document_id 的测试 session。"""
+
+        session = store.create(fund_code="011649")
+        ps = PinnedState(
+            fund_code="011649",
+            active_document_id="doc-011649-2025",
+            active_year=2025,
+        )
+        session = session.with_pinned_state(ps)
+        store.save(session)
+        return session
+
+    def _service(self, session_store: SessionStore, prompt_composer: PromptComposer) -> ChatService:
+        """构造使用 recording runner 的 ChatService（不注入 agent_result）。"""
+
+        return ChatService(
+            session_store=session_store,
+            prompt_composer=prompt_composer,
+            scene_config=ASK_SCENE_CONFIG,
+            runner_factory=lambda llm_client, tool_service, **kw: _RecordingRunner(
+                llm_client=llm_client, tool_service=tool_service
+            ),
+        )
+
+    def _capture_client(self, monkeypatch: pytest.MonkeyPatch) -> dict:
+        """monkeypatch DeepSeekLlmClient 为 recording fake，返回捕获 kwargs 的 dict。"""
+
+        captured: dict = {}
+
+        class _FakeClient:
+            def __init__(self, **kwargs: object) -> None:
+                captured.update(kwargs)
+
+        monkeypatch.setattr(chat_service_module, "DeepSeekLlmClient", _FakeClient)
+        return captured
+
+    def test_mimo_provider_translates_scene_model(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        session_store: SessionStore,
+        prompt_composer: PromptComposer,
+    ) -> None:
+        """provider=mimo 时 scene 模型名 deepseek-v4-flash 翻译为 mimo-v2.5 并写入 MIMO_MODEL。"""
+
+        monkeypatch.setenv(LLM_PROVIDER_ENV, "mimo")
+        monkeypatch.delenv(MIMO_MODEL_ENV, raising=False)
+        captured = self._capture_client(monkeypatch)
+
+        service = self._service(session_store, prompt_composer)
+        session = self._create_session(session_store)
+        service.chat_turn(ChatTurnRequest(session_id=session.session_id, user_text="问题"))
+
+        assert captured["env"]["MIMO_MODEL"] == "mimo-v2.5"
+
+    def test_mimo_provider_prefers_model_env(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        session_store: SessionStore,
+        prompt_composer: PromptComposer,
+    ) -> None:
+        """provider=mimo 且 MIMO_MODEL env 已设置时必须优先于 scene 模型名。"""
+
+        monkeypatch.setenv(LLM_PROVIDER_ENV, "mimo")
+        monkeypatch.setenv(MIMO_MODEL_ENV, "mimo-env-model")
+        captured = self._capture_client(monkeypatch)
+
+        service = self._service(session_store, prompt_composer)
+        session = self._create_session(session_store)
+        service.chat_turn(ChatTurnRequest(session_id=session.session_id, user_text="问题"))
+
+        assert captured["env"]["MIMO_MODEL"] == "mimo-env-model"
+
+    def test_deepseek_provider_writes_scene_model(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        session_store: SessionStore,
+        prompt_composer: PromptComposer,
+    ) -> None:
+        """provider 默认 deepseek 时 scene 模型名写入 DEEPSEEK_MODEL。"""
+
+        monkeypatch.setenv(LLM_PROVIDER_ENV, "deepseek")
+        monkeypatch.delenv(DEEPSEEK_MODEL_ENV, raising=False)
+        captured = self._capture_client(monkeypatch)
+
+        service = self._service(session_store, prompt_composer)
+        session = self._create_session(session_store)
+        service.chat_turn(ChatTurnRequest(session_id=session.session_id, user_text="问题"))
+
+        assert captured["env"]["DEEPSEEK_MODEL"] == "deepseek-v4-flash"
+
+    def test_contract_model_translated_for_mimo(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        session_store: SessionStore,
+        prompt_composer: PromptComposer,
+    ) -> None:
+        """provider=mimo 时 contract.model_name=deepseek-v4-pro 翻译为 mimo-v2.5-pro。"""
+
+        monkeypatch.setenv(LLM_PROVIDER_ENV, "mimo")
+        monkeypatch.delenv(MIMO_MODEL_ENV, raising=False)
+        captured = self._capture_client(monkeypatch)
+
+        service = self._service(session_store, prompt_composer)
+        session = self._create_session(session_store)
+        service.chat_turn(
+            ChatTurnRequest(session_id=session.session_id, user_text="问题"),
+            contract=ChatTurnContract(
+                scene="ask",
+                session_id=session.session_id,
+                user_text="问题",
+                model_name="deepseek-v4-pro",
+            ),
+        )
+
+        assert captured["env"]["MIMO_MODEL"] == "mimo-v2.5-pro"

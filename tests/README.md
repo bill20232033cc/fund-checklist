@@ -462,3 +462,24 @@ uv run pytest tests/fund/service/test_extraction.py -q --tb=short
 ```
 
 整体验收（opt-in live e2e，总控手动执行）：`uv run fund-checklist interactive --fund-code 004393 --work-dir .fund_e2e_004393 --enable-tool-trace`，重跑原 9 问，目标 0 条 `LLM 处理失败`、2 条误拦截解除、失败轮在 session 可见。
+
+## 交互问答改进验收测试集（2026-08-09，P0-1/P0-2/P1 + F1/F2/F3 收口）
+
+- `tests/fund/cli/test_interactive_live_smoke.py`：四问（Q1 基金经理持有本产品吗 / Q2 基金经理是谁 / Q3 前十大持仓 / Q4 2021-2025 份额净值增长率）× 007466/004393 共 8 条 opt-in live 验收。默认 pytest no-network：未设 `FUND_CHECKLIST_RUN_LIVE_DEEPSEEK=1` 或 work-dir（`.fund_e2e_007466` / `.fund_e2e_004393`，gitignored）缺席时 skip。断言按语义不写死表号：Q1 含 50/100/万份；Q2 007466=柳军/柳叶青、004393=张明；Q3 验证 read_table 目标表行头含 股票名称/公允价值（截断容忍正则解析 arguments_display，回退 answer 语义）；Q4 aggregate ≥1 次成功 + tool_calls ≤8 + 无表格粘贴 + ≤200 字硬断言 + 非 fail-closed 消息 + 覆盖 202[1-5]，004393 另断言 "2022" in answer（F2：缺失年份必须说明）。
+- `tests/fund/cli/test_interactive_known_gaps.py`：F1/F2/F3 已知缺口已全部修复（2026-08-09），3 条 `xfail(strict=True)` 均已摘除——F1 改普通断言（硬守卫 ≤ 目标 200）、F2 改可解释缺失断言（004393 covered=(2021,2023,2024,2025)、missing=(2022,)，2022 单年度 10F message 含「无「过去一年」行」+「自基金转型起至今」）、F3 改管道默认年份断言（/history 不被吞）；另有常量钉死（40/200/200）与 F3 新机制（非 TTY 默认年份、`--year` 参数）硬测试。
+
+验证命令：
+
+```bash
+# 本地确定性层（默认 pytest，不联网）
+env -u FUND_CHECKLIST_RUN_LIVE_DEEPSEEK uv run pytest tests/fund/cli/test_interactive_live_smoke.py tests/fund/cli/test_interactive_known_gaps.py -v --tb=short
+# 当前结果：3 passed, 8 skipped
+
+# 回归
+uv run pytest tests/fund/cli/test_cli_interactive.py -q --tb=short
+# 当前结果：93 passed（含 --year 参数与管道默认年份测试）
+
+# opt-in live 层（需 DEEPSEEK_API_KEY，总控执行）
+FUND_CHECKLIST_RUN_LIVE_DEEPSEEK=1 uv run pytest tests/fund/cli/test_interactive_live_smoke.py -v --tb=short
+# 2026-08-09 controller 复跑结果：8 passed（F1/F2/F3 修复后；全量曾 1 次偶发 fail-closed，单测重跑通过，非代码回归）
+```

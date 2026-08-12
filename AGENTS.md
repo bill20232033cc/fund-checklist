@@ -1,6 +1,6 @@
 # Repository Agent Rules
 
-更新时间：2026-07-25
+更新时间：2026-08-11
 
 ## 语言与沟通
 
@@ -43,10 +43,13 @@ PDF
 验收约束（适用于所有阶段）：
 - 不接受仅 Service / ToolService 层测试；任何阶段的验收必须包含 Host / Agent loop 或 CLI 端到端 smoke。
 
-当前已知能力差距（来自 dayu-agent 对标研究，2026-07-11）：
-- **多轮对话**：✅ Phase 7 已完成（`interactive` 子命令，会话持久化 + 上下文记忆）
-- **上下文治理**：✅ Phase 7 已完成（Context Budget 基础 + Episode Summary），ContextBudget 未接入 runner（Phase 7.1 待完成）
-- **联网搜索**：无法获取实时市场数据
+当前已知能力差距（基线：dayu-agent 对标研究 2026-07-11；2026-08-11 按 dayu-agent-r 研究收口更新，完整研究见 `docs/research/dayu-agent-r-research-20260810.md`）：
+- **多轮对话**：✅ 已完成（`interactive` 子命令，会话持久化 + 上下文记忆，Phase 7）
+- **上下文治理**：✅ 已完成（Context Budget 基础 + Episode Summary + 记忆注入 P1；ContextBudget 已接入 runner，Phase 7.1a 2026-07-27）
+- **联网搜索 / 网页抓取**：未采用（产品边界与合规决策，研究 §5 决策项 6）
+- **微信入口 / GUI / Web UI**：不在基金分析助手范围（研究 §3）
+- **BM25F 检索排序增强**（研究 §5 建议 1）：✅ 已完成（2026-08-13，确定性排序升级、不改变召回；设计见 `docs/design.md` §6.20）
+- **后续 backlog 候选**：日志 VERBOSE 分级 + 有界脱敏诊断载荷、Tool Trace operator 对齐（研究 §5 建议 2/3）
 
 Phase 5 已完成（2026-07-24）：
 - **LLM 自主工具调用**：`ask` 子命令走 LLM 自主决策工具调用路径（Slice 19A-19F）
@@ -64,7 +67,7 @@ Phase 7 已完成（2026-07-26）：
 - **LLM 工具调用链路**：routing context 直返 + prompt search→read→cite 策略 + tool call 去重 + extra 字段解析
 - 真实 LLM 验证通过（deepseek-v4-flash，ask + interactive）
 
-LLM provider 已支持 DeepSeek 与 Mimo（OpenAI-compatible adapter）；暂不需要接入 Gemini/OpenAI/Anthropic 等其他 provider。
+LLM provider 已支持 DeepSeek 与 Mimo（OpenAI-compatible adapter），经 `FUND_CHECKLIST_LLM_PROVIDER`（`deepseek` 默认 / `mimo`）自由切换，各自独立 env（`DEEPSEEK_API_KEY`/`DEEPSEEK_BASE_URL`/`DEEPSEEK_MODEL` 与 `MIMO_API_KEY`/`MIMO_BASE_URL`/`MIMO_MODEL`）；暂不需要接入 Gemini/OpenAI/Anthropic 等其他 provider。
 
 - 对基金文档的存取必须通过统一 Fund documents / tool service 边界。
 Phase 7.1 已裁决（2026-07-26）。集成补完 + Dayu 场景借鉴：
@@ -88,6 +91,7 @@ Phase 7.3 已完成（2026-07-29）。对话历史注入 LLM context（方案 B 
 - **失败模式缓解**：9 项（FM1-FM9），详见优化设计文档
 - **Bug 修复**：5 处 temperature 未透传（deepseek_llm.py / chat_service.py / extraction.py / main.py）+ document_id 前缀匹配（llm_tool_loop.py）
 - **DS 二审裁决**：有条件通过（已处理全部 3 项）
+- **记忆注入补接线（2026-08-09，P1）**：`_build_contributions` 增加 `memory` slot，EpisodeSummary（最近 ≤3 条，总长 ≤500 token 超限丢最旧，单条超 100 token 截断加省略号）与 PinnedState `confirmed_facts` 经 `build_memory_contribution` 编织进 system prompt，并标注「历史摘要，非当前证据」；空数据不产生 slot；方案 B 不变，协议层/ContextBudget/compaction 策略不动。
 Phase 7.4 已实现（2026-08-02）：interactive e2e 失败修复 S0-S7 全部 ACCEPTED，opt-in live e2e 11/11 通过（0 失败 / 0 误拦截）：
 - **失败自愈**：工具失败（ToolFailure）回喂 LLM 作为下一轮输入（可修正 section_ref/工具名/document_id），重复失败调用去重短路；provider 畸形响应仍 fail-closed，不回喂。
 - **失败轮可观测性**：失败轮成对持久化进 session（含 tool_calls/tool_trace）；被投资建议拦截的回答保留原文与触发词；`--enable-tool-trace` 可显示失败路径工具调用（注意 e276ff3 曾误用不存在的 `entry.status` 字段，实现以 `result_kind`/`failure_code` 为准）。
@@ -99,7 +103,7 @@ Phase 7.4 已实现（2026-08-02）：interactive e2e 失败修复 S0-S7 全部 
 - 计划与 goal 产物：`.sisyphus/plans/interactive-e2e-fix-20260802.md`、`.sisyphus/goals/phase7.4-goal.md`、`.sisyphus/plans/phase7.4-s3-caliber-proposal.md`（均经 Mimo review ACCEPTED）。
 - 禁止 Service / UI / Host / 展示层 / LLM prompt 直接消费 raw PDF、raw Docling JSON、PDF cache path、本地路径、URL secret 或 parser private payload。
 
-interactive 问答质量语义（2026-08-05，Mimo review ACCEPTED）：受控检索路由新增 `manager_holdings` profile（9.4 持有本基金；规模/份额/基准/超额/十大持仓 profile 排后续）；search 连续 2 次 0 命中由 runner 强制收敛（有 profile 自动候选词重试最多 1 轮），候选词注入在 Service 层、收敛执行在 Agent 层（runner 不 import service）；终答保持 JSON 契约 + runner 解包，answer 与 evidence 连续重叠 ≥40 字符或 >800 字时有界重答 1 次；interactive `max_iterations` = 12；方案 E（跳过 evidence/citation 校验）不变。
+interactive 问答质量语义（2026-08-05，Mimo review ACCEPTED；2026-08-09 补充；2026-08-11 补充 Fix A/E/C）：受控检索路由新增 `manager_holdings` profile（9.4 持有本基金；规模/份额/基准/超额/十大持仓 profile 排后续）；search 连续 2 次 0 命中由 runner 强制收敛（有 profile 自动候选词重试最多 1 轮），候选词注入在 Service 层、收敛执行在 Agent 层（runner 不 import service）；终答保持 JSON 契约 + runner 解包，answer 与 evidence 连续重叠 ≥40 字符或 >200 字时有界重答 1 次（2026-08-09 F1：终答 ≤200 字为 runner 硬约束，>200 触发有界重答 1 次，仍超标截断为 ≤200 字摘要，含省略说明）；interactive `max_iterations` = 8（2026-08-09 由 12 下调）；方案 E（跳过 evidence/citation 校验）不变。2026-08-09 补接线（P0-1/P0-2，Mimo review ACCEPTED）：① 受控表锚点——Service 层对高误命中 query 类（`manager_holdings` 9.4 行头优先 9.2 回退、`holdings_top10` 表头签名 序号/股票名称/公允价值 且 ≥10 行）组合 public tools 解析 `table_ref` 锚点注入 prompt，解析失败 fail-open 不注入；② `aggregate_multi_year_annual_performance` 在 interactive 开放（handler 以 catalog 重解析 annual_report_documents，忽略 LLM document_id；share_class A 类优先；ask 不开放）；③ 跨轮失败调用短路——失败调用 key（与 `_dedup_key` 同结构、含 document_id 维度）持久化进 session（上限 50 丢最旧），相同失败调用直接短路不重跑；`_dedup_key` 工具级归一化（search 归一化 query、read_section/read_table 按 ref、aggregate 按 fund_code+years+share_class）。2026-08-09 遗留缺口修复（F1/F2/F3，均 Mimo review ACCEPTED）：F1 终答 ≤200 字硬约束（见上）；F2 004393-2022 为转型当年（2022-08-08 合同生效）无「过去一年」行——10F/10G 对「表存在但无过去一年行」的 not_found message 携带可解释后缀，interactive 必须对 missing_years 逐一说明原因、禁止静默跳过或把「自基金转型起至今/期间增长率」写入年度 series；F3 interactive 年份选择新增 `--year` 参数，无 `--year` 且 stdin 非 TTY 时直接默认最新年份（不调用 input() 消费 REPL 首行），TTY 保留交互提示。2026-08-11 修复（004393「近一年净值增长率」问答，根因 R1/R2 见 implementation-control.md，均 Mimo review ACCEPTED）：① Fix A——`force_answer`（max_steps 耗尽降级）分支在 interactive 下与正常 FinalAnswer 同走终答守卫（`_apply_interactive_final_guards`，含投资建议拦截 + ≤200 字约束），不再绕过守卫；② Fix E——`performance_returns` 受控候选词首位加入「净值增长率」（原已是 alias，仅调候选词顺序；aliases / acceptable_title_family / requires_table_citation / extraction_allowed 不变）；③ Fix C——`performance_returns` 加入受控表锚点范围（3.2.1 exact-title search → list_tables → 表头签名 阶段/份额净值增长率/业绩比较基准收益率 去空白归一化 → A 类标题优先含 A 排除 C，004393-2025 命中 table-0009，解析失败 fail-open 不注入）；runner 层新增 `read_table` 表号一致性校验（仅 interactive）：放行集合 = 本轮 `list_tables` 结果 ∪ search 命中 `SearchResult.table_ref`，未列出/未命中的表号返回 `NOT_FOUND`「table_ref 未在当前已列出章节的表格中，请先 list_tables 并复制返回的表号」并回喂 LLM、计入失败调用短路；`ask` 不拦截。
 
 Phase 7.5 已裁决（2026-08-05）：generate 报告生成章节级并发（设计经 Mimo review ACCEPTED，实现完成，待 controller review）：
 - **并发语义**：A 前置串行 → B Ch1-6 并行（写→审计→重写闭环在 worker 内）→ C 决策串行 → D Ch0/Ch7 并行收尾；B/D 之间强制 join；输出按 chapter_id 0..7 稳定组装，warnings 按章排序。
@@ -108,6 +112,7 @@ Phase 7.5 已裁决（2026-08-05）：generate 报告生成章节级并发（设
 - **线程安全硬约束**：worker 禁止直接 print（进度输出必须经主线程）；`_process_states` 按章 key + Lock；ArtifactStore 按章分文件唯一 writer；共享输入全阶段只读。
 - **边界**：不引入 dayu runtime/代码/async 事件循环（DeepSeek 调用为同步 `generate_text`）；复制 Dayu 代码需先过 license gate；不改 `search_document` / Service reading tools 公共契约；不触碰 Phase 7.4 与 F1.1 未提交区域。
 - 设计产物：`.sisyphus/plans/phase7.5-chapter-concurrency-design.md`（Mimo review ACCEPTED）；命名 Phase 7.5，备选 Slice 14D。
+- LLM provider 自由切换（2026-08-10，DS 实施 + controller 复跑 + Mimo review ACCEPTED）：新增 `FUND_CHECKLIST_LLM_PROVIDER`（`deepseek` 默认 / `mimo`，未知值 fail-fast 抛 ValueError 提示合法取值）+ 每 provider 独立 env（mimo 默认 base `https://api.xiaomimimo.com/v1`、模型 `mimo-v2.5-pro`），请求组装（next_step / next_step_stream / generate_text）统一走 `_provider_runtime`；scene/contract 模型名翻译表（`deepseek-v4-pro→mimo-v2.5-pro`、`deepseek-v4-flash→mimo-v2.5`，未知透传），解析顺序 provider 对应 MODEL env 非空优先；`ChatService` 注入层与 interactive current_model 展示 provider 化；错误文案泛化（去 DeepSeek 前缀）；类名/文件名保留。验证：provider 测试 20 passed、adapter+chat+interactive 196 passed、最小验证 175 passed；未 commit。slice 产物：`.sisyphus/plans/provider-switch-slice-20260810.md`。
 - Dayu 只能作为架构参考和能力来源；禁止直接引入 `dayu-agent`、`dayu.host`、`dayu.engine` 作为生产 runtime。
 - 复制或改写 Dayu 代码必须先经过 license/compliance gate。
 - Docling 为当前 production path：PDF 通过 integrity check 后进入 `DoclingConverter`，Docling JSON 通过 parser_health 后进入 `DoclingDocumentStore`。
@@ -115,7 +120,7 @@ Phase 7.5 已裁决（2026-08-05）：generate 报告生成章节级并发（设
 - 禁止做与 `pdfplumber` 的替代路线比较。
 - 结构化字段抽取、自动报告、信号评分已通过正式 Slice 准入（10C/10F/10G/11C/11D/13A/13B/14A/14C），不再受 MVP 禁止条款约束。
 - 真实 LLM 接入必须位于已实现的 fake/injected LLM tool-loop contract 之后；不得让 LLM provider、prompt 或 adapter 直接读取 raw PDF、raw Docling JSON、本地路径、cache path、repository/private loader、`local_import_id` 或 secret。
-- 当前 LLM provider 支持 DeepSeek 与 Mimo（OpenAI-compatible adapter）；暂不需要接入 Gemini/OpenAI/Anthropic 等其他 provider。
+- 当前 LLM provider 支持 DeepSeek 与 Mimo（OpenAI-compatible adapter），经 `FUND_CHECKLIST_LLM_PROVIDER`（`deepseek` 默认 / `mimo`）自由切换，各自独立 env（`DEEPSEEK_API_KEY`/`DEEPSEEK_BASE_URL`/`DEEPSEEK_MODEL` 与 `MIMO_API_KEY`/`MIMO_BASE_URL`/`MIMO_MODEL`）；暂不需要接入 Gemini/OpenAI/Anthropic 等其他 provider。
 - live provider smoke 必须显式 opt-in；默认 pytest 不得联网、不得读取真实 API key、不得记录 raw provider response 或新增 artifact。
 - `ask` 子命令已裁决通过（Phase 5，2026-07-24），streaming 已并入 Phase 5。
 - `interactive` 模式已裁决通过（Phase 7，2026-07-25）。

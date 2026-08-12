@@ -1,5 +1,7 @@
 # Dayu Agent 场景研究报告
 
+> 状态：2026-07-25 研究快照，非设计真源。本文「未对齐能力」清单（regenerate / repair / fix / decision / conversation_compaction）已在 Phase 7.2 全部借鉴落地，仅 wechat 不采用（`dayu-agent-r` 也已移除微信入口）；dayu 侧描述基于旧版 `noho/dayu-agent`（本地 2026-05-04 停更）。最新研究见 `docs/research/dayu-agent-r-research-20260810.md`；fc 当前状态以 `docs/implementation-control.md` 为准。
+
 > 研究时间：2026-07-25
 > 研究目的：梳理 Dayu 的 14 个场景设计，评估对 fund-checklist 的价值
 > 数据来源：dayu-agent 代码库（v0.1.4）

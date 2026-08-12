@@ -1,14 +1,15 @@
 # fund-checklist implementation-control
 
-更新时间：2026-08-06（QDII slice 序列 S1-S4 全部完成，controller review 通过；007466 slice 完成；interactive 质量修复完成）
+更新时间：2026-08-13（BM25F 检索排序增强 slice 全部完成：MiMo plan review + DS 实施 + MiMo diff review ACCEPTED）
 当前阶段：`FUND_ANALYSIS_ASSISTANT`
 当前角色：control / CIC-lite controller
-当前目标：QDII slice 序列 — S1 持仓 ✅、S2 费率 ✅、S3 资产配置 ✅、S4 持有本基金 ✅（全部 controller review 通过）。007466 slice — ✅。interactive 质量修复 — ✅。PDF 导出 fallback — ✅。测试修复 slice — ✅。Phase 7.5 — ✅。F1.1 — ✅。
+当前目标：QDII slice 序列 — S1 持仓 ✅、S2 费率 ✅、S3 资产配置 ✅、S4 持有本基金 ✅（全部 controller review 通过）。007466 slice — ✅。interactive 质量修复 — ✅。PDF 导出 fallback — ✅。测试修复 slice — ✅。Phase 7.5 — ✅。F1.1 — ✅。交互问答与记忆能力改进 — P0-1/P0-2/P1 全部实施完成（2026-08-09，Mimo 三连 ACCEPTED），待 opt-in live 复跑授权（见文末裁决节）。004393「近一年净值增长率」问答修复 — Fix A/E/C 全部完成（2026-08-11，Mimo ACCEPTED），待用户重启 interactive 进程 + 授权 live 复测（见文末收口节）。dayu-agent-r 研究 — ✅ 完成（docs/research/dayu-agent-r-research-20260810.md）。BM25F 检索排序增强 — ✅ 完成（2026-08-13，MiMo plan review + DS 实施 + MiMo diff review 全链路 ACCEPTED，见文末 slice 节）。
 关联文档：AGENTS.md（执行规则）、docs/design.md（设计决策）
 
 ## 已完成研究报告
 
 - **dayu-agent vs fund-checklist 能力对标研究**（2026-07-11）：完整对比报告已生成至 `docs/research/dayu-agent-vs-fund-checklist-analysis.md`，覆盖 Agent 问答、分析报告生成、架构层面三大维度，含优先级修复建议。报告确认：fc 的 reading tools 已对齐 Dayu；Agent 自主决策、多轮对话、Streaming 为当前最大差距；信号评分与审计管道为 fc 独有优势。
+- **dayu-agent-r 新版能力研究**（2026-08-10，2026-08-11 收口）：研究总结已生成至 `docs/research/dayu-agent-r-research-20260810.md`（129 行），基于 dayu README 原文（`/tmp/dayu_README.md`）输出 16 项能力分级、验证状态表、落地建议与 license 合规边界。结论：多角色 agent 编排、场景化 prompt 路由、上下文压缩与工具失败自愈已与 fc 对齐；记忆/知识库持久化、定时任务与主动推送、多模态输入等尚未采用，可作为后续 backlog 候选。dayu 代码不可直接引入 production runtime（AGENTS.md 已裁决）。收口动作：AGENTS.md「当前已知能力差距」节已按研究结论更新（修正 ContextBudget 接入 runner 过时口径 + 补差距现状与 backlog 候选）。
 
 ## 开发路线
 
@@ -986,7 +987,7 @@ uv run pytest tests/fund/service/test_extraction.py tests/fund/service/test_llm_
 
 ## Next Action
 
-14C 已 accepted。证据小节结构化已完成（方案B：完整 citation 追踪）。DeepSeek review 9 项修复全部通过，已提交推送（`d1375fa` + `7433803`）。
+交互问答与记忆能力改进（2026-08-09 裁决）计划已 ACCEPTED（Mimo review：pass-with-risks，3 个非 blocker finding），待实施。按 P0-1 → P0-2 → P1 逐 slice 派发：implement → tests → diff review；live 复跑需用户显式授权。详见文末「交互问答与记忆能力改进（2026-08-09 裁决）」节。
 
 ## 产品方向升级裁决（2026-07-12）
 
@@ -2780,7 +2781,7 @@ uv run pytest tests/fund/agent/test_llm_tool_loop.py tests/fund/service/test_ext
 - R2 状态：已完成（2026-08-07，DS 实施 + Mimo diff review ACCEPTED + controller 复跑通过）。定位结论：519696-2025 主表 table-0061（section-0599/page 49/9 列）表头完整，`_extract_qdii_table_with_continuations` 走「主表 1-5 名 + `_extract_qdii_continuation_rows` 续表合并」分支，续表 table-0062（同 section/page 50/9 列，首行表头碎片 + 6-10 名数据行）被正确命中；519696-2024 走表头截断分支（table-0061 仅截断表头、table-0062 承载碎片+全量数据行）。实数据与 CLI 均已确认 2025 持仓 10 行、rank 1-10 连续、第 6 名（1209 HK 华润万象生活 2.82%）代码/占比非空，2024 不回退——计划所载「第 6 名仍断裂」在当前 fixture/代码上不可复现，且计划修复方向 2 的字面规则（碎片行含名称残片即视为数据行）会反向把表头碎片消费成残缺行，未采用；生产代码零改动（证据驱动）。交付 = 真实 fixture 测试补 rank 连续/第 6 名断言 + 新增最小表结构模拟回归测试（`test_extract_qdii_holdings_cross_page_rank6_complete`，去掉续表合并会失败）。验证 = `-k "holdings or qdii"` 40 passed + 三文件全量 400 passed + `git diff --check` 干净；未 commit / push。
 - R3 状态：已完成（2026-08-07，DS 实施 + Mimo diff review ACCEPTED + controller 复跑通过）。修复 = `_holdings_column_indexes` 截断前缀识别（「证券代」「占基」「占基金」，带列数据含数字校验 `_column_has_digits`）+ `_is_qdii_header_text` 扫描入口预检放宽 + `_infer_qdii_column_indexes_by_position` 列位置推断兜底（`extraction.py`）；链路 = 2023 主表（仅截断表头）→ 续表碎片合并为完整表头 → 数据行抽取。验收 = 519696-2023 持仓 10 行（首行 3808 HK 中国重汽 4.17%）、2021/2022/2024/2025 真实 fixture 10 行不回退、行业配置/估值/资产组合/买卖明细负例全部拒绝；验证 = `-k "holdings or qdii or header"` 49 passed + 三文件全量 408 passed + AGENTS.md 最小验证 175 passed + `git diff --check` 干净；未 commit / push。
 - R4 状态：已完成（2026-08-07，DS 实施 + Mimo diff review ACCEPTED + controller 复跑通过）。修复 = `AgentRunResult.key_facts` 槽位（tool_loop.py）+ `_final_result` 终答解析写入（llm_tool_loop.py，interactive / 非 interactive 双分支）+ `Turn.key_facts` 槽位（session_models.py）+ chat_service assistant turn 接线 + session_store 序列化/反序列化（旧 session 缺该字段时默认空元组，不回退）。派发 write set 为 `llm_tool_loop.py` + `session_models.py`；`AgentRunResult` 定义在 `tool_loop.py`、turn 构造在 `chat_service.py`、磁盘序列化在 `session_store.py`，三处不在字面 write set 内但为达成「session 可读回 / 落盘」验收所必需（与 2026-08-06 已记录偏差所指文件一致）。验收 = interactive 一轮问答后 session 中可读回 `key_facts`；旧 session（无该字段）恢复不回退。验证 = `uv run pytest tests/fund/agent/test_llm_tool_loop.py tests/fund/host/test_session_store.py -q --tb=short`（112 passed）+ 回归 `uv run pytest tests/fund/agent/ tests/fund/host/ tests/fund/service/test_chat_service.py tests/fund/cli/test_cli_interactive.py -q --tb=short`（424 passed）+ `git diff --check` 干净；未 commit / push。
-- R5 状态：已执行（2026-08-08，007466 interactive opt-in live e2e，controller 直跑），**验收不通过**（Q1/Q3/Q4 未达 004393 复跑口径）。命令 = `printf '...4 问 + exit' | FUND_CHECKLIST_RUN_LIVE_DEEPSEEK=1 uv run fund-checklist interactive --fund-code 007466 --work-dir .fund_e2e_007466 --no-stream --plain --enable-tool-trace --label r5-007466-live`；会话 = `.fund_e2e_007466/sessions/80936402c9a9484e8403a63c3cc1e110.json`。逐问证据（真源 = 007466-2025 docling JSON）：Q1「基金经理持有本产品吗」→「未找到相关数据」（假阴性：9.4 数据存在于 table-0098「本基金基金经理持有本开放式基金」A类 50~100 万份，agent 只读 table-0097/section-0748）；Q2「基金经理是谁」→ 通过（2 次调用，返回柳军/柳叶青）；Q3「基金前十大持仓是什么」→「未找到相关数据」（假阴性：table-0087 含完整股票持仓明细，agent 只读 table-0086）；Q4「2021-2025 份额净值增长率」→ 原文粘贴整段表格（>200 字、无结构化总结），且 `aggregate_multi_year_annual_performance` 2 次失败（`document_id=''` 未注入，failure=unavailable），工具调用 8 次 <12（该子项过）。结论：按 R5 计划「live 结果只作验收证据，不驱动 production adapter 变更」，本 slice 不改生产代码，需另排修复 slice（Q1/Q3 命中错表、Q4 aggregate document_id 注入与原文粘贴）。
+- R5 状态：已执行（2026-08-08，007466 interactive opt-in live e2e，controller 直跑），**验收不通过**（Q1/Q3/Q4 未达 004393 复跑口径）。命令 = `printf '...4 问 + exit' | FUND_CHECKLIST_RUN_LIVE_DEEPSEEK=1 uv run fund-checklist interactive --fund-code 007466 --work-dir .fund_e2e_007466 --no-stream --plain --enable-tool-trace --label r5-007466-live`；会话 = `.fund_e2e_007466/sessions/80936402c9a9484e8403a63c3cc1e110.json`。逐问证据（真源 = 007466-2025 docling JSON）：Q1「基金经理持有本产品吗」→「未找到相关数据」（假阴性：9.4 数据存在于 table-0098「本基金基金经理持有本开放式基金」A类 50~100 万份，agent 只读 table-0097/section-0748）；Q2「基金经理是谁」→ 通过（2 次调用，返回柳军/柳叶青）；Q3「基金前十大持仓是什么」→「未找到相关数据」（假阴性：table-0087 含完整股票持仓明细，agent 只读 table-0086）；Q4「2021-2025 份额净值增长率」→ 原文粘贴整段表格（>200 字、无结构化总结），且 `aggregate_multi_year_annual_performance` 2 次失败（`document_id=''` 未注入，failure=unavailable），工具调用 8 次 <12（该子项过）。结论：按 R5 计划「live 结果只作验收证据，不驱动 production adapter 变更」，本 slice 不改生产代码，需另排修复 slice（Q1/Q3 命中错表、Q4 aggregate document_id 注入与原文粘贴）。→ 修复排期已落地：`.sisyphus/plans/interactive-memory-tool-dedup-20260809.md`（Mimo review ACCEPTED，2026-08-09），见文末「交互问答与记忆能力改进（2026-08-09 裁决）」节。
 - R6 状态：已完成（2026-08-08，QDII direct 分支 citation 校正）。计划 = `.sisyphus/plans/qdii-table-citation-fix-20260808.md`（Mimo review ACCEPTED，无 fix items）。修复 = `_extract_qdii_holdings_from_tables` 返回类型改为 `tuple[tuple[HoldingExtraction, ...], Citation] | None`（命中返回持仓主表 citation，与 A 股 direct 分支同约定）+ 调用方 QDII 分支 `holdings, table_citation = direct` 同步校正（`extraction.py`）；QDII 续表合并/表头截断/行抽取逻辑与 `_audit_holdings` 未动。验收 = `uv run pytest tests/fund/service/test_extraction.py -k "qdii or QDII or holdings" -q --tb=short`（49 passed，含 3 个 direct 调用测试 citation 断言、2022-2025 multi-year citation 真值、新增 store 级同步测试）+ AGENTS.md 最小验证集（175 passed）+ `uv run fund-checklist holdings --fund-code 519696 --years 2021,2022,2023,2024,2025 --work-dir .fund_e2e_519696`（五年 citation = 2021:table-0067 / 2022:table-0069 / 2023:table-0064 / 2024:table-0061 / 2025:table-0061，各年 10 行 top-1 内容不回退）+ 004393 回归通过 + `git diff --check` 干净；报告刷新：`generate --fund-code 519696 --fund-name 交银环球精选混合(QDII) --year 2025 --llm --format pdf --concurrency 4` 复跑通过（审计 7 章通过 0 失败），`.fund_e2e_519696/reports/519696-2025-analysis.{md,pdf}` 持仓数据来源五年 citation 已更新为 2021:table-0067 / 2022:table-0069 / 2023:table-0064 / 2024:table-0061 / 2025:table-0061；未 commit / push。
 
 ## 环境事故记录（2026-08-08）
@@ -2788,3 +2789,154 @@ uv run pytest tests/fund/agent/test_llm_tool_loop.py tests/fund/service/test_ext
 - Codex agent 断连事故（cc-switch 代理接管改写 config + 代理转发 404）：`docs/debug/codex-cc-switch-takeover-incident-20260808.md`。
 - 状态：已修复（恢复直连 base_url + 停用 codex 代理接管），两个 codex agent 重启后连接正常。
 - 后续注意：cc-switch 重启可能重新接管 codex 配置；若再断连先查 `~/.codex/config.toml` 的 base_url 是否被改回 `127.0.0.1:15721`。
+
+## 交互问答与记忆能力改进（2026-08-09 裁决）
+
+> 状态：🟡 计划 ACCEPTED（2026-08-09，Mimo review：pass-with-risks，3 个非 blocker finding），待实施
+> 设计：`.sisyphus/plans/interactive-memory-tool-dedup-20260809.md`
+> review：`docs/reviews/plan-review-20260809-122315.md`（Verdict: ACCEPTED）
+
+### 背景与证据
+
+- R5 live e2e（2026-08-08，007466 四问）验收不通过：Q1「基金经理持有本产品吗」假阴性（未读真源 table-0098）、Q3「前十大持仓」假阴性（未读 table-0087）、Q4 原文粘贴 + `aggregate_multi_year_annual_performance` 2 次失败（unavailable）。
+- aggregate 生产接线缺失：`_default_runner_factory`（chat_service.py:129-138）与 main.py 多处 `ChatService` 构造均未传 `aggregate_handler`；04f9554 只修了 runner 侧 document_id 注入。
+- 工具重复调用：单轮内 `_dedup_key`（llm_tool_loop.py:1590）只认完全相等参数；`seen_calls` 每轮重建，跨轮无去重（R5 Q4 aggregate 失败 2 次仍执行 2 次；004393 实测 Q4 14 次调用）。
+- 记忆注入未完成：`_build_contributions`（chat_service.py:544-620）只注入 runtime/fund_context/history；`context_slots` 已声明 `memory` slot 但从未填充；`build_memory_contribution`（prompt_contributions.py:65-88）存在但未接线；EpisodeSummary 只写不读。
+
+### 已裁决口径（D1-D9）
+
+- D1 受控检索路由：Service 层对高误命中 query 类（manager_holdings、holdings_top10）注入 table_ref 锚点，其余保持 LLM 自由选表（Phase 7.2「全量走 LLM」的受控扩展）。
+- D2 范围：只修 R5 暴露两类命中问题；规模/份额/基准/超额 profile 列入 backlog。
+- D3 aggregate 接线：复用既有五年聚合（Service 层），interactive 开放，share_class A 类优先；ask 不开放（白名单边界，入 backlog）。
+- D4 重复调用治理：① 跨轮失败调用 key 持久化短路（不重跑）；② 去重键放宽（search 归一化 query，read_section/read_table 按 ref 比较）；③ 不做完整结果缓存复用。
+- D5 预算：interactive `max_iterations` 12 → 8；不加 list_tables/read_table 收敛扩展。
+- D6 记忆注入：EpisodeSummary/PinnedState 走方案 B（编织进 system prompt，延续 Phase 7.3），不做协议层方案 A。
+- D7 排期：记忆注入与 Phase 8 上下文治理分开，先注入后治理。
+- D8 live 验收：沿用「live 结果只作验收证据、不驱动 production adapter 变更」；live 复跑需用户显式授权。
+- D9 收口：CIC-lite，每 slice 走 implement → tests → diff review；真源行为同步在实施收口阶段执行。
+
+### 分 slice（P0-1 → P0-2 → P1 串行）
+
+- P0-1 检索命中质量：`_DisclosureLocatorContract.anchor_title_family` + `_resolve_anchor_table_ref`（解析失败 fail-open 返回 None）+ retrieval contribution 锚点注入（仅 manager_holdings / holdings_top10）。
+- P0-2 aggregate 接线 + 重复调用治理：`aggregate_handler` 透传（catalog 重解析 annual_report_documents，防幻觉 document_id）+ `_dedup_key` 工具级归一化 + `failed_call_keys` 跨轮短路（Session 持久化，旧 session 兼容）+ `max_iterations` 8。
+- P1 记忆注入：`build_memory_contribution` 接线（最近 ≤3 条 EpisodeSummary + pinned facts，总长 ≤500 token 超限丢最旧）。
+
+### Mimo finding（实施时处理，非 blocker）
+
+- 001（中）：`_resolve_anchor_table_ref` 需显式 `document_id is None` 守卫。
+- 002（中）：`failed_call_keys` tuple 结构需与 `_dedup_key` 一致（天然含 document_id 维度，不同 document_id 不互相短路）。
+- 003（低）：`_format_episode_summaries` 单条 fact/question 超长行为未定义（截断或标注 Phase 8）。
+
+### 验证命令（实施阶段）
+
+```bash
+uv run pytest tests/fund/service/test_extraction.py tests/fund/service/test_chat_service.py -k "route or anchor or manager_holdings or holdings" -q --tb=short
+uv run pytest tests/fund/agent/test_llm_tool_loop.py tests/fund/service/test_chat_service.py tests/fund/host/test_session_store.py tests/fund/service/test_scene_config.py -q --tb=short
+uv run pytest tests/fund/host/test_session_models.py tests/fund/service/test_chat_service.py tests/fund/agent/test_llm_tool_loop.py tests/fund/service/test_scene_config.py -v --tb=short
+uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.py tests/fund/cli/test_cli.py -q --tb=short
+git diff --check
+```
+
+opt-in live（需用户显式授权）：004393 / 007466 interactive 四问复跑，断言 Q1 命中 9.4、Q3 命中持仓明细表、Q4 ≤200 字结构化总结且工具调用 ≤8。
+
+### P0-1 收口（2026-08-09，DS 实施 + controller 复跑 + Mimo diff review ACCEPTED）
+
+- 实现：`_DisclosureLocatorContract.anchor_title_family` 字段（models.py）+ registry 配置（仅 manager_holdings / holdings_top10，extraction.py）+ `_resolve_anchor_table_ref`（document_id None 守卫、全异常 fail-open 返回 None、9.4 行头优先 9.2 回退、holdings_top10 表头签名 + row_count ≥10）+ chat_service retrieval contribution 锚点注入（`_ANCHOR_PROFILE_NAMES` 硬口径，仅两类 profile，解析失败不注入，runner 不 import service）。
+- 规格偏差（已记录）：007466-2025 真实 fixture 上「期末基金管理人的从业人员持有本基金的情况」命中 section-0748 但该节无表格、「前十名股票投资明细」全文 0 命中；按规格回退查询语义追加 anchor_title_family 短语（9.4 短语命中 table-0098 所在 section）与 registry 候选「股票投资明细」（命中 section-0689）。机制不变（search → list_tables → 有界 read_table → 行头/签名扫描），fail-open 语义保留；Mimo review 评估可接受。
+- 验证：`uv run pytest tests/fund/service/test_extraction.py tests/fund/service/test_chat_service.py -k "route or anchor or manager_holdings or holdings" -q --tb=short` → 56 passed；AGENTS.md 最小验证（document_tools + minimal_tool_loop + cli）→ 175 passed；`git diff --check` 干净；未 commit。
+- review：`docs/reviews/plan-review-20260809-122315.md` 之后的新 diff review 由 Mimo 执行，Verdict: ACCEPTED（逐项核实行号；规格偏差可接受；public tool 契约无改动）。
+- 下一步：P0-2（aggregate 接线 + 重复调用治理）待派发。
+
+### P0-2 收口（2026-08-09，DS 实施 + controller 复跑 + Mimo diff review ACCEPTED）
+
+- 实现：`_dedup_key` 工具级归一化（search 归一化 query、read_section/read_table 按 ref、get_excerpt 按 locator、aggregate 按 fund_code+years+share_class；key 天然含 document_id 维度，满足 Mimo 002）；`failed_call_keys` 跨轮短路（run/run_stream 双入口 + 构造期参数，命中 key 直接追加失败标记不调用工具；`round_failed_keys` 轮末收集 + `_attach_failed_keys`）；`ChatService.aggregate_handler` 透传 + `_merge_failed_tool_call_keys`（去重 + 上限 50 丢最旧，每轮落 session）；`Session.failed_tool_call_keys` + session_store 序列化兼容（旧 session 默认空元组）；`main.py _build_aggregate_handler`（`_collect_matching_docs` catalog 重解析 last-wins，忽略 LLM document_id，异常 fail-closed 为 classified failure，仅 interactive 分支注入）；`INTERACTIVE_SCENE_CONFIG.runtime.max_iterations` 12→8；scene.md v1.7 aggregate 使用说明。
+- 验证：核心命令（llm_tool_loop + chat_service + session_store + cli_interactive）→ 262 passed；Phase 7 回归（9 文件）→ 267 passed；AGENTS.md 最小验证 → 175 passed；`git diff --check` 干净；未 commit；默认 pytest 未联网。
+- review：Mimo diff review ACCEPTED（逐文件核实行号；2 个可接受边界：run_stream 不收集 round_failed_keys（interactive 只走 run()）、`_merge_failed_tool_call_keys` 上限边界无独立单测）。
+- 下一步：P1（EpisodeSummary / PinnedState 记忆注入）待派发。
+
+### P1 收口（2026-08-09，DS 实施 + controller 复跑 + Mimo diff review ACCEPTED）
+
+- 实现：`_build_contributions` 接线 `contributions["memory"]`（`build_memory_contribution`，episode 为空且 pinned_facts 为空时不产生 slot）；`_format_episode_summaries`（最近 ≤3 条，每条 title/goal/confirmed_facts≤5/open_questions≤3，总长 ≤500 token 超限丢最旧，单条仍超限截断）；`_pinned_facts`（`pinned_state.user_constraints["confirmed_facts"]`，str/list/tuple 兼容，空白跳过）；`prompt_contributions.build_memory_contribution` 追加「历史摘要，非当前证据」标注（默认参数兼容）。
+- Mimo finding 003：选择实现——单条 fact/question 超 100 token 由 `_truncate_to_token_bound` 截断加省略号（`test_overlong_fact_question_truncated` 断言 ≤100 token）。
+- 验证：核心命令（chat_service + prompt_contributions）→ 73 passed；Phase 7.3 回归（session_models + chat_service + llm_tool_loop + scene_config）→ 210 passed；AGENTS.md 最小验证 → 175 passed；`git diff --check` 干净；未 commit；默认 pytest 未联网。
+- review：Mimo diff review ACCEPTED（逐项核实行号；compaction 写→读闭环测试、旧 session 无 slot、≤500 上界、单条截断均确认；协议层/ContextBudget/compaction 策略/scene_config 零改动）。
+- 下一步：三 slice 全部完成，待 opt-in live 复跑（004393 / 007466 四问，需用户显式授权）。
+
+### 三 slice 汇总（2026-08-09）
+
+- P0-1 检索命中质量 ✅ / P0-2 aggregate 接线 + 重复调用治理 ✅ / P1 记忆注入 ✅——各自经 DS 实施、controller 独立复跑、Mimo diff review ACCEPTED。
+- 真源行为同步：AGENTS.md（interactive 问答质量语义 + Phase 7.3 记忆注入）与 design.md（§6.10 + Phase 7.3 节）同步完成。
+- 遗留：opt-in live 复跑未执行（需用户显式授权）；`_merge_failed_tool_call_keys` 上限 50 边界无独立单测（Mimo 标注可接受）；run_stream 不收集 failed_call_keys（interactive 只走 run()，Mimo 标注可接受）。
+
+### live 复跑记录（2026-08-09，controller 直跑，用户授权）
+
+命令：`printf '<空行>+四问+exit' | FUND_CHECKLIST_RUN_LIVE_DEEPSEEK=1 uv run fund-checklist interactive --fund-code 007466/004393 --work-dir .fund_e2e_007466/.fund_e2e_004393 --no-stream --plain --enable-tool-trace --label r5-recheck-*`。会话：007466 = `d540d5bc...`（Q2-Q4）+ `r5-recheck-q1` 会话（Q1 重测）；004393 = `cbf3de62...`。按 plan「live 只作验收证据，不驱动 production adapter 变更」，未改代码。
+
+结果（R5 四问口径）：
+
+| 基金 | Q1 基金经理持有本产品吗 | Q2 基金经理是谁 | Q3 前十大持仓 | Q4 2021-2025 份额净值增长率 |
+|------|------------------------|-----------------|---------------|------------------------------|
+| 007466 | ✅ 命中基金经理持有区间表（A 类 50~100 万份），工具 1 次 | ✅ 柳军/柳叶青 | ✅ 命中 8.3 股票投资明细，前十大+占比 | ⚠️ aggregate 成功 1 次 + read_table 1 次（≤8 ✅），结构化总结无原文粘贴 ✅，但 answer 371 字 > 200 ⚠️ |
+| 004393 | ✅ 命中（A 类 50~100 万份） | ✅ 张明 | ✅ 前十大+占比 | ⚠️ aggregate 成功（调用 ≤8 ✅），无原文粘贴 ✅，但 answer 369 字 > 200 ⚠️ + 2022 年数据缺失 ⚠️ |
+
+结论：R5 三项验收核心（Q1/Q3 假阴性、Q4 aggregate 失败）全部修复——锚点命中、aggregate 接线成功、工具调用收敛、无「未找到相关数据」假阴性。未达标 2 项 + 新发现 1 项，均不驱动 adapter 变更，另排修复 slice：
+
+- F1（终答字数）：Q4 answer 371/369 字 > plan 断言 ≤200。根因：原文粘贴守卫阈值是重叠 ≥40 字符或 >800 字，≤200 字仅为 scene.md prompt 软约束，LLM 未严格遵守。建议：scene.md 强化 + 守卫阈值下调（实施另排）。
+- F2（004393-2022 业绩缺失）：本地 `multi-year` 复现 missing 2022（covered 2021/2023/2024/2025），catalog 五年齐全 → 004393-2022 业绩表抽取缺口（既有，非本 slice 回归；007466 五年全通）。建议：按 007466 A/C 分段表模式定位 004393-2022。
+- F3（CLI 管道吞首行）：interactive 年份选择 `input()`（main.py:1141）在管道输入下消费第一行问题（本次复跑 Q1 需垫空行重测）。建议：年份选择改为不消费 REPL 首行（如 `--year` 参数或 EOF 时直接默认），实施另排。
+
+### F1/F2/F3 修复 slice 收口（2026-08-09，DS 实施 + controller 复跑 + Mimo review 均 ACCEPTED）
+
+- **F1 终答 ≤200 字硬约束**：`llm_tool_loop.py` `_INTERACTIVE_FINAL_ANSWER_MAX_CHARS` 800→200（`_INTERACTIVE_FINAL_ANSWER_TARGET_CHARS` 保持 200）；`_violates_final_answer_quality` 在 answer >200 字时触发有界重答 1 次；`_truncate_final_answer_summary` 正文按 200-len(note) 截断、note 文案改为「（内容过长，已截断为摘要）」，保证最终 answer（含 note）≤200 字；`scene.md` 第 3 条改为硬约束口径。live 验证：Q4 007466/004393 终答均 ≤200 字（硬断言通过）。此前 2026-08-06 记录中「>800 字触发重答」口径已被本修复取代。
+- **F2 004393-2022 可解释缺失（口径修正，不伪造数据）**：实证 004393-2022 为转型当年（2022-08-08 合同生效），业绩阶段表无「过去一年」行（仅「过去三个月」「自基金转型起至今」），10F/10G 缺行是年报事实而非解析 bug。修复：10F/10G 对「业绩表存在但无「过去一年」行」的 not_found message 追加可解释后缀（`_performance_missing_past_year_note`：自基金转型起至今/自基金合同生效起至今 → 「转型当年无全年份额净值增长率」）；`scene.md` 规则 10 要求 interactive 对 missing_years 逐一说明原因、禁止静默跳过、禁止把「自基金转型起至今/期间增长率」当作年度增长率写入 series。数值语义 / failure code / DTO 契约零改动。live 验证：Q4 004393 answer 含 "2022" 说明断言通过。
+- **F3 管道输入吞首行**：interactive 新增 `--year` 参数（`main.py` interactive_parser）；年份选择三分支——`--year` 提供（不在可用年份内时 stderr 报错退出）/ 无 `--year` 且 stdin 非 TTY（不调用 input()，默认最新年份并打印说明）/ TTY（保留 input() 交互提示）。REPL 循环主体与会话恢复/标签逻辑零改动。live_smoke 首行垫空行 workaround 已移除。
+- 验证：本地确定性层 `tests/fund/agent/test_llm_tool_loop.py + test_interactive_known_gaps.py` → 104 passed；`test_cli_interactive.py + test_interactive_known_gaps.py` → 93 passed（0 xfailed）；`test_extraction.py + test_interactive_known_gaps.py` → 266 passed, 1 xfailed（F3 修复前）；全部 `git diff --check` 干净。opt-in live 全量（8 问）7 passed + 1 偶发失败（Q4-007466「LLM 工具循环暂不可用」，会话无 tool_trace，首次 next_step 偶发 API 异常；单测重跑 30.8s PASSED，非代码回归）；F1/F2 live 验收（Q4 双基金 ≤200 字 + 004393 含 2022 说明）2 passed。
+- 测试同步：`test_interactive_known_gaps.py` F1/F2/F3 三条 `xfail(strict=True)` 全部摘除（F1 改普通断言、F2 改可解释缺失断言、F3 改管道默认年份断言）；`test_interactive_live_smoke.py` Q4 改 ≤200 硬断言 + 004393 增加 "2022" in answer 断言 + 移除垫空行 workaround；`test_llm_tool_loop.py` 3 处断言 200+25→200；`test_extraction.py` 新增 10F 缺「过去一年」行 message 可解释单测；`test_cli_interactive.py` 新增 `--year` 解析/非法年份/默认年份测试。
+- 真源同步：AGENTS.md（interactive 问答质量语义 F1/F2/F3 收口）与 design.md（§6.10 终答契约 >200 字口径）已同步；本记录节即为 control 同步。
+
+### F4 偶发 fail-closed 可观测性收口（2026-08-09，DS 实施 + controller 复跑 + Mimo review ACCEPTED）
+
+- 背景：F1/F2/F3 全量 live 回归中 Q4-007466 偶发「LLM 工具循环暂不可用」（会话无 tool_trace，首轮 `next_step()` 抛未分类异常，`except Exception` 兜底吞掉原始异常，根因无法定位；单测重跑通过，非代码回归）。
+- 修复：`llm_tool_loop.py` 新增模块级 `logger`，4 处 LLM 调用 `except Exception` 兜底各加一行 `logger.warning(..., exc_info=True)`（run 主循环 / run_stream 主循环 / 投资建议重答回退 / 终答质量重答 fail-closed）；返回值、错误码、消息与分支逻辑零改动。
+- 测试：`test_llm_tool_loop.py` 新增 `test_run_unclassified_exception_fails_closed_and_logs`（`next_step` 抛 `RuntimeError("boom")` → `FailureCode.UNAVAILABLE` + message 不变 + caplog 断言 WARNING 含 RuntimeError/boom）。
+- 验证：`uv run pytest tests/fund/agent/test_llm_tool_loop.py -q --tb=short` → 102 passed；`git diff --check` 干净。
+- 后续：下次 live 偶发失败时从进程日志的 warning 堆栈定位原始异常类型；如需会话级落盘再另排。
+
+### LLM provider 自由切换收口（2026-08-10，DS 实施 + controller 复跑 + Mimo diff review ACCEPTED）
+
+- 背景：用户要求 DeepSeek key 与 Mimo key 自由切换；此前 AGENTS.md 宣称「已支持 DeepSeek 与 Mimo」但代码仅 DeepSeek 命名 adapter，切换需手改 `DEEPSEEK_*` 三件套，且 `chat_service` 会把 scene 默认模型名（deepseek-v4-pro/flash）强制写入请求，切 Mimo 会发不存在的模型名。
+- 实现（write targets 6 个，无越界）：
+  - `fund_agent/agent/deepseek_llm.py`：新增 `FUND_CHECKLIST_LLM_PROVIDER`（`deepseek` 默认 / `mimo`，未知值 fail-fast 抛 ValueError 提示合法取值）；`ProviderConfig` + `_PROVIDER_CONFIGS` 配置表（deepseek 用 `DEEPSEEK_*`、默认 `https://api.deepseek.com`/`deepseek-v4-flash`；mimo 用 `MIMO_*`、默认 `https://api.xiaomimimo.com/v1`/`mimo-v2.5-pro`）；新增 `resolve_provider` / `resolve_provider_model` / `provider_model_env_name` / `translate_model_for_provider` / `_provider_runtime`；`next_step` / `next_step_stream` / `generate_text` 请求组装统一走 `_provider_runtime`；错误文案泛化（去 DeepSeek 前缀）；类名/文件名保留，`llm_tool_loop.py` 未动。
+  - `fund_agent/service/chat_service.py`：注入层 provider 感知——解析顺序 provider 对应 MODEL env 非空优先，否则 scene/contract 模型名经翻译表（`deepseek-v4-pro→mimo-v2.5-pro`、`deepseek-v4-flash→mimo-v2.5`，未知透传）后写入 provider 对应 MODEL env；`DeepSeekLlmClient.env` 注入保持向后兼容。
+  - `fund_agent/cli/main.py`：interactive `current_model` 展示改由 `resolve_provider_model(os.environ)`。
+  - `fund_agent/agent/README.md`：新增 Provider 自由切换配置节，8B/8C 过时表述同步。
+  - `tests/fund/agent/test_provider_switching.py`（新增 20 用例）：provider 解析（默认/mimo/未知 fail-fast）、配置表与默认值、MODEL env 覆盖、模型名翻译、三路径请求组装（override/默认/向后兼容/缺 key unavailable/未知 provider）、错误文案泛化。
+  - `tests/fund/service/test_chat_service.py`：新增 `TestProviderModelInjection` 4 用例（mimo 场景翻译、mimo env 优先、deepseek 注入、contract 翻译）+ 同步 1 处旧错误文案断言。
+- 验证（controller 独立复跑）：`test_provider_switching.py` → 20 passed；`test_deepseek_live_smoke.py + test_real_llm_adapter.py + test_token_usage.py + test_chat_service.py + test_cli_interactive.py` → 196 passed；最小验证（document_tools + minimal_tool_loop + cli）→ 175 passed；默认 pytest 未联网；未 commit。
+- review：Mimo diff review ACCEPTED（7 项硬口径逐项确认：env 默认/fail-fast、配置表、翻译表、解析顺序、current_model、文案泛化、类名保留；write set 6 文件命中无越界）。
+- 行为变化提示：chat_service 注入层现在优先采用 provider 对应 MODEL env（此前 env 值会被 scene/contract 覆盖），符合硬口径解析顺序。
+- 已知边界/后续：opt-in live smoke（`test_deepseek_live_smoke.py`）的 skip 判定与 env 组装仍硬编码 `DEEPSEEK_API_KEY`，对 Mimo 跑 live smoke 需同时设置 `DEEPSEEK_API_KEY`（过 skip 门槛）与 `MIMO_API_KEY`（实际调用）；live smoke 的 provider 化另排 slice，不在本 slice 范围。
+
+### 004393「近一年净值增长率」问答修复收口（2026-08-11，Fix A/E/C 全部 Mimo review ACCEPTED）
+
+- 症状：interactive（004393，2025 年报）问「近一年净值增长率是多少」返回 3.2.1 原文粘贴（1245 字，无数字），未给出 12.77%。session 证据：`.fund_e2e_004393/sessions/bb4c80b6c5c74115afe7afd7d935329b.json` turn7 = 3.2.1 文本 + 7.4.7.12「资产支持证券投资收益」表拼接；tool_trace = `search_document, search_document, list_tables, read_section, read_table`。
+- 根因 R1（本次直接原因，已处理）：interactive 进程 2026-08-10 22:38 启动，守卫修复模块 23:12 才落盘（`llm_tool_loop.py` mtime），PID 91123 仍运行旧模块。处理：用户重启 interactive 进程即可，无需改代码。
+- 根因 R2（遗留设计缺口，已修复）：① 候选词命中不了含数字的 4.4.2（section-0097，A 12.77% / 基准 15.34%）；② LLM 猜错 table_ref（table-0039 → 7.4.7.12，本应 table-0009/0010）；③ read_table 无 section 一致性校验。Mimo 根因 review 全部核实：R1 关键分界为提交 `d92a9e1`（08-06，force-answer 分支无守卫）；R2a 部分确认（「净值增长率」已是 alias，问题在 candidate_queries 无法命中 4.4.2）；R2b 完全确认（架构级缺陷）；R2c 确认 fail-closed 文案为「LLM 工具循环暂不可用」而非「LLM 处理失败」，语义一致。
+- Fix A（force-answer 走终答守卫，DS 实施 + Mimo ACCEPTED）：`_force_answer_from_evidence`（max_steps 耗尽降级）在 interactive 下与正常 FinalAnswer 同走 `_apply_interactive_final_guards`（投资建议拦截 + ≤200 字约束）。验证：199 + 10 + 286 passed。
+- Fix E（performance_returns 候选词首位「净值增长率」，DS 实施 + Mimo ACCEPTED）：`fund_agent/service/extraction.py` `_DisclosureLocatorContract` performance_returns `candidate_queries` 首位加入「净值增长率」（原已是 alias，只改候选词，不动 aliases/acceptable_title_family/requires_table_citation/extraction_allowed）。验证：45 + 5 + 175 passed；真实 004393-2025 store 闭环（search「近净值增长率是多少」=0 → auto-retry「净值增长率」→ 首命中 section-0097 含 12.77%）。测试锁定：`test_performance_returns_candidate_order_prefers_nav_growth_rate_query`。
+- Fix C（performance_returns 表锚点 + read_table section 一致性校验，DS 实施 + Mimo ACCEPTED）：
+  - 表锚点：`chat_service.py` `_ANCHOR_PROFILE_NAMES` 加入 `performance_returns`；`extraction.py` 新增 `_ANCHOR_PERFORMANCE_*` 常量、`_resolve_performance_returns_anchor_table_ref`（3.2.1 exact-title search → list_tables → 表头签名「阶段/份额净值增长率/业绩比较基准收益率」去空白归一化 → A 类标题优先、排除 C → table-0009），解析失败 fail-open None。
+  - runner 校验（仅 interactive）：放行集合 = 本轮 `list_tables` 结果 ∪ search 命中 `SearchResult.table_ref`（补充修正，否则「基金经理是谁」search→read_table 合法流被误伤）；未列出表返回 `NOT_FOUND`「table_ref 未在当前已列出章节的表格中，请先 list_tables 并复制返回的表号」，回喂 LLM、计入 failed_call_keys 语义。
+  - 验证：53 + 9 + 8 + 175（最小验证集 396s）+ 闭环（anchor table-0009；search-hit table-0014 放行；table-0039 拦截后 list_tables 读 table-0009 成功）+ 回归 444 + 123 passed。
+  - 文案对齐（2026-08-11，DS 实施 + Controller 复核）：锚点 prompt 文案由「请优先 read_table 该表」改为「请先 list_tables 确认该表号在列，再 read_table 该表」，消除与 runner「未列出表号一律拦截」的措辞张力（实证：004393 live 复测首轮 `read_table table-0009` 被拦后走恢复链，文案对齐后 LLM 应先列目录再读表）。验证：锚点/检索相关 9 passed + 最小验证集 175 passed。
+- 真源同步：AGENTS.md（interactive 问答质量语义 2026-08-11 Fix A/E/C）、design.md（§5.6 read_table 一致性校验、§6.10 投资建议守卫 force-answer、11A candidate_queries Fix E、受控表锚点 L689 三类范围）、`fund_agent/service/models.py` docstring 已同步；本记录节即为 control 同步。
+- 待办：① 用户重启 interactive 进程（R1 生效）；② 重启后 live 复测「近一年净值增长率是多少」，预期直接返回 12.77%（含基准对比），复跑需用户显式授权；③ 未 commit / 未 push（约束未解除）。
+
+### BM25F 检索排序增强 slice（2026-08-12 规划，2026-08-13 完成）
+
+- 依据：`docs/research/dayu-agent-r-research-20260810.md` §2.1.1 / §5 建议 1；dayu 本地 `bm25f_scorer.py` 仅作算法参考（Apache-2.0，不复制代码，license gate）。
+- 决策：`search_document` 排序升级为确定性 BM25F 多字段重排序——召回不变、public contract 不变、无新依赖、纯函数；字段权重 section title 3.0 / section text 1.0 / table caption 2.0 / table row 1.0，`k1=1.2`，`b`：title/caption 0.35、text/rows 0.75；排序键 BM25F desc → 子串命中计数 desc → source_order asc。
+- 真源同步：`docs/design.md` §5.4 + §6.20、`AGENTS.md`「已知能力差距」backlog 行已更新（开发前同步）；plan artifact：`.sisyphus/plans/bm25f-search-ranking-slice-20260812.md`。
+- 状态：✅ 完成。MiMo plan review — `NEEDS_FIX`（1 项最小修复，2026-08-12）：AGENTS.md backlog 行「已进入实施」措辞过度承诺，改为「规划完成，待 MiMo plan review」；已按 review 原文修正，按 CIC-lite 无 re-review gate 进入实施。DS 实施（21m02s）：6 个文件全部在 allowed write set 内；scorer 9 passed / store 29 passed（含 caption-before-row 回归）/ 最小验证集 186 passed in 326.28s。MiMo diff review — `ACCEPTED`（2026-08-13）：公式参数与 §6.20 一致、排序键三级正确、召回与 public contract 未动、无越界文件、无 commit/push；DS 声明的 1 处测试构造偏差（「只含常见词候选」在子串召回下不可构造）裁决为可接受，改用「稀有词 title 命中前置」等价覆盖。
+- 排序回归核查：Service 层搜索邻接测试（test_scene_config + test_scene_regenerate_repair）54 passed，无首命中断言受影响；score_scale 类评分消费抽取字段而非搜索顺序，无影响。
+- 待办：① 未 commit / 未 push（约束未解除）；② 后续可观察线上首命中变化（受控表锚点解析等首命中路径）如有异常走既有修复通道。

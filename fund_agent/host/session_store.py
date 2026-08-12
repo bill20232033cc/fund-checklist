@@ -212,6 +212,7 @@ class SessionStore:
                 }
                 for e in session.episode_summaries
             ],
+            "failed_tool_call_keys": [list(key) for key in session.failed_tool_call_keys],
             "created_at": session.created_at,
             "updated_at": session.updated_at,
         }
@@ -260,6 +261,17 @@ class SessionStore:
             )
             for e in data.get("episode_summaries", [])
         )
+        # 旧 session 无该字段时默认空元组，不回退（沿用 R4 key_facts 兼容模式）。
+        # JSON 无法直接表达嵌套 tuple，加载时递归还原。
+        def _restore_key(value: object) -> object:
+            if isinstance(value, list):
+                return tuple(_restore_key(item) for item in value)
+            return value
+
+        failed_tool_call_keys = tuple(
+            tuple(_restore_key(item) for item in key)
+            for key in data.get("failed_tool_call_keys", [])
+        )
         return Session(
             session_id=data["session_id"],
             label=data.get("label"),
@@ -267,6 +279,7 @@ class SessionStore:
             pinned_state=pinned_state,
             turns=turns,
             episode_summaries=episodes,
+            failed_tool_call_keys=failed_tool_call_keys,
             created_at=data.get("created_at", ""),
             updated_at=data.get("updated_at", ""),
         )

@@ -7,7 +7,12 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from fund_agent.fund.document_tools.bm25f_scorer import BM25FScorer, BM25FUnit, tokenize
 from fund_agent.fund.document_tools.constants import (
+    BM25F_FIELD_CAPTION,
+    BM25F_FIELD_ROWS,
+    BM25F_FIELD_TEXT,
+    BM25F_FIELD_TITLE,
     DEFAULT_SEARCH_EXCERPT_CHARS,
     DEFAULT_SEARCH_MAX_RESULTS,
     DEFAULT_SECTION_MAX_CHARS,
@@ -72,6 +77,7 @@ class _SearchCandidate:
     excerpt: str
     locator: Locator
     match_kind: SearchMatchKind
+    row_index: int | None = None
 
 
 class DoclingDocumentStore:
@@ -99,6 +105,9 @@ class DoclingDocumentStore:
         self._sections = _parse_sections(identity, self._texts)
         self._tables_model = _parse_tables(identity, self._tables, self._texts, self._sections)
         self._health = _build_parser_health(self._texts, self._sections, self._tables_model)
+        self._bm25f_scorer = BM25FScorer(
+            _build_bm25f_units(self._sections, self._tables_model)
+        )
 
     @property
     def identity(self) -> ReportIdentity:
@@ -268,7 +277,14 @@ class DoclingDocumentStore:
                 within_section_ref=within_section_ref,
             )
         )
-        candidates.sort(key=lambda item: (-item.score, item.source_order))
+        query_terms = tokenize(normalized_query)
+        candidates.sort(
+            key=lambda item: (
+                -self._bm25f_score(item, query_terms),
+                -item.score,
+                item.source_order,
+            )
+        )
 
         results: list[SearchResult] = []
         for rank, candidate in enumerate(candidates[: max_results or DEFAULT_SEARCH_MAX_RESULTS], start=1):
@@ -301,6 +317,21 @@ class DoclingDocumentStore:
             if table.table_ref == table_ref:
                 return table
         raise DocumentToolError(FailureCode.NOT_FOUND, "表格不存在")
+
+    def _bm25f_score(self, candidate: _SearchCandidate, query_terms: list[str]) -> float:
+        """按候选命中字段计算 BM25F 重排序分数；无法解析字段时返回 0.0。"""
+
+        fields: dict[str, str] = {}
+        if candidate.match_kind is SearchMatchKind.SECTION_TEXT:
+            section = self._find_section(candidate.section_ref)
+            fields = {BM25F_FIELD_TITLE: section.title, BM25F_FIELD_TEXT: section.text}
+        elif candidate.match_kind is SearchMatchKind.TABLE_CAPTION:
+            table = self._find_table(candidate.table_ref)
+            fields = {BM25F_FIELD_CAPTION: table.caption or ""}
+        elif candidate.match_kind is SearchMatchKind.TABLE_ROW and candidate.row_index is not None:
+            table = self._find_table(candidate.table_ref)
+            fields = {BM25F_FIELD_ROWS: _table_row_text(table.rows[candidate.row_index])}
+        return self._bm25f_scorer.score(fields, query_terms)
 
     def _citation(self, locator: Locator) -> Citation:
         """基于身份和 locator 组装 citation。"""
@@ -493,6 +524,25 @@ def _build_parser_health(
     return health
 
 
+def _build_bm25f_units(
+    sections: tuple[_ParsedSection, ...],
+    tables: tuple[_ParsedTable, ...],
+) -> tuple[BM25FUnit, ...]:
+    """构建 BM25F 索引单元：section（title+text）、table caption、bounded table row。"""
+
+    units: list[BM25FUnit] = []
+    for section in sections:
+        units.append(
+            BM25FUnit(fields={BM25F_FIELD_TITLE: section.title, BM25F_FIELD_TEXT: section.text})
+        )
+    for table in tables:
+        if table.caption:
+            units.append(BM25FUnit(fields={BM25F_FIELD_CAPTION: table.caption}))
+        for row in table.rows[:DEFAULT_TABLE_MAX_ROWS]:
+            units.append(BM25FUnit(fields={BM25F_FIELD_ROWS: _table_row_text(row)}))
+    return tuple(units)
+
+
 def _section_search_candidates(
     document_id: str,
     sections: tuple[_ParsedSection, ...],
@@ -589,6 +639,7 @@ def _table_row_search_candidates(table: _ParsedTable, query: str) -> list[_Searc
             _SearchCandidate(
                 score=score,
                 source_order=_table_source_order(table, row_index=row_index),
+                row_index=row_index,
                 section_ref=table.section_ref or "",
                 table_ref=table.table_ref,
                 title=table.caption or f"表格 {table.table_ref}",

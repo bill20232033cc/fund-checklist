@@ -99,8 +99,9 @@ INTERACTIVE_SCENE_CONFIG = SceneConfig(
     context_slots=("runtime", "fund_context", "memory", "history", "retrieval"),
     model=SceneModelSpec(default_name="deepseek-v4-pro", temperature=0.7),
     # 2026-08-05 裁决：interactive max_iterations 20 → 12，配合空结果强制收敛
-    # 防止模型过度探索（design.md §6.10）。
-    runtime=SceneRuntimeSpec(max_iterations=12),
+    # 防止模型过度探索；2026-08-09 裁决（P0-2）：12 → 8，锚点收敛 + aggregate
+    # 单次成功 + 跨轮失败短路消除重跑后 8 是可行下界（design.md §6.10）。
+    runtime=SceneRuntimeSpec(max_iterations=8),
     allowed_tools=(
         ToolName.SEARCH_DOCUMENT.value,
         ToolName.READ_SECTION.value,

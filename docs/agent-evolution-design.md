@@ -1,5 +1,7 @@
 # fund-checklist Agent 能力演进方案
 
+> 状态：设计候选研究材料（2026-07-15 创建，2026-07-28 最后更新），非设计真源。`docs/design.md` 已明确本文仅作候选研究输入材料。§0.1 / §8.1 的现状与差距表为 2026-07-28 快照：对话历史注入、memory 注入、ContextBudget 接入 runner 均已在 Phase 7.3 / 2026-08-09 P1 / Phase 7.1 完成；Phase 9 联网搜索已裁决不采用；唯一仍开放的候选是 Phase 8 跨轮预算治理（见 §7.1）。最新研究见 `docs/research/dayu-agent-r-research-20260810.md`；fc 当前状态以 `docs/implementation-control.md` 为准。
+
 > 设计时间：2026-07-15 | 最后更新：2026-07-28
 > 文档定位：候选研究输入材料 + 已裁决能力记录
 > 设计目标：基于 dayu-agent 能力模式，为 fund-checklist 提供渐进式 Agent 能力候选方向
@@ -15,11 +17,11 @@
 | 能力维度 | fund-checklist | dayu-agent | 差距 |
 |----------|----------------|------------|------|
 | Agent 驱动方式 | `LlmToolLoopRunner` — LLM 自主决策工具调用（Phase 5 已完成） | LLM 自主决策 | ✅ 已对齐 |
-| 多轮对话 | `interactive` CLI 已实现（Phase 7），**但对话历史未注入 LLM context** | interactive + WeChat，历史完整注入 | 🟡 基础已通，核心管道缺失 |
-| 会话记忆 | Session 模型 + PinnedState + Turn + EpisodeSummary + SessionStore 已实现；**memory contribution 未接入 LLM** | 两层记忆（pinned + 统一池）+ `build_messages()` 四段注入 | 🟡 存储已通，注入未通 |
+| 多轮对话 | `interactive` CLI 已实现（Phase 7）；**对话历史已注入 LLM context（Phase 7.3，2026-07-29，方案 B prompt 层编织）** | interactive + WeChat，历史完整注入 | ✅ 已对齐 |
+| 会话记忆 | Session 模型 + PinnedState + Turn + EpisodeSummary + SessionStore 已实现；**memory slot 已注入 LLM（2026-08-09 P1：EpisodeSummary ≤3 条 + confirmed_facts）** | 两层记忆（pinned + 统一池） | ✅ 已对齐 |
 | 流式输出 | StreamEvent + SSE 解析（Phase 5 已完成） | SSE 流式 | ✅ 已对齐 |
-| 联网搜索 | 仅限本地 PDF | Tavily/Serper/Playwright | 🟡 中（候选） |
-| 上下文治理 | ContextBudgetState 软/硬限制（Phase 7 已完成）；**跨轮预算治理未实现** | 软上限压缩 + 硬上限重试 + 预测性截断 | 🟡 基础已通，跨轮治理缺失 |
+| 联网搜索 | 仅限本地 PDF | Tavily/Serper/Playwright | ⛔ 不采用（产品边界与合规决策，2026-08-10 研究收口） |
+| 上下文治理 | ContextBudgetState 软/硬限制已接入 runner（Phase 7.1，2026-07-27）；**跨轮预算治理仍开放** | 软上限压缩 + 硬上限重试 + 预测性截断 | 🟡 唯一开放候选（Phase 8） |
 | Prompt 装配 | SceneConfig + Fragments + Context Slots（Phase 7 已完成）；条件块支持有限 | SceneDefinition + PromptAssemblyPlan + 条件块 + PromptContributions | 🟡 基础已通，条件块缺失 |
 | 温度透传 | ✅ 已修复 — SceneConfig → DeepSeekLlmClient(temperature) | 模型级温度配置 | ✅ 已对齐 |
 
@@ -818,13 +820,13 @@ Phase 5 (LLM 自主工具调用 + 流式输出) — ✅ 已完成
   ↓
 Phase 6 (模板框架适配 + 基金类型感知) — ✅ 已完成
   ↓
-Phase 7 (多轮对话 + 会话记忆) — ✅ 已完成（基础），⚠️ 对话历史注入管道缺失
+Phase 7 (多轮对话 + 会话记忆) — ✅ 已完成
   ↓
 Phase 7.3 (对话历史注入 LLM context) — ✅ 已完成（2026-07-29）
   ↓
-Phase 8 (跨轮上下文治理 + Episode Summary 压缩) — 🔵 候选
+Phase 8 (跨轮上下文治理 + Episode Summary 压缩) — 🔵 唯一仍开放候选（Episode Summary 已接入，跨轮预算治理留 TODO）
   ↓
-Phase 9 (联网搜索，可选) — 🔵 候选
+Phase 9 (联网搜索，可选) — ⛔ 关闭（产品边界与合规决策，不采用）
 ```
 
 ### 7.2 候选最小版本（仅示意，未纳入正式排期）
@@ -861,6 +863,8 @@ Phase 9 (联网搜索，可选) — 🔵 候选
 | **Phase 9** | 联网搜索 | 🔵 候选 | — |
 
 ### 8.1 dayu 对标关键差距（2026-07-27 更新）
+
+> 状态更新（2026-08-11）：本表为 2026-07-27 快照。P0 两项（对话历史 / 跨轮工具结果不可见）已由 Phase 7.3 方案 B 解决；P1 两项（Memory Contribution / Pinned State 不注入）已由 2026-08-09 P1 记忆注入解决；P2/P3 项仍未实施，均未列入当前排期。
 
 从 dayu-agent 架构分析提炼的差距，按优先级排列：
 
@@ -929,4 +933,3 @@ P0 的两个问题是同一个根因的两个表现：`_request_payload → LlmC
 - **合计 ~121 行**
 
 DS 二审裁决：有条件通过。实施前处理 3 项：① truncate_turns 补充 status/updated_at 字段；② chat_turn() 显式填充 ToolCallSummary；③ ContextBudget 与 history token 交互留 TODO（Phase 8 处理）。
-

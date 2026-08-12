@@ -115,6 +115,8 @@ class Session:
         pinned_state: 固定状态（不随 compaction 压缩）。
         turns: 对话轮次列表。
         episode_summaries: 压缩后的 episodic memory。
+        failed_tool_call_keys: 跨轮已失败工具调用的去重键元组（只增不减，
+            由 chat_service 每轮合并 agent_result.failed_call_keys，上限 50 条）。
         created_at: 创建时间 ISO 8601。
         updated_at: 最后更新时间 ISO 8601。
     """
@@ -125,6 +127,7 @@ class Session:
     pinned_state: PinnedState
     turns: tuple[Turn, ...] = ()
     episode_summaries: tuple[EpisodeSummary, ...] = ()
+    failed_tool_call_keys: tuple[tuple, ...] = ()
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -155,6 +158,7 @@ class Session:
             pinned_state=self.pinned_state,
             turns=self.turns + (turn,),
             episode_summaries=self.episode_summaries,
+            failed_tool_call_keys=self.failed_tool_call_keys,
             created_at=self.created_at,
             updated_at=datetime.now(timezone.utc).isoformat(),
         )
@@ -168,6 +172,7 @@ class Session:
             pinned_state=self.pinned_state,
             turns=self.turns,
             episode_summaries=self.episode_summaries,
+            failed_tool_call_keys=self.failed_tool_call_keys,
             created_at=self.created_at,
             updated_at=datetime.now(timezone.utc).isoformat(),
         )
@@ -181,6 +186,7 @@ class Session:
             pinned_state=pinned_state,
             turns=self.turns,
             episode_summaries=self.episode_summaries,
+            failed_tool_call_keys=self.failed_tool_call_keys,
             created_at=self.created_at,
             updated_at=datetime.now(timezone.utc).isoformat(),
         )
@@ -194,6 +200,7 @@ class Session:
             pinned_state=self.pinned_state,
             turns=self.turns,
             episode_summaries=self.episode_summaries + (episode,),
+            failed_tool_call_keys=self.failed_tool_call_keys,
             created_at=self.created_at,
             updated_at=datetime.now(timezone.utc).isoformat(),
         )
@@ -213,6 +220,26 @@ class Session:
             turns=self.turns[-keep_last:],
             pinned_state=self.pinned_state,
             episode_summaries=self.episode_summaries,
+            failed_tool_call_keys=self.failed_tool_call_keys,
+            created_at=self.created_at,
+            updated_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    def with_failed_tool_call_keys(self, keys: tuple[tuple, ...]) -> Session:
+        """整体替换 failed_tool_call_keys，返回新 Session（不可变）。
+
+        参数:
+            keys: 新的失败调用去重键元组（调用方负责去重与上限裁剪）。
+        """
+
+        return Session(
+            session_id=self.session_id,
+            label=self.label,
+            status=self.status,
+            pinned_state=self.pinned_state,
+            turns=self.turns,
+            episode_summaries=self.episode_summaries,
+            failed_tool_call_keys=keys,
             created_at=self.created_at,
             updated_at=datetime.now(timezone.utc).isoformat(),
         )

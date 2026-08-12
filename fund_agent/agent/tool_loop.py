@@ -65,6 +65,8 @@ class AgentRunResult:
         tool_trace: public reading tool 调用轨迹。
         failure: 失败分类；成功时为 None。
         key_facts: 终答解析出的关键事实元组；无解析结果为 ()。
+        failed_call_keys: 本轮实际失败调用的去重键元组（与 runner 同归一化规则）；
+            无失败调用时为空元组。
 
     返回:
         Host/UI 可安全消费的 Agent run 结果。
@@ -79,6 +81,7 @@ class AgentRunResult:
     failure: ToolFailure | None = None
     token_usage: object | None = None  # TokenUsage | None，避免循环导入
     key_facts: tuple[str, ...] = ()
+    failed_call_keys: tuple[tuple, ...] = ()
 
 
 class MinimalFundDocumentAgent:

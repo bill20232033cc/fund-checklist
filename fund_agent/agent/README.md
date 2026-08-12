@@ -39,9 +39,11 @@ Post-MVP Slice 8A 已实现 fake/injected LLM tool-loop contract：
 - 工具调用失败不再终止整轮：`ToolFailure` 转为带 `failure` 标记的 `ToolResult`（无 evidence/citation）追加到 `tool_results`，下一轮 `next_step` 可见，LLM 可修正 section_ref / 工具名 / document_id 后重试；重复的失败调用与成功调用一样按 key 去重短路。
 - `run_stream` 对工具失败发 `TOOL_EVENT(phase=result)`（含 failure_code/message）并继续循环；只有终态失败（step 耗尽、终答守卫、provider 异常）才发 `ERROR`。
 - interactive 终答投资建议守卫失败（`LLM 最终回答包含投资建议关键词`）时，`run` / `run_stream` 最多重试 1 次：query 追加纠正指令（要求只陈述年报客观事实、中性表述）重新调用 `next_step`，新 FinalAnswer 仍走同一 `_final_result` 守卫；重试通过则正常返回，重试后仍失败或未产出 FinalAnswer 则维持原失败（fail-closed）。ask / generate 等其它 scene 不重试，保持原语义；其它失败类型（证据缺失 / citation 缺失 / step 耗尽 / 不可用）不回退。
+- interactive 终答质量守卫（原文粘贴：answer 与任一 evidence 连续重叠 ≥40 字符；或 answer >200 字）对正常 FinalAnswer 与 max_steps 耗尽的 force-answer 降级产物一视同仁：`run` / `run_stream` 均先过守卫，有界重答 1 次（query 追加概括指令），重答仍超标则截断为 ≤200 字摘要（含省略说明），重答未产出 FinalAnswer 或异常则 fail-closed；守卫对无证据的 step 耗尽失败原样放行。ask / generate 等其它 scene 的 force-answer 保持既有降级语义（证据原文拼接，不触发重答）。
 - 失败反馈序列化：`DeepSeekLlmClient._safe_tool_result` 与 `wrap_results_for_llm` 对失败条目走 `Envelope.error` + `project_for_llm` 的 `ok=False` 投影（`{"error": code, "message": message}`）；provider 侧 `LlmClientFailure`（`llm_malformed_response` / `unavailable`）不回喂，维持 fail-closed。
 - tool call 容错：`_parse_tool_call` 不再强制 document_id（缺失/空字符串解析为空串，仅结构不可解析或类型错误才映射 `llm_malformed_response`）；runner `_invoke_tool_call` 对非 aggregate 工具用 `expected_document_id` 补全空 document_id 后再做前缀校验，`aggregate_multi_year_annual_performance` 维持既有豁免。
 - 工具名归一化：`_coerce_tool_name` 只做格式归一化（去首尾空白、去尾部括号参数）后精确匹配白名单；不做语义级映射（如 "search" -> search_document），未知工具名仍拒绝且 trace 保留 LLM 原始工具名。
+- read_table section 一致性校验（Fix C，Mimo 根因 review）：interactive 场景下，runner 收集本轮 `list_tables` 成功结果与 `search_document` 命中结果（`SearchResult.table_ref`，table-backed first hit 合法来源）的 `table_ref` 集合；LLM 调 `read_table(table_ref=T)` 时 T 必须属于该集合（含未先 list_tables / search 直接读从未出现表号的情况），否则返回 `ToolFailure(not_found, "table_ref 未在当前已列出章节的表格中，请先 list_tables 并复制返回的表号")` 走既有失败回喂路径并计入 failed_call_keys，不终止循环。ask / generate 场景不拦截（控制 blast radius）；public reading tool 签名与实现不变。
 - 允许工具固定为 `search_document`、`read_section`、`list_tables`、`read_table`、`get_excerpt`。
 - `ToolResult` 只由 `FundDocumentToolService` public tool result 构造，不读取 repository/private loader。
 
@@ -56,7 +58,7 @@ Post-MVP Slice 8A 已实现 fake/injected LLM tool-loop contract：
 
 Post-MVP Slice 8B 当前实现：
 
-- `DeepSeekLlmClient` 是 DeepSeek-only OpenAI-compatible provider adapter，实现既有 `LlmClientProtocol`。
+- `DeepSeekLlmClient` 是 OpenAI-compatible provider adapter，实现既有 `LlmClientProtocol`。
 - adapter 使用 `DeepSeekTransportProtocol` 注入 transport；默认 transport 基于标准库 `urllib`，测试使用 fake transport，不新增 SDK 依赖。
 - request 使用 `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL` 组装 `/chat/completions`；`DEEPSEEK_BASE_URL` 默认 `https://api.deepseek.com`。
 - provider response 只能解析为受控 `ToolCall` 或 `FinalAnswer`，并继续交给 8A `LlmToolLoopRunner` 执行 enforcement。
@@ -67,6 +69,16 @@ Post-MVP Slice 8B 当前实现：
 - system prompt 明确要求 search→read_section→cite 链路：search 获取 section_ref，再用 read_section 读取完整章节内容，禁止猜测 section_ref 或 table_ref。
 - `_parse_tool_call` 将未知 arguments（如 fund_code、requested_years、annual_report_documents）自动收集到 `ToolCall.extra`，传递给 aggregate 等工具。
 - Slice 8B 不新增 `fund-checklist ask`，不做 streaming、Mimo / MiMo、多 provider matrix、prompt framework、richer QA/eval、自动报告、字段抽取或投资判断。
+
+LLM Provider 自由切换（DeepSeek ↔ Mimo，Slice provider-switch-20260810）：
+
+- 新增 env `FUND_CHECKLIST_LLM_PROVIDER`，取值 `deepseek`（默认）/ `mimo`；未知值 fail-fast 抛 `ValueError` 并提示合法取值，不静默回退。
+- Provider 配置表集中在 `deepseek_llm.py`：deepseek 用 `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL`（默认 `https://api.deepseek.com`）/ `DEEPSEEK_MODEL`（默认 `deepseek-v4-flash`）；mimo 用 `MIMO_API_KEY` / `MIMO_BASE_URL`（默认 `https://api.xiaomimimo.com/v1`）/ `MIMO_MODEL`（默认 `mimo-v2.5-pro`）。
+- 配置解析发生在请求组装时（`next_step` / `next_step_stream` / `generate_text`），与既有 env 读取点一致；`DeepSeekLlmClient.env` 注入参数保持向后兼容。
+- scene/contract 模型名翻译表：`deepseek-v4-pro -> mimo-v2.5-pro`、`deepseek-v4-flash -> mimo-v2.5`；未知模型名原样透传。解析顺序：provider 对应 MODEL env 非空优先，否则 scene/contract 模型名经翻译后写入 provider 对应 MODEL env。
+- `ChatService` 注入层按 provider 组装 client env；`interactive` 的 current_model 展示由 `resolve_provider_model` 提供（读对应 MODEL env + provider 默认）。
+- 错误文案已泛化：`_UNAVAILABLE_MESSAGE` / `_MALFORMED_MESSAGE` 不再带 DeepSeek 前缀。
+- 保留类名/文件名 `DeepSeekLlmClient` / `deepseek_llm.py`，不 rename；不新建第二套 adapter。
 
 Post-MVP Slice 8C 当前实现：
 
@@ -81,4 +93,4 @@ Post-MVP Slice 8C 当前实现：
 - pytest output、trace、assert message 不得打印 API key；不得记录 raw provider response 或新增 artifact。
 - Slice 8C 不修改 production adapter；若 live test 暴露解析 bug，必须先停止并报告。
 
-未实现：Mimo / MiMo、多 provider、prompt 编排、自动报告、投资判断、字段抽取、长期会话、`fund-checklist ask`。
+未实现：prompt 编排、自动报告、投资判断、字段抽取、长期会话、`fund-checklist ask`。

@@ -38,6 +38,10 @@ class _DisclosureLocatorContract:
         aggregate_all_matches: 聚合语义开关；True 时路由聚合该 profile
             全部 candidate success 结果（不做标题集合去重），仅 fee_rates
             使用；其余契约默认 False，保持标题去重聚合。
+        anchor_title_family: 受控表锚点解析使用的标题族；manager_holdings
+            （9.4 行头优先、9.2 行头回退）、holdings_top10（表头签名关键词）
+            与 performance_returns（3.2.1 表头签名，A 类标题优先，Fix C）
+            配置，其余契约保持空元组。
 
     返回:
         不可变披露定位 contract。
@@ -53,6 +57,7 @@ class _DisclosureLocatorContract:
     requires_table_citation: bool
     extraction_allowed: bool
     aggregate_all_matches: bool = False
+    anchor_title_family: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

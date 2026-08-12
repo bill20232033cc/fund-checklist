@@ -23,6 +23,8 @@ from fund_agent.service.chat_service import ChatService, ChatTurnRequest, ChatTu
 from fund_agent.service.prompt_composer import PromptComposer
 from fund_agent.service.scene_config import INTERACTIVE_SCENE_CONFIG
 from fund_agent.agent.tool_loop import AgentRunResult
+from fund_agent.fund.document_tools.constants import FailureCode
+from fund_agent.service.models import AggregateMultiYearAnnualPerformanceResult
 from fund_agent.host.session_store import SessionStore
 from fund_agent.service.session_models import PinnedState
 
@@ -51,6 +53,7 @@ class TestInteractiveParser:
         assert args.label is None
         assert args.no_stream is False
         assert args.plain is False
+        assert args.year is None
 
     def test_plain_flag_parsed(self):
         """--plain 参数正确解析。"""
@@ -63,6 +66,18 @@ class TestInteractiveParser:
         parser = build_parser()
         args = parser.parse_args(["interactive", "--fund-code", "000001"])
         assert args.plain is False
+
+    def test_year_parsed(self):
+        """--year 参数正确解析。"""
+        parser = build_parser()
+        args = parser.parse_args(["interactive", "--fund-code", "011649", "--year", "2023"])
+        assert args.year == 2023
+
+    def test_year_invalid_rejected(self):
+        """--year 非整数被 argparse 拒绝。"""
+        parser = build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["interactive", "--fund-code", "011649", "--year", "abc"])
 
 
 class TestInteractiveCommandExecution:
@@ -128,7 +143,49 @@ class TestInteractiveCommandExecution:
                 pass  # 无 real stdin 时可能触发
 
         output = stdout.getvalue()
+        assert "非交互输入，默认选择 2025 年" in output
         assert "011649" in output or exit_code is not None
+
+    def test_interactive_with_year_selects_report(self, tmp_path: Path):
+        """--year 提供时直接选择对应年报，不消费管道首行。"""
+        self._write_fake_catalog(tmp_path)
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch("sys.stdin", io.StringIO("exit\n")):
+            exit_code = run_cli(
+                [
+                    "interactive",
+                    "--fund-code", "011649",
+                    "--work-dir", str(tmp_path),
+                    "--year", "2023",
+                    "--plain",
+                ],
+                stdout=stdout,
+                stderr=stderr,
+            )
+        output = stdout.getvalue()
+        assert "已选择 2023 年年报" in output
+        assert "非交互输入" not in output  # --year 提供时不打印默认选择说明
+        assert exit_code == 0
+
+    def test_interactive_with_year_not_available_exits(self, tmp_path: Path):
+        """--year 不在可用年份内时报错退出。"""
+        self._write_fake_catalog(tmp_path)
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        exit_code = run_cli(
+            [
+                "interactive",
+                "--fund-code", "011649",
+                "--work-dir", str(tmp_path),
+                "--year", "1999",
+            ],
+            stdout=stdout,
+            stderr=stderr,
+        )
+        assert exit_code != 0
+        assert "1999" in stderr.getvalue()
+        assert "不在可用年份内" in stderr.getvalue()
 
     def test_interactive_blocked_answer_displays_original_and_terms(self, tmp_path: Path):
         """被拦截回答：CLI 展示拦截提示、被拦截原文与触发词。"""
@@ -189,6 +246,44 @@ class TestInteractiveCommandExecution:
         output = stdout.getvalue()
         assert exit_code == 0
         assert "[工具调用: search_document(success), read_section(failure:not_found)]" in output
+
+    def test_interactive_constructs_chat_service_with_aggregate_handler(self, tmp_path: Path):
+        """interactive 分支构造 ChatService 时注入 aggregate_handler（catalog 重解析）。"""
+        self._write_fake_catalog(tmp_path)
+        captured: dict[str, object] = {}
+        original_init = ChatService.__init__
+
+        def patched_init(self_, **kwargs):
+            captured.update(kwargs)
+            original_init(self_, **kwargs)
+
+        with mock.patch("sys.stdin", io.StringIO("exit\n")), mock.patch.object(
+            ChatService, "__init__", patched_init
+        ):
+            try:
+                run_cli(
+                    ["interactive", "--fund-code", "011649", "--work-dir", str(tmp_path)],
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+            except (EOFError, SystemExit):
+                pass  # 无 real stdin 时可能触发
+
+        handler = captured.get("aggregate_handler")
+        assert callable(handler)
+        # handler 以 catalog 重解析 annual_report_documents，忽略 LLM 提供的 document_id 列表
+        # （requested_years 不在 catalog → 返回 catalog 解析失败，而非使用幻觉 document 列表）
+        result = handler(
+            document_id="doc-011649-2024",
+            fund_code="011649",
+            requested_years=(2000, 2001, 2002),
+            annual_report_documents=[{"year": 2000, "document_id": "hallucinated-doc"}],
+            share_class="A",
+        )
+        assert isinstance(result, AggregateMultiYearAnnualPerformanceResult)
+        assert result.failure is not None
+        assert result.failure.code is FailureCode.NOT_FOUND
+        assert "catalog" in result.failure.message
 
 
 class TestReplCommandParsing:

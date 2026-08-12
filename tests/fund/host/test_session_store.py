@@ -279,6 +279,46 @@ class TestSessionStore:
         assert tc.failure_code == "not_found"
         assert restored.tool_trace == ("read_section(failure:not_found)",)
 
+    def test_round_trip_preserves_failed_tool_call_keys(self, store: SessionStore):
+        """磁盘往返后 failed_tool_call_keys 完整保留。"""
+        session = store.create(fund_code="011649")
+        session = session.with_failed_tool_call_keys(
+            (
+                ("read_section", "doc-011649-2024", "section-9999", None),
+                ("aggregate_multi_year_annual_performance", "011649", (2021, 2022, 2023), "A"),
+            )
+        )
+        store.save(session)
+
+        loaded = store.load(session.session_id)
+        assert loaded.failed_tool_call_keys == (
+            ("read_section", "doc-011649-2024", "section-9999", None),
+            ("aggregate_multi_year_annual_performance", "011649", (2021, 2022, 2023), "A"),
+        )
+
+    def test_old_session_without_failed_keys_loads_empty(self, store: SessionStore, store_dir: Path):
+        """旧 session JSON 无 failed_tool_call_keys 字段 → 默认空元组，不回退。"""
+        session_id = "old-session-no-failed-keys"
+        payload = {
+            "schema_version": 1,
+            "session_id": session_id,
+            "label": None,
+            "status": "ACTIVE",
+            "pinned_state": {"fund_code": "011649"},
+            "turns": [],
+            "episode_summaries": [],
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+        }
+        store_dir.mkdir(parents=True, exist_ok=True)
+        (store_dir / f"{session_id}.json").write_text(
+            json.dumps(payload, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        loaded = store.load(session_id)
+        assert loaded.failed_tool_call_keys == ()
+
     def test_load_nonexistent_raises(self, store: SessionStore):
         """加载不存在的 session 抛出 FileNotFoundError。"""
         with pytest.raises(FileNotFoundError):

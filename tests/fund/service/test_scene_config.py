@@ -127,9 +127,9 @@ class TestInteractiveSceneConfig:
         """interactive scene temperature 更高（0.7）。"""
         assert INTERACTIVE_SCENE_CONFIG.model.temperature == 0.7
 
-    def test_max_iterations_12(self):
-        """interactive scene 迭代上限为 12（2026-08-05 裁决，配合空结果强制收敛）。"""
-        assert INTERACTIVE_SCENE_CONFIG.runtime.max_iterations == 12
+    def test_max_iterations_8(self):
+        """interactive scene 迭代上限为 8（2026-08-09 P0-2 裁决）。"""
+        assert INTERACTIVE_SCENE_CONFIG.runtime.max_iterations == 8
 
     def test_five_fragments(self):
         """interactive scene 比 ask 多 1 个 fragment（共 5 个）。"""

@@ -214,6 +214,32 @@ def _write_docling_json_whitespace_fragments(path: Path) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
+def _write_docling_json_sections(path: Path, sections: list[tuple[str, str]]) -> None:
+    """写入仅含指定章节（title, text）对的最小 Docling JSON。"""
+
+    texts: list[dict[str, object]] = []
+    for index, (title, text) in enumerate(sections):
+        texts.append(
+            {
+                "self_ref": f"#/texts/{index * 2}",
+                "label": "section_header",
+                "text": title,
+                "level": 1,
+                "prov": [{"page_no": index + 1}],
+            }
+        )
+        texts.append(
+            {
+                "self_ref": f"#/texts/{index * 2 + 1}",
+                "label": "text",
+                "text": text,
+                "prov": [{"page_no": index + 1}],
+            }
+        )
+    payload = {"schema_name": "DoclingDocument", "texts": texts, "tables": []}
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
 def _store(tmp_path) -> DoclingDocumentStore:
     """构造已通过 parser_health 的 store。"""
 
@@ -325,6 +351,44 @@ def test_store_search_orders_table_caption_before_row_for_equal_score(tmp_path) 
         SearchMatchKind.TABLE_ROW,
     ]
     assert [result.rank for result in results] == [1, 2]
+
+
+def test_store_search_ranks_title_hit_section_before_text_only_section(tmp_path) -> None:
+    """BM25F 重排序：title 命中章节必须排在仅正文多次命中章节之前。"""
+
+    json_path = tmp_path / "sample.docling.json"
+    _write_docling_json_sections(
+        json_path,
+        [
+            ("§1 重要提示", "基金经理在本报告期内保持稳定，基金经理持续履职尽责，基金经理勤勉尽责。"),
+            ("§2 基金经理变动情况", "本节说明基金经理变动情况。"),
+        ],
+    )
+    store = DoclingDocumentStore(identity=_identity(), json_path=json_path)
+
+    results = store.search("基金经理")
+
+    assert [result.section_ref for result in results] == ["section-0002", "section-0000"]
+    assert results[0].match_kind is SearchMatchKind.SECTION_TEXT
+
+
+def test_store_search_ranks_rare_term_candidate_before_common_term_multi_hit(tmp_path) -> None:
+    """稀有词加权：query 含稀有词+常见词时，含稀有词的单次命中候选排在常见词多次命中候选之前。"""
+
+    json_path = tmp_path / "sample.docling.json"
+    _write_docling_json_sections(
+        json_path,
+        [
+            ("§1 运作情况", "本基金托管费已计提，基金管理人尽责，基金份额稳定，基金资产正常。"),
+            ("§2 托管安排", "本基金托管费已按合同约定计提。"),
+            ("§3 基金净值", "基金份额净值与基金资产净值情况。"),
+        ],
+    )
+    store = DoclingDocumentStore(identity=_identity(), json_path=json_path)
+
+    results = store.search("基金托管费")
+
+    assert [result.section_ref for result in results] == ["section-0002", "section-0000"]
 
 
 def test_store_search_returns_empty_tuple_without_evidence_candidate(tmp_path) -> None:

@@ -3,18 +3,27 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
+
+import pytest
 
 from fund_agent.agent import ChatResponse, FakeLlmClient, FinalAnswer, LlmToolLoopRunner, TokenUsage, ToolCall, ToolResult
 from fund_agent.agent.context_budget import ContextBudgetState
 from fund_agent.agent.llm_tool_loop import (
     _cap_tool_results,
     _coerce_tool_name,
+    _dedup_key,
     _document_id_matches,
     _has_long_evidence_overlap,
     _normalize_document_id,
+    _normalize_query_text,
+    _STEP_LIMIT_MESSAGE,
+    _UNAVAILABLE_MESSAGE,
+    _INTERACTIVE_SUMMARY_TRUNCATE_NOTE,
+    _READ_TABLE_UNLISTED_MESSAGE,
     _truncate_final_answer_summary,
     contains_investment_advice,
     matched_investment_advice_terms,
@@ -262,6 +271,33 @@ def _service(tmp_path: Path) -> FundDocumentToolService:
     return FundDocumentToolService({_identity().document_id: store})
 
 
+_PERF_FIXTURE_DOC_ID = "004393-2025-annual_report-dc38aae8770e0071"
+_PERF_FIXTURE_JSON = Path(
+    ".fund_e2e_004393/docling_json/004393-2025-annual_report-dc38aae8770e0071"
+    "/004393-2025-annual_report-dc38aae8770e0071.docling.json"
+)
+
+
+def _performance_fixture_service() -> FundDocumentToolService:
+    """构造 004393-2025 真实 docling JSON fixture 对应的 tool service（Fix C）。"""
+
+    assert _PERF_FIXTURE_JSON.is_file(), "004393-2025 现成 docling JSON fixture 缺失"
+    store = DoclingDocumentStore(
+        identity=ReportIdentity(
+            fund_code="004393",
+            fund_name="安信企业价值优选混合",
+            year=2025,
+            report_type=ReportType.ANNUAL_REPORT,
+            source_kind=SourceKind.LOCAL_PDF,
+            local_import_id="fixture",
+            content_fingerprint="fixture",
+            document_id=_PERF_FIXTURE_DOC_ID,
+        ),
+        json_path=_PERF_FIXTURE_JSON,
+    )
+    return FundDocumentToolService({_PERF_FIXTURE_DOC_ID: store})
+
+
 def _write_docling_json_with_manager_holdings(path: Path) -> None:
     """写入含 9.4 基金经理持有本基金 章节的 Docling-shaped JSON（interactive 收敛测试专用）。"""
 
@@ -408,6 +444,20 @@ def _first_table_ref(results: tuple[ToolResult, ...]) -> str:
     return table.table_ref
 
 
+def _first_hit_table_ref(results: tuple[ToolResult, ...]) -> str:
+    """从最近的 search_document ToolResult 中取第一个携带 table_ref 的命中表号。"""
+
+    hits = results[-1].result
+    assert isinstance(hits, tuple)
+    table_ref = next(
+        hit.table_ref
+        for hit in hits
+        if isinstance(hit, SearchResult) and hit.table_ref
+    )
+    assert table_ref is not None
+    return table_ref
+
+
 def _final_with_latest_citation(answer: str, key_fact: str) -> Callable[[tuple[ToolResult, ...]], FinalAnswer]:
     """构造使用最近工具 citation 的 fake final-answer factory。"""
 
@@ -498,6 +548,240 @@ def test_fake_llm_reads_table_then_answers_with_table_citation(tmp_path: Path) -
     )
 
 
+class _PerfAnchorRecoverClient:
+    """Fix C：list_tables(section-0044) 后先猜错表号（table-0039）再读锚点表的脚本 LLM。"""
+
+    def __init__(self, document_id: str) -> None:
+        """保存目标 document_id 并置零步骤。"""
+
+        self._document_id = document_id
+        self._step = 0
+        self.unlisted_failure_message: str | None = None
+
+    def next_step(
+        self,
+        *,
+        document_id: str,
+        query: str,
+        tool_results: tuple[ToolResult, ...],
+        remaining_budget: int | None = None,
+    ) -> ChatResponse:
+        """按脚本推进：list_tables → 猜错表号 → 断言失败消息 → 读锚点表 → 终答。"""
+
+        del query, remaining_budget
+        if self._step == 0:
+            self._step = 1
+            return ChatResponse(step=ToolCall(
+                tool_name=ToolName.LIST_TABLES,
+                document_id=document_id,
+                section_ref="section-0044",
+            ))
+        if self._step == 1:
+            self._step = 2
+            return ChatResponse(step=ToolCall(
+                tool_name=ToolName.READ_TABLE,
+                document_id=document_id,
+                table_ref="table-0039",
+            ))
+        if self._step == 2:
+            self._step = 3
+            last = tool_results[-1]
+            assert last.failure is not None
+            assert last.failure.code is FailureCode.NOT_FOUND
+            self.unlisted_failure_message = last.failure.message
+            return ChatResponse(step=ToolCall(
+                tool_name=ToolName.READ_TABLE,
+                document_id=document_id,
+                table_ref="table-0009",
+            ))
+        table_citation = next(r.citations[0] for r in tool_results if r.citations)
+        return ChatResponse(step=FinalAnswer(
+            answer="该基金过去一年净值增长率为 12.77%。",
+            citations=(table_citation,),
+            key_facts=("12.77%",),
+        ))
+
+
+def test_interactive_read_table_unlisted_rejected_then_recovers() -> None:
+    """Fix C：interactive 下未 list_tables 的表号 read_table 被拒（not_found 回喂、不终止循环）。
+
+    复现 004393 根因链：list_tables(section-0044) 列出 table-0009/0010 后，
+    LLM 猜 table-0039（7.4.7.12 资产支持证券投资收益）被拒并回喂；随后
+    已列出的 table-0009（3.2.1 A 类净值增长率表）正常放行。
+    """
+
+    service = _performance_fixture_service()
+    client = _PerfAnchorRecoverClient(_PERF_FIXTURE_DOC_ID)
+    runner = LlmToolLoopRunner(tool_service=service, llm_client=client)
+
+    result = runner.run(
+        document_id=_PERF_FIXTURE_DOC_ID,
+        query="近净值增长率是多少",
+        scene="interactive",
+    )
+
+    assert result.failure is None
+    assert "12.77%" in result.answer
+    assert client.unlisted_failure_message == _READ_TABLE_UNLISTED_MESSAGE
+    # 拒绝调用计入 failed_call_keys（跨轮失败短路语义）
+    rejected_key = _dedup_key(
+        ToolCall(
+            tool_name=ToolName.READ_TABLE,
+            document_id=_PERF_FIXTURE_DOC_ID,
+            table_ref="table-0039",
+        )
+    )
+    assert rejected_key in result.failed_call_keys
+    # trace：list_tables 成功 → read_table(table-0039) not_found → read_table(table-0009) 成功
+    assert tuple(
+        (entry.tool_name, entry.result_kind, entry.failure_code)
+        for entry in result.tool_trace
+    ) == (
+        (ToolName.LIST_TABLES, "success", None),
+        (ToolName.READ_TABLE, "failure", FailureCode.NOT_FOUND),
+        (ToolName.READ_TABLE, "success", None),
+    )
+    assert result.citations[0].locator.table_ref == "table-0009"
+
+
+def test_interactive_read_table_without_source_rejected() -> None:
+    """Fix C：interactive 下直接读从未出现的表号（无 search 命中、无 list_tables 列出）被拒。"""
+
+    service = _performance_fixture_service()
+    seen_messages: list[str] = []
+
+    def _step_after_rejection(results: tuple[ToolResult, ...]) -> ToolCall:
+        """下一轮 LLM 应看到 not_found 失败消息，并改用先 list_tables。"""
+
+        last = results[-1]
+        assert last.failure is not None
+        assert last.failure.code is FailureCode.NOT_FOUND
+        seen_messages.append(last.failure.message)
+        return ToolCall(
+            tool_name=ToolName.LIST_TABLES,
+            document_id=_PERF_FIXTURE_DOC_ID,
+            section_ref="section-0044",
+        )
+
+    runner = LlmToolLoopRunner(
+        tool_service=service,
+        llm_client=FakeLlmClient(
+            [
+                ToolCall(
+                    tool_name=ToolName.READ_TABLE,
+                    document_id=_PERF_FIXTURE_DOC_ID,
+                    table_ref="table-0009",
+                ),
+                _step_after_rejection,
+                # 相同 table_ref 的失败调用按 key 短路（计入 failed_call_keys 语义），
+                # 改用另一张已列出表（table-0010）验证 list_tables 后正常放行。
+                lambda results: ToolCall(
+                    tool_name=ToolName.READ_TABLE,
+                    document_id=_PERF_FIXTURE_DOC_ID,
+                    table_ref=results[-1].result[1].table_ref,
+                ),
+                _final_with_latest_citation("该基金过去一年净值增长率为 12.33%。", "12.33%"),
+            ]
+        ),
+    )
+
+    result = runner.run(
+        document_id=_PERF_FIXTURE_DOC_ID,
+        query="近净值增长率是多少",
+        scene="interactive",
+    )
+
+    assert result.failure is None
+    assert seen_messages == [_READ_TABLE_UNLISTED_MESSAGE]
+    assert "12.33%" in result.answer
+    assert tuple(
+        (entry.tool_name, entry.result_kind)
+        for entry in result.tool_trace
+    ) == (
+        (ToolName.READ_TABLE, "failure"),
+        (ToolName.LIST_TABLES, "success"),
+        (ToolName.READ_TABLE, "success"),
+    )
+    assert result.citations[0].locator.table_ref == "table-0010"
+
+
+def test_interactive_read_table_from_search_hit_allowed() -> None:
+    """Fix C：interactive 下 search 命中的 SearchResult.table_ref 直接 read_table 放行。
+
+    search_document 的 table-backed first hit 是合法来源（如「基金经理是谁」的
+    search -> 直接 read_table 流），放行集合必须包含 search 命中表的 table_ref。
+    """
+
+    service = _performance_fixture_service()
+    runner = LlmToolLoopRunner(
+        tool_service=service,
+        llm_client=FakeLlmClient(
+            [
+                ToolCall(
+                    tool_name=ToolName.SEARCH_DOCUMENT,
+                    document_id=_PERF_FIXTURE_DOC_ID,
+                    query="基金经理",
+                ),
+                lambda results: ToolCall(
+                    tool_name=ToolName.READ_TABLE,
+                    document_id=_PERF_FIXTURE_DOC_ID,
+                    table_ref=_first_hit_table_ref(results),
+                ),
+                _final_with_latest_citation("年报披露基金经理相关信息。", "基金经理"),
+            ]
+        ),
+    )
+
+    result = runner.run(
+        document_id=_PERF_FIXTURE_DOC_ID,
+        query="基金经理是谁",
+        scene="interactive",
+    )
+
+    assert result.failure is None
+    assert "基金经理" in result.answer
+    assert tuple(
+        (entry.tool_name, entry.result_kind)
+        for entry in result.tool_trace
+    ) == (
+        (ToolName.SEARCH_DOCUMENT, "success"),
+        (ToolName.READ_TABLE, "success"),
+    )
+    assert result.citations[0].locator.table_ref == "table-0014"
+
+
+def test_ask_read_table_not_intercepted_without_list_tables() -> None:
+    """Fix C：ask 场景不拦截——未 list_tables 直接 read_table(table-0039) 放行。"""
+
+    service = _performance_fixture_service()
+    runner = LlmToolLoopRunner(
+        tool_service=service,
+        llm_client=FakeLlmClient(
+            [
+                ToolCall(
+                    tool_name=ToolName.READ_TABLE,
+                    document_id=_PERF_FIXTURE_DOC_ID,
+                    table_ref="table-0039",
+                ),
+                lambda results: FinalAnswer(
+                    answer="年报披露资产支持证券投资收益数据。",
+                    citations=results[-1].citations,
+                    key_facts=(),
+                ),
+            ]
+        ),
+    )
+
+    result = runner.run(
+        document_id=_PERF_FIXTURE_DOC_ID,
+        query="资产支持证券投资收益",
+        scene="ask",
+    )
+
+    assert result.failure is None
+    assert result.citations[0].locator.table_ref == "table-0039"
+
+
 def test_fake_llm_final_answer_without_evidence_fails_closed(tmp_path: Path) -> None:
     """LLM 未调用工具就直接 final answer 时必须 fail-closed。"""
 
@@ -545,6 +829,37 @@ def test_fake_llm_unknown_tool_fails_closed(tmp_path: Path) -> None:
     assert result.answer == ""
     assert result.tool_trace[0].tool_name == "extract_fields"
     assert result.tool_trace[0].result_kind == "failure"
+
+
+def test_run_unclassified_exception_fails_closed_and_logs(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """next_step 抛未分类异常 → fail-closed UNAVAILABLE（行为不变），原始异常记录进进程日志。"""
+
+    class _ExplodingLlmClient:
+        """next_step 直接抛未分类异常的 fake client。"""
+
+        def next_step(self, *, document_id, query, tool_results, remaining_budget=None):
+            raise RuntimeError("boom")
+
+    runner = LlmToolLoopRunner(
+        tool_service=_service(tmp_path),
+        llm_client=_ExplodingLlmClient(),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="fund_agent.agent.llm_tool_loop"):
+        result = runner.run(document_id=_identity().document_id, query="基金经理")
+
+    assert isinstance(result.failure, ToolFailure)
+    assert result.failure.code is FailureCode.UNAVAILABLE
+    assert result.failure.message == "LLM 工具循环暂不可用"
+    assert any(
+        record.name == "fund_agent.agent.llm_tool_loop"
+        and record.levelname == "WARNING"
+        and "LLM tool loop run 未分类异常" in record.getMessage()
+        for record in caplog.records
+    )
+    assert "RuntimeError" in caplog.text and "boom" in caplog.text
 
 
 def test_llm_tool_call_missing_document_id_filled_from_expected(tmp_path: Path) -> None:
@@ -1312,7 +1627,7 @@ def test_interactive_paste_guard_retried_once_then_rewritten(tmp_path: Path) -> 
 
 
 def test_interactive_paste_guard_retry_still_pastes_truncates_summary(tmp_path: Path) -> None:
-    """interactive：重答后仍粘贴原文 → 截断为前 200 字摘要格式。"""
+    """interactive：重答后仍粘贴原文 → 截断为摘要格式（含省略说明 ≤200 字）。"""
 
     runner = LlmToolLoopRunner(
         tool_service=_service_with_long_manager_text(tmp_path),
@@ -1349,13 +1664,13 @@ def test_interactive_paste_guard_retry_still_pastes_truncates_summary(tmp_path: 
     )
 
     assert result.failure is None
-    assert len(result.answer) <= 200 + 25
+    assert len(result.answer) <= 200
     assert "截断" in result.answer
     assert result.answer.startswith("9.4 期末基金管理人的从业人员持有本基金的情况")
 
 
 def test_interactive_long_answer_guard_truncated_after_retry(tmp_path: Path) -> None:
-    """interactive：answer >800 字 → 有界重答 1 次，仍超长则截断为摘要格式。"""
+    """interactive：answer >200 字 → 有界重答 1 次，仍超长则截断为摘要格式（≤200 字）。"""
 
     long_answer = "这是年报事实。" * 160  # 8 字 * 160 = 1280 字
     client = _CountingFakeLlmClient(
@@ -1373,7 +1688,7 @@ def test_interactive_long_answer_guard_truncated_after_retry(tmp_path: Path) -> 
     )
 
     assert result.failure is None
-    assert len(result.answer) <= 200 + 25
+    assert len(result.answer) <= 200
     assert "截断" in result.answer
     assert client.next_step_calls == 2
 
@@ -1389,12 +1704,13 @@ def test_has_long_evidence_overlap_threshold() -> None:
 
 
 def test_truncate_final_answer_summary_format() -> None:
-    """摘要截断：≤200 字原样返回，>200 字截断为前 200 字 + 省略说明。"""
+    """摘要截断：≤200 字原样返回，>200 字截断为 200-len(note) 正文 + 省略说明，最终 ≤200 字。"""
 
     assert _truncate_final_answer_summary("短回答") == "短回答"
     long_answer = "好" * 300
     truncated = _truncate_final_answer_summary(long_answer)
-    assert truncated.startswith("好" * 200)
+    assert len(truncated) <= 200
+    assert truncated.startswith("好" * (200 - len(_INTERACTIVE_SUMMARY_TRUNCATE_NOTE)))
     assert "截断" in truncated
 
 
@@ -1466,6 +1782,167 @@ def test_run_stream_interactive_advice_guard_retry_still_errors(tmp_path: Path) 
     assert "投资建议" in str(errors[0].payload.get("message", ""))
     assert not any(event.type is StreamEventType.DONE for event in events)
     assert client.next_step_calls == 2
+
+
+def test_run_stream_interactive_force_answer_guard_retry_passes(tmp_path: Path) -> None:
+    """run_stream：interactive force-answer 过终答质量守卫，有界重答后用自己的话通过。"""
+
+    client = _CountingFakeLlmClient(
+        [
+            ToolCall(
+                tool_name=ToolName.SEARCH_DOCUMENT,
+                document_id=_identity().document_id,
+                query="基金经理",
+            ),
+            ToolCall(
+                tool_name=ToolName.SEARCH_DOCUMENT,
+                document_id=_identity().document_id,
+                query="基金经理",
+            ),
+            FinalAnswer(
+                answer="根据年报，基金经理负责本基金投资管理，报告期内保持稳定。",
+                citations=(),
+                key_facts=(),
+            ),
+        ]
+    )
+    runner = LlmToolLoopRunner(tool_service=_service(tmp_path), llm_client=client, max_steps=2)
+
+    events = list(
+        runner.run_stream(
+            document_id=_identity().document_id,
+            query="基金经理是谁？",
+            scene="interactive",
+        )
+    )
+
+    assert not any(event.type is StreamEventType.ERROR for event in events)
+    assert any(event.type is StreamEventType.DONE for event in events)
+    assert any(
+        event.type is StreamEventType.CONTENT_DELTA and "基金经理负责本基金投资管理" in str(event.payload)
+        for event in events
+    )
+    assert client.next_step_calls == 3  # 2 步耗尽 + 有界重答 1 次
+
+
+def test_run_stream_interactive_force_answer_guard_truncates_summary(tmp_path: Path) -> None:
+    """run_stream：interactive force-answer 重答仍粘贴原文 → CONTENT_DELTA 为 ≤200 字摘要。"""
+
+    client = _CountingFakeLlmClient(
+        [
+            ToolCall(
+                tool_name=ToolName.SEARCH_DOCUMENT,
+                document_id=_identity().document_id,
+                query="基金经理",
+            ),
+            lambda results: ToolCall(
+                tool_name=ToolName.READ_SECTION,
+                document_id=_identity().document_id,
+                section_ref=_section_ref_from_search(results),
+            ),
+            lambda results: FinalAnswer(
+                answer=results[-1].evidence_text,
+                citations=(),
+                key_facts=(),
+            ),
+        ]
+    )
+    runner = LlmToolLoopRunner(
+        tool_service=_service_with_long_manager_text(tmp_path),
+        llm_client=client,
+        max_steps=2,
+    )
+
+    events = list(
+        runner.run_stream(
+            document_id=_identity().document_id,
+            query="基金经理是谁？",
+            scene="interactive",
+        )
+    )
+
+    assert not any(event.type is StreamEventType.ERROR for event in events)
+    assert any(event.type is StreamEventType.DONE for event in events)
+    deltas = [event for event in events if event.type is StreamEventType.CONTENT_DELTA]
+    assert len(deltas) == 1
+    assert isinstance(deltas[0].payload, str)
+    assert len(deltas[0].payload) <= 200
+    assert "截断" in deltas[0].payload
+    assert client.next_step_calls == 3
+
+
+def test_run_stream_interactive_force_answer_guard_fails_closed(tmp_path: Path) -> None:
+    """run_stream：interactive force-answer 有界重答未产出 FinalAnswer → ERROR，无 DONE。"""
+
+    client = _CountingFakeLlmClient(
+        [
+            ToolCall(
+                tool_name=ToolName.SEARCH_DOCUMENT,
+                document_id=_identity().document_id,
+                query="基金经理",
+            ),
+            ToolCall(
+                tool_name=ToolName.SEARCH_DOCUMENT,
+                document_id=_identity().document_id,
+                query="基金经理",
+            ),
+            ToolCall(
+                tool_name=ToolName.SEARCH_DOCUMENT,
+                document_id=_identity().document_id,
+                query="基金经理",
+            ),
+        ]
+    )
+    runner = LlmToolLoopRunner(tool_service=_service(tmp_path), llm_client=client, max_steps=2)
+
+    events = list(
+        runner.run_stream(
+            document_id=_identity().document_id,
+            query="基金经理是谁？",
+            scene="interactive",
+        )
+    )
+
+    errors = [event for event in events if event.type is StreamEventType.ERROR]
+    assert len(errors) == 1
+    assert errors[0].payload.get("message") == _UNAVAILABLE_MESSAGE
+    assert not any(event.type is StreamEventType.DONE for event in events)
+    assert client.next_step_calls == 3
+
+
+def test_run_stream_ask_force_answer_payload_is_string(tmp_path: Path) -> None:
+    """run_stream：ask force-answer 保持既有降级语义，CONTENT_DELTA payload 为完整答案字符串。"""
+
+    client = _CountingFakeLlmClient(
+        [
+            ToolCall(
+                tool_name=ToolName.SEARCH_DOCUMENT,
+                document_id=_identity().document_id,
+                query="基金经理",
+            ),
+            ToolCall(
+                tool_name=ToolName.SEARCH_DOCUMENT,
+                document_id=_identity().document_id,
+                query="基金经理",
+            ),
+        ]
+    )
+    runner = LlmToolLoopRunner(tool_service=_service(tmp_path), llm_client=client, max_steps=2)
+
+    events = list(
+        runner.run_stream(
+            document_id=_identity().document_id,
+            query="基金经理是谁？",
+            scene="ask",
+        )
+    )
+
+    deltas = [event for event in events if event.type is StreamEventType.CONTENT_DELTA]
+    assert len(deltas) == 1
+    assert isinstance(deltas[0].payload, str)
+    assert deltas[0].payload != ""
+    assert any(event.type is StreamEventType.DONE for event in events)
+    assert client.next_step_calls == 2  # 无守卫重答
 
 
 def test_fake_llm_missing_citation_fails_closed(tmp_path: Path) -> None:
@@ -2124,6 +2601,188 @@ class TestForceAnswerDegradation:
         # citations 应该来自 tool_results
         assert len(result.citations) > 0
 
+    def test_interactive_force_answer_passes_quality_guard(self, tmp_path: Path) -> None:
+        """interactive：force-answer 原文拼接过终答质量守卫 → 有界重答 1 次后用自己的话通过。"""
+
+        client = _CountingFakeLlmClient(
+            [
+                ToolCall(
+                    tool_name=ToolName.SEARCH_DOCUMENT,
+                    document_id=_identity().document_id,
+                    query="基金经理",
+                ),
+                ToolCall(
+                    tool_name=ToolName.SEARCH_DOCUMENT,
+                    document_id=_identity().document_id,
+                    query="基金经理",
+                ),
+                FinalAnswer(
+                    answer="根据年报，基金经理负责本基金投资管理，报告期内保持稳定。",
+                    citations=(),
+                    key_facts=(),
+                ),
+            ]
+        )
+        runner = LlmToolLoopRunner(
+            tool_service=_service(tmp_path),
+            llm_client=client,
+            max_steps=2,
+        )
+
+        result = runner.run(
+            document_id=_identity().document_id,
+            query="基金经理是谁？",
+            scene="interactive",
+        )
+
+        assert result.failure is None
+        assert "基金经理负责本基金投资管理" in result.answer
+        assert len(result.answer) <= 200
+        assert client.next_step_calls == 3  # 2 步耗尽 + 有界重答 1 次
+
+    def test_interactive_force_answer_retry_still_pastes_truncates_summary(self, tmp_path: Path) -> None:
+        """interactive：force-answer 重答后仍粘贴原文 → 截断为摘要格式（≤200 字含省略说明）。"""
+
+        client = _CountingFakeLlmClient(
+            [
+                ToolCall(
+                    tool_name=ToolName.SEARCH_DOCUMENT,
+                    document_id=_identity().document_id,
+                    query="基金经理",
+                ),
+                lambda results: ToolCall(
+                    tool_name=ToolName.READ_SECTION,
+                    document_id=_identity().document_id,
+                    section_ref=_section_ref_from_search(results),
+                ),
+                lambda results: FinalAnswer(
+                    answer=results[-1].evidence_text,
+                    citations=(),
+                    key_facts=(),
+                ),
+            ]
+        )
+        runner = LlmToolLoopRunner(
+            tool_service=_service_with_long_manager_text(tmp_path),
+            llm_client=client,
+            max_steps=2,
+        )
+
+        result = runner.run(
+            document_id=_identity().document_id,
+            query="基金经理是谁？",
+            scene="interactive",
+        )
+
+        assert result.failure is None
+        assert len(result.answer) <= 200
+        assert "截断" in result.answer
+        assert result.answer.startswith("9.4 期末基金管理人的从业人员持有本基金的情况")
+        assert client.next_step_calls == 3
+
+    def test_interactive_force_answer_retry_not_final_answer_fails_closed(self, tmp_path: Path) -> None:
+        """interactive：force-answer 有界重答未产出 FinalAnswer → fail-closed（unavailable）。"""
+
+        client = _CountingFakeLlmClient(
+            [
+                ToolCall(
+                    tool_name=ToolName.SEARCH_DOCUMENT,
+                    document_id=_identity().document_id,
+                    query="基金经理",
+                ),
+                ToolCall(
+                    tool_name=ToolName.SEARCH_DOCUMENT,
+                    document_id=_identity().document_id,
+                    query="基金经理",
+                ),
+                ToolCall(
+                    tool_name=ToolName.SEARCH_DOCUMENT,
+                    document_id=_identity().document_id,
+                    query="基金经理",
+                ),
+            ]
+        )
+        runner = LlmToolLoopRunner(
+            tool_service=_service(tmp_path),
+            llm_client=client,
+            max_steps=2,
+        )
+
+        result = runner.run(
+            document_id=_identity().document_id,
+            query="基金经理是谁？",
+            scene="interactive",
+        )
+
+        assert result.failure is not None
+        assert result.failure.code == FailureCode.UNAVAILABLE
+        assert result.failure.message == _UNAVAILABLE_MESSAGE
+        assert result.answer == ""
+        assert client.next_step_calls == 3
+
+    def test_interactive_force_answer_no_evidence_still_fails_closed(self, tmp_path: Path) -> None:
+        """interactive：force-answer 无任何证据 → 保留 step 耗尽失败（守卫不吞失败）。"""
+
+        def always_unknown(doc: str, q: str, tr: tuple) -> ChatResponse:
+            return ChatResponse(
+                step=ToolCall(tool_name="unknown_tool", document_id=doc, query="test"),
+                usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+            )
+
+        class AlwaysUnknownLlm:
+            def next_step(self, **kwargs):
+                return always_unknown(kwargs["document_id"], kwargs["query"], kwargs["tool_results"])
+
+        runner = LlmToolLoopRunner(
+            tool_service=_service(tmp_path),
+            llm_client=AlwaysUnknownLlm(),
+            max_steps=1,
+        )
+
+        result = runner.run(
+            document_id=_identity().document_id,
+            query="test",
+            scene="interactive",
+        )
+
+        assert result.failure is not None
+        assert result.failure.code == FailureCode.UNAVAILABLE
+        assert result.failure.message == _STEP_LIMIT_MESSAGE
+
+    def test_ask_force_answer_not_guarded(self, tmp_path: Path) -> None:
+        """ask：force-answer 保持既有降级语义（证据原文拼接，不触发有界重答）。"""
+
+        client = _CountingFakeLlmClient(
+            [
+                ToolCall(
+                    tool_name=ToolName.SEARCH_DOCUMENT,
+                    document_id=_identity().document_id,
+                    query="基金经理",
+                ),
+                ToolCall(
+                    tool_name=ToolName.SEARCH_DOCUMENT,
+                    document_id=_identity().document_id,
+                    query="基金经理",
+                ),
+            ]
+        )
+        runner = LlmToolLoopRunner(
+            tool_service=_service(tmp_path),
+            llm_client=client,
+            max_steps=2,
+        )
+
+        result = runner.run(
+            document_id=_identity().document_id,
+            query="基金经理是谁？",
+            scene="ask",
+        )
+
+        assert result.failure is None
+        assert result.answer != ""
+        assert "基金经理" in result.answer
+        assert client.next_step_calls == 2  # 无守卫重答
+
 
 # ── ToolCallsRemaining ───────────────────────────────────────────────────
 
@@ -2327,6 +2986,237 @@ class TestDocumentIdMatches:
     def test_mismatch_partial(self):
         """部分重叠但不是前缀关系 → 不匹配。"""
         assert _document_id_matches("abc-2024-report", "abc-2025-report") is False
+
+
+# ── P0-2: 去重键归一化 + 跨轮失败短路 ───────────────────────────────
+
+
+class TestNormalizeQueryText:
+    """_normalize_query_text 单一真源测试。"""
+
+    def test_strips_all_whitespace(self):
+        """去除全部空白（含换行/制表/全角空格）。"""
+        assert _normalize_query_text("基金 经理\n持有\t本基金") == "基金经理持有本基金"
+        assert _normalize_query_text("持有　本基金") == "持有本基金"
+
+    def test_removes_cjk_punctuation(self):
+        """CJK 标点被去除，语义相近措辞映射到同一文本。"""
+        assert _normalize_query_text("基金经理持有本基金？") == "基金经理持有本基金"
+        assert _normalize_query_text("持有本基金，") == "持有本基金"
+        assert _normalize_query_text("基金前十大持仓（股票）是什么") == "基金前十大持仓股票是什么"
+
+    def test_empty_and_plain_text(self):
+        """空字符串与纯 ASCII 文本保持不变。"""
+        assert _normalize_query_text("") == ""
+        assert _normalize_query_text("2021-2025 净值增长率") == "2021-2025净值增长率"
+
+
+class TestDedupKeyNormalization:
+    """_dedup_key 工具级归一化（D4-二）。"""
+
+    def test_search_semantic_near_queries_same_key(self):
+        """语义相近的 search query（标点/空白差异）映射到同一 key。"""
+        call_a = ToolCall(tool_name=ToolName.SEARCH_DOCUMENT, document_id="doc-1", query="基金经理持有本基金")
+        call_b = ToolCall(tool_name=ToolName.SEARCH_DOCUMENT, document_id="doc-1", query="基金经理持有本基金？")
+        assert _dedup_key(call_a) == _dedup_key(call_b)
+
+    def test_search_different_document_id_distinct(self):
+        """不同 document_id 不互相短路（Mimo finding 002：key 天然含 document_id 维度）。"""
+        assert _dedup_key(
+            ToolCall(tool_name=ToolName.SEARCH_DOCUMENT, document_id="doc-1", query="基金经理")
+        ) != _dedup_key(
+            ToolCall(tool_name=ToolName.SEARCH_DOCUMENT, document_id="doc-2", query="基金经理")
+        )
+
+    def test_search_different_query_distinct(self):
+        """search 归一化后 query 不同 → 不同 key。"""
+        assert _dedup_key(
+            ToolCall(tool_name=ToolName.SEARCH_DOCUMENT, document_id="doc-1", query="基金经理")
+        ) != _dedup_key(
+            ToolCall(tool_name=ToolName.SEARCH_DOCUMENT, document_id="doc-1", query="持仓明细")
+        )
+
+    def test_read_section_ignores_query_wording(self):
+        """read_section 忽略 query 措辞，按 section_ref + max_chars 去重。"""
+        call_a = ToolCall(
+            tool_name=ToolName.READ_SECTION,
+            document_id="doc-1",
+            section_ref="section-0098",
+            max_chars=1000,
+            query="foo",
+        )
+        call_b = ToolCall(
+            tool_name=ToolName.READ_SECTION,
+            document_id="doc-1",
+            section_ref="section-0098",
+            max_chars=1000,
+            query="bar",
+        )
+        assert _dedup_key(call_a) == _dedup_key(call_b)
+
+    def test_read_table_ignores_query_wording(self):
+        """read_table 忽略 query 措辞，按 table_ref + max_rows 去重。"""
+        call_a = ToolCall(
+            tool_name=ToolName.READ_TABLE,
+            document_id="doc-1",
+            table_ref="table-0087",
+            max_rows=8,
+        )
+        call_b = ToolCall(
+            tool_name=ToolName.READ_TABLE,
+            document_id="doc-1",
+            table_ref="table-0087",
+            max_rows=8,
+            query="任意措辞",
+        )
+        assert _dedup_key(call_a) == _dedup_key(call_b)
+
+    def test_read_section_different_ref_distinct(self):
+        """read_section 不同 section_ref → 不同 key。"""
+        assert _dedup_key(
+            ToolCall(tool_name=ToolName.READ_SECTION, document_id="doc-1", section_ref="section-0098")
+        ) != _dedup_key(
+            ToolCall(tool_name=ToolName.READ_SECTION, document_id="doc-1", section_ref="section-0099")
+        )
+
+    def test_aggregate_normalizes_years_and_share_class(self):
+        """aggregate key：years 排序归一化 + share_class 缺失等价空串，忽略 document 列表。"""
+        extra_a = {
+            "fund_code": "007466",
+            "requested_years": [2023, 2021, 2025, 2022, 2024],
+            "annual_report_documents": [{"year": 2021, "document_id": "doc-a"}],
+            "share_class": "A",
+        }
+        extra_b = {
+            "fund_code": "007466",
+            "requested_years": (2021, 2022, 2023, 2024, 2025),
+            "annual_report_documents": [{"year": 2021, "document_id": "doc-b"}],
+            "share_class": "A",
+        }
+        call_a = ToolCall(
+            tool_name=ToolName.AGGREGATE_MULTI_YEAR_ANNUAL_PERFORMANCE,
+            document_id="doc-1",
+            extra=extra_a,
+        )
+        call_b = ToolCall(
+            tool_name=ToolName.AGGREGATE_MULTI_YEAR_ANNUAL_PERFORMANCE,
+            document_id="doc-1",
+            extra=extra_b,
+        )
+        assert _dedup_key(call_a) == _dedup_key(call_b)
+
+    def test_aggregate_share_class_missing_distinct_from_a(self):
+        """R5 Q4：缺 share_class 与 share_class='A' 是不同 key，第二次调用不误短路。"""
+
+        def call_with(share_class):
+            return ToolCall(
+                tool_name=ToolName.AGGREGATE_MULTI_YEAR_ANNUAL_PERFORMANCE,
+                document_id="doc-1",
+                extra={
+                    "fund_code": "007466",
+                    "requested_years": (2021, 2022, 2023, 2024, 2025),
+                    "annual_report_documents": [],
+                    "share_class": share_class,
+                },
+            )
+
+        assert _dedup_key(call_with(None)) != _dedup_key(call_with("A"))
+
+
+class _RecordingLlmClient(FakeLlmClient):
+    """记录每次 next_step 收到的 tool_results 的 fake client。"""
+
+    def __init__(self, steps) -> None:
+        """初始化并置零记录。"""
+
+        super().__init__(steps)
+        self.tool_result_lists: list[tuple[ToolResult, ...]] = []
+
+    def next_step(
+        self,
+        *,
+        document_id: str,
+        query: str,
+        tool_results: tuple[ToolResult, ...],
+        remaining_budget: int | None = None,
+    ) -> ChatResponse:
+        """记录后委托父类。"""
+
+        self.tool_result_lists.append(tuple(tool_results))
+        return super().next_step(
+            document_id=document_id,
+            query=query,
+            tool_results=tool_results,
+            remaining_budget=remaining_budget,
+        )
+
+
+def test_cross_round_failed_call_short_circuits(tmp_path: Path) -> None:
+    """相同失败调用跨轮短路：第二轮不实际调用工具，回喂失败标记 ToolResult。"""
+
+    service = _CountingToolService(_service(tmp_path))
+    failed_call = ToolCall(
+        tool_name=ToolName.READ_SECTION,
+        document_id=_identity().document_id,
+        section_ref="section-9999",
+    )
+    final = FinalAnswer(answer="根据已有信息，未找到相关数据。", citations=(), key_facts=())
+
+    first_client = _RecordingLlmClient([failed_call, final])
+    first_runner = LlmToolLoopRunner(
+        tool_service=service,
+        llm_client=first_client,
+    )
+    first_result = first_runner.run(document_id=_identity().document_id, query="基金经理", scene="interactive")
+
+    assert first_result.failure is None
+    assert service.read_section_calls == 1
+    # 轮末按同归一化规则收集本轮失败调用 key
+    assert first_result.failed_call_keys == (_dedup_key(failed_call),)
+
+    second_client = _RecordingLlmClient([failed_call, final])
+    second_runner = LlmToolLoopRunner(
+        tool_service=service,
+        llm_client=second_client,
+        failed_call_keys=frozenset(first_result.failed_call_keys),
+    )
+    second_result = second_runner.run(document_id=_identity().document_id, query="基金经理", scene="interactive")
+
+    assert second_result.failure is None
+    # 第二轮未实际调用工具（不消耗真实调用）
+    assert service.read_section_calls == 1
+    # LLM 收到的第二轮 tool_results 含失败标记条目（提示不再重跑）
+    short_circuit_result = second_client.tool_result_lists[1][0]
+    assert short_circuit_result.failure is not None
+    assert "不再重跑" in short_circuit_result.failure.message
+    # 已短路的 key 不重复计入本轮 failed_call_keys（已在跨轮集合中）
+    assert second_result.failed_call_keys == ()
+
+
+def test_run_collects_failed_call_keys_and_reuses_across_rounds(tmp_path: Path) -> None:
+    """runner 收集本轮失败 key；跨轮以 frozenset 传入后相同调用直接短路。"""
+
+    service = _CountingToolService(_service(tmp_path))
+    failed_call = ToolCall(
+        tool_name=ToolName.READ_SECTION,
+        document_id=_identity().document_id,
+        section_ref="section-9999",
+    )
+    final = FinalAnswer(answer="根据已有信息，未找到相关数据。", citations=(), key_facts=())
+
+    client = _RecordingLlmClient([failed_call, final])
+    runner = LlmToolLoopRunner(
+        tool_service=service,
+        llm_client=client,
+        failed_call_keys=frozenset({_dedup_key(failed_call)}),
+    )
+    result = runner.run(document_id=_identity().document_id, query="基金经理", scene="interactive")
+
+    assert result.failure is None
+    assert service.read_section_calls == 0  # 从一开始就短路
+    short_circuit_result = client.tool_result_lists[1][0]
+    assert short_circuit_result.failure is not None
+    assert "不再重跑" in short_circuit_result.failure.message
 
 
 # ── Phase 7.4: interactive scene citation 校验放宽（方案 E）─────────────────

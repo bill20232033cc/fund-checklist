@@ -23,10 +23,159 @@ DEEPSEEK_MODEL_ENV = "DEEPSEEK_MODEL"
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
 DEFAULT_DEEPSEEK_TIMEOUT_SECONDS = 60
+LLM_PROVIDER_ENV = "FUND_CHECKLIST_LLM_PROVIDER"
+LLM_PROVIDER_DEEPSEEK = "deepseek"
+LLM_PROVIDER_MIMO = "mimo"
+MIMO_API_KEY_ENV = "MIMO_API_KEY"
+MIMO_BASE_URL_ENV = "MIMO_BASE_URL"
+MIMO_MODEL_ENV = "MIMO_MODEL"
+DEFAULT_MIMO_BASE_URL = "https://api.xiaomimimo.com/v1"
+DEFAULT_MIMO_MODEL = "mimo-v2.5-pro"
 _CHAT_COMPLETIONS_PATH = "/chat/completions"
 _JSON_CONTENT_TYPE = "application/json"
-_UNAVAILABLE_MESSAGE = "DeepSeek LLM provider 暂不可用"
-_MALFORMED_MESSAGE = "DeepSeek LLM provider response 不符合受控结构"
+_UNAVAILABLE_MESSAGE = "LLM provider 暂不可用"
+_MALFORMED_MESSAGE = "LLM provider response 不符合受控结构"
+
+
+@dataclass(frozen=True)
+class ProviderConfig:
+    """单个 LLM provider 的环境变量名与默认值配置。
+
+    参数:
+        api_key_env: API key 环境变量名。
+        base_url_env: base URL 环境变量名。
+        model_env: 模型名环境变量名。
+        default_base_url: base URL 默认值。
+        default_model: 模型名默认值。
+
+    返回:
+        请求组装时可用的 provider 配置。
+
+    异常:
+        本模型不抛出业务异常。
+    """
+
+    api_key_env: str
+    base_url_env: str
+    model_env: str
+    default_base_url: str
+    default_model: str
+
+
+# Provider 配置表：新增 provider 只需在此登记，adapter 请求组装统一读取。
+_PROVIDER_CONFIGS: dict[str, ProviderConfig] = {
+    LLM_PROVIDER_DEEPSEEK: ProviderConfig(
+        api_key_env=DEEPSEEK_API_KEY_ENV,
+        base_url_env=DEEPSEEK_BASE_URL_ENV,
+        model_env=DEEPSEEK_MODEL_ENV,
+        default_base_url=DEFAULT_DEEPSEEK_BASE_URL,
+        default_model=DEFAULT_DEEPSEEK_MODEL,
+    ),
+    LLM_PROVIDER_MIMO: ProviderConfig(
+        api_key_env=MIMO_API_KEY_ENV,
+        base_url_env=MIMO_BASE_URL_ENV,
+        model_env=MIMO_MODEL_ENV,
+        default_base_url=DEFAULT_MIMO_BASE_URL,
+        default_model=DEFAULT_MIMO_MODEL,
+    ),
+}
+
+# scene/contract 模型名 → Mimo 模型名翻译表；未知模型名原样透传。
+_PROVIDER_MODEL_TRANSLATIONS: dict[str, str] = {
+    "deepseek-v4-pro": "mimo-v2.5-pro",
+    "deepseek-v4-flash": "mimo-v2.5",
+}
+
+
+def resolve_provider(env: Mapping[str, str]) -> str:
+    """解析当前 LLM provider；未知值 fail-fast 抛 ValueError。
+
+    参数:
+        env: 环境变量映射（测试可传显式 mapping）。
+
+    返回:
+        "deepseek" 或 "mimo"。
+
+    异常:
+        ValueError: FUND_CHECKLIST_LLM_PROVIDER 取值不合法，提示合法取值。
+    """
+
+    provider = env.get(LLM_PROVIDER_ENV, LLM_PROVIDER_DEEPSEEK).strip()
+    if provider not in _PROVIDER_CONFIGS:
+        raise ValueError(
+            f"{LLM_PROVIDER_ENV} 取值必须为 {LLM_PROVIDER_DEEPSEEK!r} 或 {LLM_PROVIDER_MIMO!r}，"
+            f"当前值: {provider!r}"
+        )
+    return provider
+
+
+def resolve_provider_model(env: Mapping[str, str]) -> str:
+    """返回 provider 当前生效的模型名（MODEL env 非空优先，否则默认值）。
+
+    参数:
+        env: 环境变量映射。
+
+    返回:
+        模型名。
+    """
+
+    config = _PROVIDER_CONFIGS[resolve_provider(env)]
+    return env.get(config.model_env, "").strip() or config.default_model
+
+
+def provider_model_env_name(provider: str) -> str:
+    """返回 provider 对应的 MODEL 环境变量名。
+
+    参数:
+        provider: "deepseek" 或 "mimo"。
+
+    返回:
+        "DEEPSEEK_MODEL" 或 "MIMO_MODEL"。
+
+    异常:
+        ValueError: provider 取值不合法。
+    """
+
+    resolve_provider({LLM_PROVIDER_ENV: provider})
+    return _PROVIDER_CONFIGS[provider].model_env
+
+
+def translate_model_for_provider(model_name: str, provider: str) -> str:
+    """把 scene/contract 模型名按 provider 翻译；未知模型名原样透传。
+
+    参数:
+        model_name: 模型名（通常为 scene 配置或 contract 携带的 deepseek 系名称）。
+        provider: 当前 LLM provider。
+
+    返回:
+        翻译后的模型名。
+    """
+
+    if provider == LLM_PROVIDER_MIMO:
+        return _PROVIDER_MODEL_TRANSLATIONS.get(model_name, model_name)
+    return model_name
+
+
+def _provider_runtime(env: Mapping[str, str]) -> tuple[str, str, str]:
+    """按 provider 解析请求组装所需配置（api key / base url / model）。
+
+    参数:
+        env: 环境变量映射。
+
+    返回:
+        (api_key, base_url, model) 三元组；api_key 可能为空串。
+
+    异常:
+        ValueError: provider 取值不合法。
+    """
+
+    config = _PROVIDER_CONFIGS[resolve_provider(env)]
+    api_key = env.get(config.api_key_env, "").strip()
+    base_url = env.get(config.base_url_env, "").strip() or config.default_base_url
+    model = env.get(config.model_env, "").strip() or config.default_model
+    return api_key, base_url, model
+
+
 _SYSTEM_PROMPT = (
     "你只能通过提供的基金年报 reading tools 取证。"
     "需要调用工具时使用 tool call。"
@@ -294,14 +443,14 @@ class DeepSeekLlmClient:
         import time as _time
 
         env = self._env if self._env is not None else os.environ
-        api_key = env.get(DEEPSEEK_API_KEY_ENV, "").strip()
+        api_key, base_url, model = _provider_runtime(env)
         if not api_key:
             raise LlmClientFailure(FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE)
 
         use_stream = self._options.stream and hasattr(self._transport, "send_stream")
 
         request = DeepSeekChatRequest(
-            url=_chat_completions_url(env.get(DEEPSEEK_BASE_URL_ENV, DEFAULT_DEEPSEEK_BASE_URL)),
+            url=_chat_completions_url(base_url),
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": _JSON_CONTENT_TYPE,
@@ -310,7 +459,7 @@ class DeepSeekLlmClient:
                 document_id=document_id,
                 query=query,
                 tool_results=tool_results,
-                model=env.get(DEEPSEEK_MODEL_ENV, DEFAULT_DEEPSEEK_MODEL).strip() or DEFAULT_DEEPSEEK_MODEL,
+                model=model,
                 stream=use_stream,
                 system_prompt=self._system_prompt,
                 remaining_budget=remaining_budget,
@@ -388,7 +537,7 @@ class DeepSeekLlmClient:
         import time as _time
 
         env = self._env if self._env is not None else os.environ
-        api_key = env.get(DEEPSEEK_API_KEY_ENV, "").strip()
+        api_key, base_url, model = _provider_runtime(env)
         if not api_key:
             yield StreamEvent(
                 type=StreamEventType.ERROR,
@@ -397,7 +546,7 @@ class DeepSeekLlmClient:
             return
 
         request = DeepSeekChatRequest(
-            url=_chat_completions_url(env.get(DEEPSEEK_BASE_URL_ENV, DEFAULT_DEEPSEEK_BASE_URL)),
+            url=_chat_completions_url(base_url),
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": _JSON_CONTENT_TYPE,
@@ -406,7 +555,7 @@ class DeepSeekLlmClient:
                 document_id=document_id,
                 query=query,
                 tool_results=tool_results,
-                model=env.get(DEEPSEEK_MODEL_ENV, DEFAULT_DEEPSEEK_MODEL).strip() or DEFAULT_DEEPSEEK_MODEL,
+                model=model,
                 stream=True,
                 system_prompt=self._system_prompt,
                 remaining_budget=remaining_budget,
@@ -464,18 +613,18 @@ class DeepSeekLlmClient:
         """
 
         env = self._env if self._env is not None else os.environ
-        api_key = env.get(DEEPSEEK_API_KEY_ENV, "").strip()
+        api_key, base_url, model = _provider_runtime(env)
         if not api_key:
             raise LlmClientFailure(FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE)
 
         request = DeepSeekChatRequest(
-            url=_chat_completions_url(env.get(DEEPSEEK_BASE_URL_ENV, DEFAULT_DEEPSEEK_BASE_URL)),
+            url=_chat_completions_url(base_url),
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": _JSON_CONTENT_TYPE,
             },
             payload={
-                "model": env.get(DEEPSEEK_MODEL_ENV, DEFAULT_DEEPSEEK_MODEL).strip() or DEFAULT_DEEPSEEK_MODEL,
+                "model": model,
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -1021,7 +1170,7 @@ def _parse_sse_stream(lines: Iterator[str]) -> Iterator[StreamEvent]:
                     acc.type = tc["type"]
                 func = tc.get("function")
                 if func:
-                    if "name" in func:
+                    if func.get("name"):
                         acc.function_name = func["name"]
                     if "arguments" in func:
                         acc.function_arguments += func["arguments"]
@@ -1102,7 +1251,7 @@ def _collect_sse_full_response(lines: Iterator[str]) -> dict[str, Any]:
                     tool_calls[idx]["id"] = tc["id"]
                 func = tc.get("function")
                 if func:
-                    if "name" in func:
+                    if func.get("name"):
                         tool_calls[idx]["function"]["name"] = func["name"]
                     if "arguments" in func:
                         tool_calls[idx]["function"]["arguments"] += func["arguments"]

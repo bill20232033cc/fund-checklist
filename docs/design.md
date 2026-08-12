@@ -210,7 +210,7 @@ report / judgment contract
 - MVP Slice 4 已实现 `MinimalFundDocumentAgent` 的最小 loop：`search_document -> read_section`。
 - Post-MVP Slice 5 扩展为 table-aware retrieval / citation loop：先读取命中章节，再通过 `list_tables` / `read_table` 读取同 section、同页或相邻页候选表格，按 query 命中和 proximity 排序；成功时 `answer` 只由 section/table tool result 生成，`citations` 同时包含 section/table citation。
 - Post-MVP Slice 8A 已实现 fake/injected LLM tool-loop contract：LLM adapter 只能通过受控 reading tools 取得事实，不得直接读取 repository/private loader、raw Docling JSON 或本地路径。
-- Post-MVP Slice 8B 已实现为 DeepSeek real LLM adapter behind existing contract：真实 provider 只能实现 `LlmClientProtocol`，所有输出仍经 8A runner/enforcement；Mimo 已通过 OpenAI-compatible adapter 准入。
+- Post-MVP Slice 8B 已实现为 DeepSeek real LLM adapter behind existing contract：真实 provider 只能实现 `LlmClientProtocol`，所有输出仍经 8A runner/enforcement；Mimo 已通过 OpenAI-compatible adapter 准入；2026-08-10 起经 `FUND_CHECKLIST_LLM_PROVIDER`（`deepseek` 默认 / `mimo`）+ 每 provider 独立 env 自由切换，请求组装（next_step / next_step_stream / generate_text）统一走 `_provider_runtime`，scene/contract 模型名按翻译表映射（`deepseek-v4-pro→mimo-v2.5-pro`、`deepseek-v4-flash→mimo-v2.5`，未知透传），MODEL env 非空优先。
 - Post-MVP Slice 8C 已实现 opt-in live DeepSeek smoke：默认 pytest no-network，只在 `FUND_CHECKLIST_RUN_LIVE_DEEPSEEK=1` 且存在 `DEEPSEEK_API_KEY` 时验证一次真实 provider 输出。
 - 后续 Slice 10K 已实现多年度聚合受控工具（aggregate_multi_year_annual_performance）；Slice 13B 已实现 LLM 章节生成 tool-loop（逐章独立 prompt + hallucination 检测 + 模板回退）；Slice 14C 已实现三层审计管道（程序审计 + LLM 审计 + LLM 复核）。
 - `AgentRunResult` 至少包含 `answer`、`citations`、`tool_trace`、`failure`。
@@ -225,6 +225,7 @@ report / judgment contract
   - 投资建议检测（决策 A）：弱词豁免窗口 ±100 字符，事实性上下文词 15 个；指令动词（建议/应当/可考虑/适合/值得持有/应买入/应卖出/应增持/应减持）拦截；无上下文词 fail-closed 兜底；指令动词不含裸「应」（避免误命中 应付/应计）；main.py 用户输入预检合一为单一真源。
   - provider malformed 有界重试 1 次（stream + 非 stream；重试后仍 fail-closed，不回喂）。
   - interactive 终答投资建议守卫有界改写重试 1 次（重答仍走同一守卫；ask/generate 不重试）。
+  - force-answer 分支同走终答守卫（2026-08-11 Fix A）：`max_steps` 耗尽降级（`_force_answer_from_evidence`）在 interactive 下与正常 FinalAnswer 一致，经 `_apply_interactive_final_guards` 统一过投资建议拦截与 ≤200 字约束，不再绕过守卫。
 
 禁止：
 
@@ -466,6 +467,12 @@ Slice 6 非目标：
 - locator
 - citation
 
+排序：
+
+- 召回不变：候选集来自 section text、table caption 与 bounded table rows 的子串命中（空白归一化）；0 命中返回空 tuple。
+- 排序（2026-08-12 裁决）：命中候选按确定性 BM25F 多字段重排序（字段权重与参数见 §6.20），同分依次回退子串命中计数、source_order；纯函数、不联网、不接 LLM。
+- public contract 不变：`SearchResult` 字段、match_kind、locator/citation、failure code 均不变；不新增公共字段。
+
 ### 5.5 list_tables
 
 输入：
@@ -496,6 +503,8 @@ Slice 6 非目标：
 - `section_ref`
 - locator
 - citation
+
+interactive 表号一致性校验（2026-08-11 Fix C，仅 interactive）：`read_table` 的 `table_ref` 必须属于本轮已列出/已命中的表集合——本轮 `list_tables` 成功结果的 table_ref ∪ search 命中结果的 `SearchResult.table_ref`；未列出/未命中的表号返回 `NOT_FOUND`（「table_ref 未在当前已列出章节的表格中，请先 list_tables 并复制返回的表号」），作为工具失败回喂 LLM 并计入失败调用短路（LLM 改表号重试或先 list_tables）；`ask` 场景不拦截（白名单边界）。
 
 ### 5.7 get_excerpt
 
@@ -686,9 +695,13 @@ Slice 6 非目标：
 interactive 问答的检索与终答语义（Mimo review ACCEPTED，用户按推荐裁决）：
 
 - 受控检索路由：新增 `manager_holdings` profile（target：9.4 期末基金管理人的从业人员持有本基金；candidate_queries 覆盖 持有本基金 / 基金经理持有 / 期末基金管理人的从业人员持有本基金 / 基金经理持有本基金），复用 `_extract_manager_holding` 的 9.4 定位语义；该 profile 的候选词为 4 个，Service 候选上限（原始 query + 受控候选）同步调整为 5；规模、份额、基准收益率、超额收益率、十大持仓 等 profile 排后续 slice。
+- 受控表锚点（2026-08-09 裁决 + P0-1 实施；2026-08-11 Fix C 扩展 `performance_returns`）：Service 层对高误命中 query 类（`manager_holdings`、`holdings_top10`、`performance_returns`）组合 public tools 解析 `table_ref` 锚点注入 prompt（「候选表锚点: table-XXXX——请先 list_tables 确认表号在列，再 read_table 该表，勿自行猜测表号」，2026-08-11 与 runner 表号一致性校验对齐，锚点表号同样必须先经 list_tables 确认）；`manager_holdings` 按 9.4 行头优先、9.2 行头回退，`holdings_top10` 按表头签名（序号/股票名称/公允价值）且 row_count ≥10，`performance_returns` 按 3.2.1 表头签名（阶段/份额净值增长率/业绩比较基准收益率）且 A 类标题优先（含 A 排除 C，004393-2025 命中 table-0009）；解析失败 / document_id 为 None / 工具不可用 → fail-open 不注入（不走候选词路径的 fail-open 语义保持不变）；其余 profile 不注入锚点，保持 LLM 自由选表（Phase 7.2「全量走 LLM」的受控扩展）。
 - 空结果收敛契约：search 连续 2 次 0 命中（interactive）→ runner 强制收敛返回「未找到相关数据」，不依赖模型自觉；有 profile 且候选词未用尽时自动用候选词重试（最多 1 轮）。候选词注入在 Service 层（chat_service 基于 `_route_plan_for_query`），收敛执行在 Agent 层（runner 不 import service）。
-- 终答契约：保持「最终回答必须返回 JSON」；runner 解包（content 为 JSON 且含 answer 字段 → 提取 answer 展示，citations/key_facts 落盘）。原文粘贴检测：answer 与任一 evidence 连续重叠 ≥40 字符或 >800 字 → 有界重答 1 次，仍超标截断为摘要格式。
-- 预算：interactive `max_iterations` 20 → 12；interactive 方案 E（跳过 evidence/citation 校验）保持不变（Phase 7.4 已裁决口径）。
+- 终答契约：保持「最终回答必须返回 JSON」；runner 解包（content 为 JSON 且含 answer 字段 → 提取 answer 展示，citations/key_facts 落盘）。原文粘贴检测：answer 与任一 evidence 连续重叠 ≥40 字符或 >200 字 → 有界重答 1 次，仍超标截断为 ≤200 字摘要（含省略说明；2026-08-09 F1 修复：终答 ≤200 字为 runner 硬约束，`_INTERACTIVE_FINAL_ANSWER_MAX_CHARS=200`，截断正文按 200-len(note) 计）。
+- 预算：interactive `max_iterations` 20 → 12 → 8（2026-08-09 下调）；interactive 方案 E（跳过 evidence/citation 校验）保持不变（Phase 7.4 已裁决口径）。
+- aggregate 开放（2026-08-09 裁决 + P0-2 实施）：`aggregate_multi_year_annual_performance` 在 interactive 开放——Service 层 handler 以 catalog 重解析 `annual_report_documents`（`_collect_matching_docs` last-wins，忽略 LLM 提供的 document_id 列表防幻觉），share_class A 类优先；ask 不开放（`ASK_SCENE_CONFIG.allowed_tools` 白名单边界）。
+- 跨轮失败调用短路（2026-08-09 裁决 + P0-2 实施）：失败调用 key（与 `_dedup_key` 同结构，天然含 document_id 维度）持久化进 session（`failed_tool_call_keys`，上限 50 丢最旧，旧 session 缺字段默认空元组不回退）；相同失败调用跨轮直接短路（不调用工具、不消耗真实调用），LLM 可改参数或收尾。`_dedup_key` 工具级归一化：search 归一化 query（去空白 + CJK 标点）、read_section/read_table 按 ref（忽略 query 措辞）、get_excerpt 按 locator、aggregate 按 fund_code+years+share_class。
+- 记忆注入（2026-08-09 裁决 + P1 实施）：`_build_contributions` 增加 `memory` slot，EpisodeSummary（最近 ≤3 条，总长 ≤500 token 超限丢最旧，单条超 100 token 截断加省略号）与 PinnedState `confirmed_facts` 经 `build_memory_contribution` 编织进 system prompt，标注「历史摘要，非当前证据」（引用仍须来自本轮工具返回，方案 E 不变）；空数据不产生 slot。
 
 ### 6.11 业绩抽取 A/C 分段表 + 关联 ETF 持仓源（2026-08-06 裁决）
 
@@ -764,6 +777,16 @@ R3（Mimo review ACCEPTED 计划）实施结论：
 ### 6.19 持仓 direct 扫描 citation 校正（2026-08-08 裁决）
 
 - 持仓 direct 扫描路径（A 股 `_extract_stock_holdings_from_tables` 与 QDII `_extract_qdii_holdings_from_tables`）的 citation 必须指向实际消费的持仓主表；调用方命中 direct 时同步校正 `table_citation`，不得停留在国家（地区）/行业类别/续表碎片表。
+
+### 6.20 search_document BM25F 检索排序增强（2026-08-12 裁决，2026-08-13 实施完成）
+
+- 现状事实：`search_document` 候选来自 section text、table caption、bounded table rows 的子串命中（空白归一化），排序为 `(-子串命中计数, source_order)`（docling_store.py:271）。
+- 决策：候选召回不变，排序升级为确定性 BM25F 多字段重排序。字段权重：section title 3.0 / section text 1.0 / table caption 2.0 / table row 1.0；`k1=1.2`；`b`：title/caption 0.35、text/rows 0.75。排序键：BM25F 分数 desc → 子串命中计数 desc → source_order asc。
+- 分词：无新依赖；ASCII 单词（`[a-z0-9]+`，lowercase）+ CJK 二元组（单字符段回退一元组）；沿用空白归一化语义。
+- 索引：每个 store 构建一次；document unit = section ∪ table caption ∪ bounded table row；df 按 unit 计数，avg field length 按字段统计。
+- 约束：纯函数、不联网、不接 LLM、无随机；分数 round 6 位；不改 `SearchResult` 公共契约、不新增 failure code；0 命中仍返回空 tuple；excerpt/citation/locator 组装不变。
+- 依据：`docs/research/dayu-agent-r-research-20260810.md` §2.1.1 / §5 建议 1；dayu 本地 `bm25f_scorer.py` 仅作算法参考，不复制代码（Apache-2.0 license gate）。
+- 实现与测试：见 `.sisyphus/plans/bm25f-search-ranking-slice-20260812.md`；CIC-lite：DS 实施 + MiMo review。
 
 
 ## 7. dayu 可迁移部分
@@ -1234,7 +1257,7 @@ Post-MVP 11A 裁决为 performance disclosure locator，插入 10D 之前：
 - profile 名称裁决为 `performance_returns`；名称只表示业绩表现披露定位，不代表字段抽取。
 - acceptable title family 固定为：`基金份额净值增长率及其与同期业绩比较基准收益率的比较`、`基金净值表现`。
 - 首批 aliases 固定为：`净值增长率`、`业绩比较基准收益率`、`基准收益率`、`收益表现`、`基金净值表现`；不纳入 `业绩`、`收益`、`表现` 等宽泛 alias。
-- candidate queries 固定为原始 query、`基金份额净值增长率及其与同期业绩比较基准收益率的比较`、`基金净值表现`、`业绩比较基准收益率`。
+- candidate queries 固定为原始 query、`基金份额净值增长率及其与同期业绩比较基准收益率的比较`、`基金净值表现`、`业绩比较基准收益率`。2026-08-11 Fix E 更新：首位加入 `净值增长率`（原已是 alias，仅调候选词顺序；004393「近一年净值增长率」问答空搜索自动重试时首命中 section-0097 含 12.77% / 基准 15.34%）。
 - success 语义：必须命中 acceptable title family，并返回 section citation；若目标披露存在相关表格，则必须包含 table citation。真实样本存在表格，因此 11A smoke 要求 table citation。
 - 11A 不裁决 A/C 类字段值；若表格同时包含多个份额类别，只展示原始表格片段，不筛选、不判断、不抽值。
 - failure 语义沿用现有 failure code：目标披露未命中为 `not_found`；配置异常为 `schema_drift`；内部异常为 `unavailable`；不新增 `performance_not_found`、`period_not_found` 或 `partial_success`。
@@ -1640,6 +1663,8 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - `history_max_tokens` 可配置（默认 2000）
 
 **总改动量**：~164 行（session_models ~30 + chat_service ~63 + scene_config ~1 + deepseek_llm ~1 + llm_tool_loop ~15 + extraction ~3 + main ~1 + 测试 ~50）
+
+**记忆注入补接线（2026-08-09，P1 完成）**：Phase 7.3 的 memory slot 补接线——`_build_contributions` 增加 `contributions["memory"]`（`build_memory_contribution`，`prompt_contributions.py`），EpisodeSummary（最近 ≤3 条，总长 ≤500 token 超限丢最旧，单条超 100 token 截断加省略号）与 PinnedState `confirmed_facts`（`user_constraints["confirmed_facts"]`，str/list/tuple 兼容）编织进 system prompt，标注「历史摘要，非当前证据」；空数据不产生 slot；`context_slots` 中 `memory` 已在 `history` 之前（scene_config 零改动）。详见 §6.10。
 
 **失败模式缓解**（9 项，详见优化设计文档）：
 - FM1: Context window 溢出 → token 上限 + 截断
