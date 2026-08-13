@@ -75,12 +75,18 @@ PDF
   - ContextBudget 接入 runner（预算检查 + 工具结果裁剪）
   - force_answer 降级（max_steps 耗尽时 tool_results 直返）
   - tool_calls_remaining 信号注入（每个 tool result 包含剩余调用次数）
-# 批量导入 PDF 到 catalog
+# 循环下载 5 年年报（一次一年，默认输出到 基金年报/）
+for y in 2021 2022 2023 2024 2025; do
+  uv run fund-checklist download --fund-code 005680 --year $y
+done
+
+# 批量导入 PDF 到 catalog（Docling 转换 + parser health 校验）
 uv run fund-checklist import \
   --pdf-dir ./基金年报/ \
-  --fund-code 004393 \
-  --fund-name '安信企业价值优选混合型证券投资基金' \
-  --year-range 2022-2025
+  --fund-code 005680 \
+  --fund-name '财通资管价值成长混合' \
+  --year-range 2021-2025 \
+  --work-dir .fund_checklist_005680
 
 # 单份年报阅读问答
 uv run fund-checklist read \
@@ -99,6 +105,17 @@ uv run fund-checklist multi-year \
 uv run fund-checklist holdings \
   --fund-code 004393 \
   --years 2022,2023,2024,2025
+
+# 并发写作基金分析报告（章节并发 4，仅 --llm 模式生效；需要 provider key）
+uv run fund-checklist generate \
+  --fund-code 005680 \
+  --fund-name '财通资管价值成长混合' \
+  --year 2025 \
+  --years 2021-2025 \
+  --llm \
+  --concurrency 4 \
+  --format markdown \
+  --work-dir .fund_checklist_005680
 ```
 
 样本 PDF：
