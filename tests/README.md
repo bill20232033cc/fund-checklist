@@ -454,6 +454,8 @@ uv run pytest tests/fund/agent/test_real_llm_adapter.py tests/fund/agent/test_de
 # S7 interactive 终答守卫改写重试
 uv run pytest tests/fund/agent/test_llm_tool_loop.py tests/fund/agent/test_stream_events.py -q --tb=short
 
+# 2026-08-13 方案 2：force-answer 降级产物跳过原文粘贴/超长重答、超长直接截断 ≤200 字收尾（投资建议拦截保留），正常 FinalAnswer 重答逻辑回归保护同 test_llm_tool_loop.py 覆盖。
+
 # F1/F2 费率与持仓修复（2026-08-02）
 uv run pytest tests/fund/service/test_extraction.py tests/fund/document_tools/test_docling_store.py -q --tb=short
 
@@ -483,3 +485,7 @@ uv run pytest tests/fund/cli/test_cli_interactive.py -q --tb=short
 FUND_CHECKLIST_RUN_LIVE_DEEPSEEK=1 uv run pytest tests/fund/cli/test_interactive_live_smoke.py -v --tb=short
 # 2026-08-09 controller 复跑结果：8 passed（F1/F2/F3 修复后；全量曾 1 次偶发 fail-closed，单测重跑通过，非代码回归）
 ```
+
+日志 VERBOSE 级与有界脱敏诊断载荷 slice（2026-08-13）：`tests/fund/agent/test_log_levels.py` 覆盖 VERBOSE=15 注册、`verbose()` 记录与 `configure_logging` env 契约；`tests/fund/agent/test_diagnostic_payload.py` 覆盖集中正则脱敏、字段截断、总量有界与显式参数契约；`test_llm_tool_loop.py` / `test_real_llm_adapter.py` 增补 VERBOSE 诊断记录接线（malformed 不记录 raw provider response）。
+
+Tool Trace 只读分析器 slice（2026-08-13）：`tests/fund/agent/test_tool_trace_analysis.py` 覆盖 summary / by_tool 首现顺序 / findings（failed_call、repeated_failure、large_arguments 边界）/ 空 trace limitations / TypeError 契约 / 确定性 / JSON renderer / 只读签名；`tests/fund/cli/test_cli.py` 增补 ask 流式 `--enable-tool-trace` 分析输出用例与未加 flag 回归保护。

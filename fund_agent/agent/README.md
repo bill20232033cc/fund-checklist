@@ -39,7 +39,7 @@ Post-MVP Slice 8A 已实现 fake/injected LLM tool-loop contract：
 - 工具调用失败不再终止整轮：`ToolFailure` 转为带 `failure` 标记的 `ToolResult`（无 evidence/citation）追加到 `tool_results`，下一轮 `next_step` 可见，LLM 可修正 section_ref / 工具名 / document_id 后重试；重复的失败调用与成功调用一样按 key 去重短路。
 - `run_stream` 对工具失败发 `TOOL_EVENT(phase=result)`（含 failure_code/message）并继续循环；只有终态失败（step 耗尽、终答守卫、provider 异常）才发 `ERROR`。
 - interactive 终答投资建议守卫失败（`LLM 最终回答包含投资建议关键词`）时，`run` / `run_stream` 最多重试 1 次：query 追加纠正指令（要求只陈述年报客观事实、中性表述）重新调用 `next_step`，新 FinalAnswer 仍走同一 `_final_result` 守卫；重试通过则正常返回，重试后仍失败或未产出 FinalAnswer 则维持原失败（fail-closed）。ask / generate 等其它 scene 不重试，保持原语义；其它失败类型（证据缺失 / citation 缺失 / step 耗尽 / 不可用）不回退。
-- interactive 终答质量守卫（原文粘贴：answer 与任一 evidence 连续重叠 ≥40 字符；或 answer >200 字）对正常 FinalAnswer 与 max_steps 耗尽的 force-answer 降级产物一视同仁：`run` / `run_stream` 均先过守卫，有界重答 1 次（query 追加概括指令），重答仍超标则截断为 ≤200 字摘要（含省略说明），重答未产出 FinalAnswer 或异常则 fail-closed；守卫对无证据的 step 耗尽失败原样放行。ask / generate 等其它 scene 的 force-answer 保持既有降级语义（证据原文拼接，不触发重答）。
+- interactive 终答质量守卫（原文粘贴：answer 与任一 evidence 连续重叠 ≥40 字符；或 answer >200 字）：正常 FinalAnswer 先过守卫，有界重答 1 次（query 追加概括指令），重答仍超标则截断为 ≤200 字摘要（含省略说明），重答未产出 FinalAnswer 或异常则 fail-closed；max_steps 耗尽的 force-answer 降级产物（2026-08-13 方案 2）跳过原文粘贴/超长有界重答，超长直接截断为 ≤200 字摘要（含省略说明）；投资建议拦截对两者一致保留（命中均有界重答 1 次，仍失败 fail-closed）。守卫对无证据的 step 耗尽失败原样放行。ask / generate 等其它 scene 的 force-answer 保持既有降级语义（证据原文拼接，不触发重答）。
 - 失败反馈序列化：`DeepSeekLlmClient._safe_tool_result` 与 `wrap_results_for_llm` 对失败条目走 `Envelope.error` + `project_for_llm` 的 `ok=False` 投影（`{"error": code, "message": message}`）；provider 侧 `LlmClientFailure`（`llm_malformed_response` / `unavailable`）不回喂，维持 fail-closed。
 - tool call 容错：`_parse_tool_call` 不再强制 document_id（缺失/空字符串解析为空串，仅结构不可解析或类型错误才映射 `llm_malformed_response`）；runner `_invoke_tool_call` 对非 aggregate 工具用 `expected_document_id` 补全空 document_id 后再做前缀校验，`aggregate_multi_year_annual_performance` 维持既有豁免。
 - 工具名归一化：`_coerce_tool_name` 只做格式归一化（去首尾空白、去尾部括号参数）后精确匹配白名单；不做语义级映射（如 "search" -> search_document），未知工具名仍拒绝且 trace 保留 LLM 原始工具名。
@@ -79,6 +79,15 @@ LLM Provider 自由切换（DeepSeek ↔ Mimo，Slice provider-switch-20260810�
 - `ChatService` 注入层按 provider 组装 client env；`interactive` 的 current_model 展示由 `resolve_provider_model` 提供（读对应 MODEL env + provider 默认）。
 - 错误文案已泛化：`_UNAVAILABLE_MESSAGE` / `_MALFORMED_MESSAGE` 不再带 DeepSeek 前缀。
 - 保留类名/文件名 `DeepSeekLlmClient` / `deepseek_llm.py`，不 rename；不新建第二套 adapter。
+
+日志与诊断载荷（Slice log-verbose-diagnostics-20260813）：
+
+- `log_levels.py` 提供 VERBOSE=15 诊断日志级（`verbose()`）与 `FUND_CHECKLIST_LOG_LEVEL` 环境变量配置（合法取值 DEBUG/VERBOSE/INFO/WARNING/ERROR，默认 absent 时零行为变更）。
+- `diagnostic_payload.py` 的 `build_diagnostic_payload` 构造有界脱敏诊断载荷：显式命名参数、字段级截断 500、总量上限 2000、集中正则脱敏（API key / Bearer / URL secret / local_import_id / 本地绝对路径 / 工作目录）；任何路径不记录 raw provider response。
+
+Tool Trace 只读分析器（operator 层，Slice tool-trace-operator-20260813）：
+
+- `tool_trace_analysis.py` 提供纯函数只读分析器 `analyze_tool_trace`（只接受派生 `tuple[ToolTraceEntry]` + typed policy，不读 session / durable internals、不写状态、不落盘、不成为 truth 源）与确定性 JSON renderer `tool_trace_analysis_to_json`（sort_keys / ensure_ascii=False / 尾换行）。
 
 Post-MVP Slice 8C 当前实现：
 

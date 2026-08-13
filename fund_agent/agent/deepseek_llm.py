@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import socket
 import urllib.error
@@ -12,10 +13,14 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.parse import urlsplit, urlunsplit
 
+from fund_agent.agent.diagnostic_payload import build_diagnostic_payload
+from fund_agent.agent.log_levels import verbose
 from fund_agent.agent.llm_tool_loop import ChatResponse, FinalAnswer, LlmClientFailure, TokenUsage, ToolCall, ToolResult
 from fund_agent.agent.stream_events import StreamEvent, StreamEventType
 from fund_agent.fund.document_tools.constants import FailureCode, LocatorKind, ToolName
 from fund_agent.fund.document_tools.models import Citation, Locator
+
+logger = logging.getLogger(__name__)
 
 DEEPSEEK_API_KEY_ENV = "DEEPSEEK_API_KEY"
 DEEPSEEK_BASE_URL_ENV = "DEEPSEEK_BASE_URL"
@@ -818,11 +823,27 @@ def _parse_response(body: str) -> ChatResponse:
         payload = json.loads(body)
         message = payload["choices"][0]["message"]
     except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
+        verbose(
+            logger,
+            "LLM provider response malformed: %s",
+            build_diagnostic_payload(
+                message=_MALFORMED_MESSAGE,
+                code=FailureCode.LLM_MALFORMED_RESPONSE.value,
+            ),
+        )
         raise LlmClientFailure(FailureCode.LLM_MALFORMED_RESPONSE, _MALFORMED_MESSAGE) from exc
 
     usage = _extract_usage(payload)
 
     if not isinstance(message, dict):
+        verbose(
+            logger,
+            "LLM provider response malformed: %s",
+            build_diagnostic_payload(
+                message=_MALFORMED_MESSAGE,
+                code=FailureCode.LLM_MALFORMED_RESPONSE.value,
+            ),
+        )
         raise LlmClientFailure(FailureCode.LLM_MALFORMED_RESPONSE, _MALFORMED_MESSAGE)
     tool_calls = message.get("tool_calls")
     if tool_calls:

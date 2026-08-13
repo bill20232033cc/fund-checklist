@@ -22,6 +22,7 @@ from fund_agent.agent import (
     StreamEventType,
     ToolCall,
 )
+from fund_agent.agent.log_levels import VERBOSE_LOG_LEVEL
 from fund_agent.fund.document_tools.constants import FailureCode, LocatorKind, ReportType, SourceKind, ToolName
 from fund_agent.fund.document_tools.docling_store import DoclingDocumentStore
 from fund_agent.fund.document_tools.models import Citation, Locator, ReportIdentity, ToolFailure
@@ -477,6 +478,49 @@ def test_deepseek_next_step_double_malformed_raises_with_two_requests(tmp_path: 
 
     assert excinfo.value.code is FailureCode.LLM_MALFORMED_RESPONSE
     assert len(transport.requests) == 2
+
+
+def test_malformed_response_emits_verbose_without_raw_body(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """malformed 分支 VERBOSE 记录含失败码，且不记录 raw provider response 片段。
+
+    注意：_malformed_response() 的空 tool_calls 实际在 _parse_final_answer 抛错
+    （不在 _parse_response 接线点），因此首个响应用 _parse_response 解析失败的
+    body 触发接线点 verbose，第二个响应仍复用 _malformed_response()。
+    """
+
+    malformed_json_body = '{"choices": [{"message": {"tool_calls": [}}]}'
+    transport = QueueTransport([
+        DeepSeekChatResponse(status_code=200, body=malformed_json_body),
+        _malformed_response(),
+    ])
+    client = DeepSeekLlmClient(
+        transport=transport,
+        env=_env(),
+        options=ExecutionOptions(stream=False),
+    )
+
+    with caplog.at_level(VERBOSE_LOG_LEVEL, logger="fund_agent.agent.deepseek_llm"):
+        with pytest.raises(LlmClientFailure) as excinfo:
+            client.next_step(document_id=_DOCUMENT_ID, query="基金经理", tool_results=())
+
+    assert excinfo.value.code is FailureCode.LLM_MALFORMED_RESPONSE
+    verbose_records = [
+        record
+        for record in caplog.records
+        if record.name == "fund_agent.agent.deepseek_llm"
+        and record.levelno == VERBOSE_LOG_LEVEL
+        and record.levelname == "VERBOSE"
+    ]
+    assert verbose_records
+    assert any("LLM provider response malformed" in record.getMessage() for record in verbose_records)
+    assert any(
+        FailureCode.LLM_MALFORMED_RESPONSE.value in record.getMessage()
+        for record in verbose_records
+    )
+    assert malformed_json_body not in caplog.text
+    assert '"tool_calls"' not in caplog.text
 
 
 def test_deepseek_next_step_stream_malformed_retried_once_then_success(tmp_path: Path) -> None:

@@ -12,6 +12,7 @@ import pytest
 
 from fund_agent.agent import ChatResponse, FakeLlmClient, FinalAnswer, LlmToolLoopRunner, TokenUsage, ToolCall, ToolResult
 from fund_agent.agent.context_budget import ContextBudgetState
+from fund_agent.agent.log_levels import VERBOSE_LOG_LEVEL
 from fund_agent.agent.llm_tool_loop import (
     _cap_tool_results,
     _coerce_tool_name,
@@ -364,6 +365,41 @@ def _service_with_long_manager_text(tmp_path: Path) -> FundDocumentToolService:
     json_path = tmp_path / "private-cache" / "sample-long-holdings.docling.json"
     json_path.parent.mkdir()
     _write_docling_json_with_long_manager_text(json_path)
+    store = DoclingDocumentStore(identity=_identity(), json_path=json_path)
+    return FundDocumentToolService({_identity().document_id: store})
+
+
+def _write_docling_json_with_advice_text(path: Path) -> None:
+    """写入含投资建议措辞章节的 Docling-shaped JSON（降级产物 advice 拦截测试专用）。"""
+
+    payload = {
+        "schema_name": "DoclingDocument",
+        "texts": [
+            {
+                "self_ref": "#/texts/0",
+                "label": "section_header",
+                "text": "4.1.2 基金经理简介",
+                "level": 1,
+                "prov": [{"page_no": 1}],
+            },
+            {
+                "self_ref": "#/texts/1",
+                "label": "text",
+                "text": "建议买入该基金，目标价5元。",
+                "prov": [{"page_no": 1}],
+            },
+        ],
+        "tables": [],
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def _service_with_advice_text(tmp_path: Path) -> FundDocumentToolService:
+    """构建含投资建议措辞章节的 ToolService fixture（不跑真实 conversion）。"""
+
+    json_path = tmp_path / "private-cache" / "sample-advice.docling.json"
+    json_path.parent.mkdir()
+    _write_docling_json_with_advice_text(json_path)
     store = DoclingDocumentStore(identity=_identity(), json_path=json_path)
     return FundDocumentToolService({_identity().document_id: store})
 
@@ -747,7 +783,7 @@ def test_interactive_read_table_from_search_hit_allowed() -> None:
         (ToolName.SEARCH_DOCUMENT, "success"),
         (ToolName.READ_TABLE, "success"),
     )
-    assert result.citations[0].locator.table_ref == "table-0014"
+    assert result.citations[0].locator.table_ref == "table-0012"
 
 
 def test_ask_read_table_not_intercepted_without_list_tables() -> None:
@@ -860,6 +896,45 @@ def test_run_unclassified_exception_fails_closed_and_logs(
         for record in caplog.records
     )
     assert "RuntimeError" in caplog.text and "boom" in caplog.text
+
+
+def test_run_emits_verbose_diagnostic_payload_at_entry(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """VERBOSE 级开启时 run() 入口记录脱敏诊断载荷（含 document_id/query 键，无泄漏）。"""
+
+    runner = LlmToolLoopRunner(
+        tool_service=_service(tmp_path),
+        llm_client=FakeLlmClient(
+            [
+                FinalAnswer(
+                    answer="基金经理是张明。",
+                    citations=(),
+                    key_facts=("张明",),
+                )
+            ]
+        ),
+    )
+    document_id = _identity().document_id
+    query = "基金经理 本地路径 /Users/maomao/secret"
+
+    with caplog.at_level(VERBOSE_LOG_LEVEL, logger="fund_agent.agent.llm_tool_loop"):
+        runner.run(document_id=document_id, query=query)
+
+    verbose_records = [
+        record
+        for record in caplog.records
+        if record.name == "fund_agent.agent.llm_tool_loop"
+        and record.levelno == VERBOSE_LOG_LEVEL
+        and record.levelname == "VERBOSE"
+    ]
+    assert any("LLM tool loop run 开始" in record.getMessage() for record in verbose_records)
+    assert any(
+        document_id in record.getMessage() and "基金经理" in record.getMessage()
+        for record in verbose_records
+    )
+    assert "/Users/maomao/secret" not in caplog.text
+    assert "***" in caplog.text
 
 
 def test_llm_tool_call_missing_document_id_filled_from_expected(tmp_path: Path) -> None:
@@ -1784,8 +1859,8 @@ def test_run_stream_interactive_advice_guard_retry_still_errors(tmp_path: Path) 
     assert client.next_step_calls == 2
 
 
-def test_run_stream_interactive_force_answer_guard_retry_passes(tmp_path: Path) -> None:
-    """run_stream：interactive force-answer 过终答质量守卫，有界重答后用自己的话通过。"""
+def test_run_stream_interactive_force_answer_degraded_no_retry_truncates_summary(tmp_path: Path) -> None:
+    """run_stream：interactive force-answer 降级产物不重答，超长直接截断为 ≤200 字摘要。"""
 
     client = _CountingFakeLlmClient(
         [
@@ -1798,52 +1873,6 @@ def test_run_stream_interactive_force_answer_guard_retry_passes(tmp_path: Path) 
                 tool_name=ToolName.SEARCH_DOCUMENT,
                 document_id=_identity().document_id,
                 query="基金经理",
-            ),
-            FinalAnswer(
-                answer="根据年报，基金经理负责本基金投资管理，报告期内保持稳定。",
-                citations=(),
-                key_facts=(),
-            ),
-        ]
-    )
-    runner = LlmToolLoopRunner(tool_service=_service(tmp_path), llm_client=client, max_steps=2)
-
-    events = list(
-        runner.run_stream(
-            document_id=_identity().document_id,
-            query="基金经理是谁？",
-            scene="interactive",
-        )
-    )
-
-    assert not any(event.type is StreamEventType.ERROR for event in events)
-    assert any(event.type is StreamEventType.DONE for event in events)
-    assert any(
-        event.type is StreamEventType.CONTENT_DELTA and "基金经理负责本基金投资管理" in str(event.payload)
-        for event in events
-    )
-    assert client.next_step_calls == 3  # 2 步耗尽 + 有界重答 1 次
-
-
-def test_run_stream_interactive_force_answer_guard_truncates_summary(tmp_path: Path) -> None:
-    """run_stream：interactive force-answer 重答仍粘贴原文 → CONTENT_DELTA 为 ≤200 字摘要。"""
-
-    client = _CountingFakeLlmClient(
-        [
-            ToolCall(
-                tool_name=ToolName.SEARCH_DOCUMENT,
-                document_id=_identity().document_id,
-                query="基金经理",
-            ),
-            lambda results: ToolCall(
-                tool_name=ToolName.READ_SECTION,
-                document_id=_identity().document_id,
-                section_ref=_section_ref_from_search(results),
-            ),
-            lambda results: FinalAnswer(
-                answer=results[-1].evidence_text,
-                citations=(),
-                key_facts=(),
             ),
         ]
     )
@@ -1868,11 +1897,52 @@ def test_run_stream_interactive_force_answer_guard_truncates_summary(tmp_path: P
     assert isinstance(deltas[0].payload, str)
     assert len(deltas[0].payload) <= 200
     assert "截断" in deltas[0].payload
-    assert client.next_step_calls == 3
+    assert client.next_step_calls == 2  # 2 步耗尽即收尾，不再第 3 次重答
 
 
-def test_run_stream_interactive_force_answer_guard_fails_closed(tmp_path: Path) -> None:
-    """run_stream：interactive force-answer 有界重答未产出 FinalAnswer → ERROR，无 DONE。"""
+def test_run_stream_interactive_force_answer_degraded_overlong_truncates_summary(tmp_path: Path) -> None:
+    """run_stream：interactive force-answer 降级产物超长直接截断 → CONTENT_DELTA 为 ≤200 字摘要。"""
+
+    client = _CountingFakeLlmClient(
+        [
+            ToolCall(
+                tool_name=ToolName.SEARCH_DOCUMENT,
+                document_id=_identity().document_id,
+                query="基金经理",
+            ),
+            lambda results: ToolCall(
+                tool_name=ToolName.READ_SECTION,
+                document_id=_identity().document_id,
+                section_ref=_section_ref_from_search(results),
+            ),
+        ]
+    )
+    runner = LlmToolLoopRunner(
+        tool_service=_service_with_long_manager_text(tmp_path),
+        llm_client=client,
+        max_steps=2,
+    )
+
+    events = list(
+        runner.run_stream(
+            document_id=_identity().document_id,
+            query="基金经理是谁？",
+            scene="interactive",
+        )
+    )
+
+    assert not any(event.type is StreamEventType.ERROR for event in events)
+    assert any(event.type is StreamEventType.DONE for event in events)
+    deltas = [event for event in events if event.type is StreamEventType.CONTENT_DELTA]
+    assert len(deltas) == 1
+    assert isinstance(deltas[0].payload, str)
+    assert len(deltas[0].payload) <= 200
+    assert "截断" in deltas[0].payload
+    assert client.next_step_calls == 2
+
+
+def test_run_stream_interactive_force_answer_degraded_no_retry_no_fail_closed(tmp_path: Path) -> None:
+    """run_stream：interactive force-answer 降级产物直接收尾，不再 fail-closed（第 3 个 response 未消费）。"""
 
     client = _CountingFakeLlmClient(
         [
@@ -1903,11 +1973,212 @@ def test_run_stream_interactive_force_answer_guard_fails_closed(tmp_path: Path) 
         )
     )
 
-    errors = [event for event in events if event.type is StreamEventType.ERROR]
-    assert len(errors) == 1
-    assert errors[0].payload.get("message") == _UNAVAILABLE_MESSAGE
-    assert not any(event.type is StreamEventType.DONE for event in events)
-    assert client.next_step_calls == 3
+    assert not any(event.type is StreamEventType.ERROR for event in events)
+    assert any(event.type is StreamEventType.DONE for event in events)
+    deltas = [event for event in events if event.type is StreamEventType.CONTENT_DELTA]
+    assert len(deltas) == 1
+    assert isinstance(deltas[0].payload, str)
+    assert len(deltas[0].payload) <= 200
+    assert client.next_step_calls == 2
+
+
+def test_run_interactive_force_answer_degraded_truncates_overlong_without_retry(tmp_path: Path) -> None:
+    """interactive：force-answer 降级产物证据原文超长 → 直接截断 ≤200 字摘要，不触发有界重答。"""
+
+    client = _CountingFakeLlmClient(
+        [
+            ToolCall(
+                tool_name=ToolName.SEARCH_DOCUMENT,
+                document_id=_identity().document_id,
+                query="基金经理",
+            ),
+            ToolCall(
+                tool_name=ToolName.SEARCH_DOCUMENT,
+                document_id=_identity().document_id,
+                query="基金经理",
+            ),
+        ]
+    )
+    runner = LlmToolLoopRunner(
+        tool_service=_service_with_long_manager_text(tmp_path),
+        llm_client=client,
+        max_steps=2,
+    )
+
+    result = runner.run(
+        document_id=_identity().document_id,
+        query="基金经理是谁？",
+        scene="interactive",
+    )
+
+    assert result.failure is None
+    assert len(result.answer) <= 200
+    assert "截断" in result.answer
+    assert client.next_step_calls == 2  # 未触发重答
+
+
+def test_run_interactive_force_answer_degraded_paste_evidence_returns_directly(tmp_path: Path) -> None:
+    """interactive：force-answer 降级产物为证据原文（必触发粘贴检测）→ 不重答直接返回。"""
+
+    client = _CountingFakeLlmClient(
+        [
+            ToolCall(
+                tool_name=ToolName.SEARCH_DOCUMENT,
+                document_id=_identity().document_id,
+                query="基金经理",
+            ),
+            lambda results: ToolCall(
+                tool_name=ToolName.READ_SECTION,
+                document_id=_identity().document_id,
+                section_ref=_section_ref_from_search(results),
+            ),
+        ]
+    )
+    runner = LlmToolLoopRunner(
+        tool_service=_service(tmp_path),
+        llm_client=client,
+        max_steps=2,
+    )
+
+    result = runner.run(
+        document_id=_identity().document_id,
+        query="基金经理是谁？",
+        scene="interactive",
+    )
+
+    assert result.failure is None
+    assert "张明负责本基金投资管理" in result.answer
+    assert len(result.answer) <= 200
+    assert client.next_step_calls == 2  # fake client 无多余 step 不抛异常
+
+
+def test_run_interactive_force_answer_degraded_no_evidence_fails_closed(tmp_path: Path) -> None:
+    """interactive：force-answer 降级路径无任何证据 → 保持 step 耗尽 fail-closed。"""
+
+    def always_unknown(doc: str, q: str, tr: tuple) -> ChatResponse:
+        return ChatResponse(
+            step=ToolCall(tool_name="unknown_tool", document_id=doc, query="test"),
+            usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+        )
+
+    class AlwaysUnknownLlm:
+        def next_step(self, **kwargs):
+            return always_unknown(kwargs["document_id"], kwargs["query"], kwargs["tool_results"])
+
+    runner = LlmToolLoopRunner(
+        tool_service=_service(tmp_path),
+        llm_client=AlwaysUnknownLlm(),
+        max_steps=1,
+    )
+
+    result = runner.run(
+        document_id=_identity().document_id,
+        query="test",
+        scene="interactive",
+    )
+
+    assert result.failure is not None
+    assert result.failure.code == FailureCode.UNAVAILABLE
+    assert result.failure.message == _STEP_LIMIT_MESSAGE
+
+
+def test_run_interactive_force_answer_degraded_advice_guard_still_fails_closed(tmp_path: Path) -> None:
+    """interactive：force-answer 降级产物命中投资建议关键词 → 仍拦截 fail-closed（安全红线）。"""
+
+    client = _CountingFakeLlmClient(
+        [
+            ToolCall(
+                tool_name=ToolName.READ_SECTION,
+                document_id=_identity().document_id,
+                section_ref="section-0000",
+            ),
+            FinalAnswer(
+                answer="建议买入该基金，目标价5元。",
+                citations=(),
+                key_facts=(),
+            ),
+        ]
+    )
+    runner = LlmToolLoopRunner(
+        tool_service=_service_with_advice_text(tmp_path),
+        llm_client=client,
+        max_steps=1,
+    )
+
+    result = runner.run(
+        document_id=_identity().document_id,
+        query="基金如何？",
+        scene="interactive",
+    )
+
+    assert isinstance(result.failure, ToolFailure)
+    assert "投资建议" in result.failure.message
+    assert result.answer == ""
+    assert client.next_step_calls == 2  # 1 步耗尽 + 有界重答 1 次
+
+
+def test_run_interactive_normal_final_answer_paste_guard_retry_unchanged(tmp_path: Path) -> None:
+    """interactive：正常 FinalAnswer 原文粘贴仍触发有界重答 1 次（degraded=False 回归保护）。"""
+
+    client = _CountingFakeLlmClient(
+        [
+            ToolCall(
+                tool_name=ToolName.SEARCH_DOCUMENT,
+                document_id=_identity().document_id,
+                query="基金经理",
+            ),
+            lambda results: ToolCall(
+                tool_name=ToolName.READ_SECTION,
+                document_id=_identity().document_id,
+                section_ref=_section_ref_from_search(results),
+            ),
+            lambda results: FinalAnswer(
+                answer=results[-1].evidence_text,
+                citations=results[-1].citations,
+                key_facts=(),
+            ),
+            FinalAnswer(
+                answer="根据年报，基金经理负责本基金投资管理，报告期内保持稳定。",
+                citations=(),
+                key_facts=(),
+            ),
+        ]
+    )
+    runner = LlmToolLoopRunner(tool_service=_service(tmp_path), llm_client=client)
+
+    result = runner.run(
+        document_id=_identity().document_id,
+        query="基金经理是谁？",
+        scene="interactive",
+    )
+
+    assert result.failure is None
+    assert "基金经理负责本基金投资管理" in result.answer
+    assert client.next_step_calls == 4  # search + read_section + 粘贴终答 + 有界重答
+
+
+def test_run_interactive_normal_final_answer_overlong_still_retries_then_truncates(tmp_path: Path) -> None:
+    """interactive：正常 FinalAnswer 超长仍先有界重答 1 次，仍超长才截断（degraded=False 回归保护）。"""
+
+    long_answer = "这是年报事实。" * 160  # 8 字 * 160 = 1280 字
+    client = _CountingFakeLlmClient(
+        [
+            FinalAnswer(answer=long_answer, citations=(), key_facts=()),
+            FinalAnswer(answer=long_answer, citations=(), key_facts=()),
+        ]
+    )
+    runner = LlmToolLoopRunner(tool_service=_service(tmp_path), llm_client=client)
+
+    result = runner.run(
+        document_id=_identity().document_id,
+        query="请详细说明基金情况",
+        scene="interactive",
+    )
+
+    assert result.failure is None
+    assert len(result.answer) <= 200
+    assert "截断" in result.answer
+    assert client.next_step_calls == 2  # 超长终答 + 有界重答 1 次
 
 
 def test_run_stream_ask_force_answer_payload_is_string(tmp_path: Path) -> None:
@@ -2601,8 +2872,8 @@ class TestForceAnswerDegradation:
         # citations 应该来自 tool_results
         assert len(result.citations) > 0
 
-    def test_interactive_force_answer_passes_quality_guard(self, tmp_path: Path) -> None:
-        """interactive：force-answer 原文拼接过终答质量守卫 → 有界重答 1 次后用自己的话通过。"""
+    def test_interactive_force_answer_degraded_no_retry_returns_paste_evidence(self, tmp_path: Path) -> None:
+        """interactive：force-answer 降级产物（证据原文拼接）不重答，直接返回。"""
 
         client = _CountingFakeLlmClient(
             [
@@ -2615,11 +2886,6 @@ class TestForceAnswerDegradation:
                     tool_name=ToolName.SEARCH_DOCUMENT,
                     document_id=_identity().document_id,
                     query="基金经理",
-                ),
-                FinalAnswer(
-                    answer="根据年报，基金经理负责本基金投资管理，报告期内保持稳定。",
-                    citations=(),
-                    key_facts=(),
                 ),
             ]
         )
@@ -2636,12 +2902,12 @@ class TestForceAnswerDegradation:
         )
 
         assert result.failure is None
-        assert "基金经理负责本基金投资管理" in result.answer
+        assert "张明负责本基金投资管理" in result.answer
         assert len(result.answer) <= 200
-        assert client.next_step_calls == 3  # 2 步耗尽 + 有界重答 1 次
+        assert client.next_step_calls == 2  # 2 步耗尽即收尾，不再有界重答
 
-    def test_interactive_force_answer_retry_still_pastes_truncates_summary(self, tmp_path: Path) -> None:
-        """interactive：force-answer 重答后仍粘贴原文 → 截断为摘要格式（≤200 字含省略说明）。"""
+    def test_interactive_force_answer_degraded_overlong_truncates_without_retry(self, tmp_path: Path) -> None:
+        """interactive：force-answer 降级产物超长直接截断为摘要格式（不再重答）。"""
 
         client = _CountingFakeLlmClient(
             [
@@ -2654,11 +2920,6 @@ class TestForceAnswerDegradation:
                     tool_name=ToolName.READ_SECTION,
                     document_id=_identity().document_id,
                     section_ref=_section_ref_from_search(results),
-                ),
-                lambda results: FinalAnswer(
-                    answer=results[-1].evidence_text,
-                    citations=(),
-                    key_facts=(),
                 ),
             ]
         )
@@ -2678,10 +2939,10 @@ class TestForceAnswerDegradation:
         assert len(result.answer) <= 200
         assert "截断" in result.answer
         assert result.answer.startswith("9.4 期末基金管理人的从业人员持有本基金的情况")
-        assert client.next_step_calls == 3
+        assert client.next_step_calls == 2
 
-    def test_interactive_force_answer_retry_not_final_answer_fails_closed(self, tmp_path: Path) -> None:
-        """interactive：force-answer 有界重答未产出 FinalAnswer → fail-closed（unavailable）。"""
+    def test_interactive_force_answer_degraded_extra_toolcall_not_consumed(self, tmp_path: Path) -> None:
+        """interactive：force-answer 降级产物直接收尾，多余 ToolCall response 不被消费、不再 fail-closed。"""
 
         client = _CountingFakeLlmClient(
             [
@@ -2714,11 +2975,9 @@ class TestForceAnswerDegradation:
             scene="interactive",
         )
 
-        assert result.failure is not None
-        assert result.failure.code == FailureCode.UNAVAILABLE
-        assert result.failure.message == _UNAVAILABLE_MESSAGE
-        assert result.answer == ""
-        assert client.next_step_calls == 3
+        assert result.failure is None
+        assert "张明负责本基金投资管理" in result.answer
+        assert client.next_step_calls == 2
 
     def test_interactive_force_answer_no_evidence_still_fails_closed(self, tmp_path: Path) -> None:
         """interactive：force-answer 无任何证据 → 保留 step 耗尽失败（守卫不吞失败）。"""

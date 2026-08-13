@@ -15,6 +15,8 @@ from fund_agent.agent.tool_loop import (
     ToolResultKind,
     ToolTraceEntry,
 )
+from fund_agent.agent.diagnostic_payload import build_diagnostic_payload
+from fund_agent.agent.log_levels import verbose
 from fund_agent.fund.document_tools.constants import FailureCode, LocatorKind, ToolName
 from fund_agent.fund.document_tools.models import (
     Citation,
@@ -499,6 +501,15 @@ class LlmToolLoopRunner:
         """
 
         trace: list[ToolTraceEntry] = []
+        verbose(
+            logger,
+            "LLM tool loop run 开始: %s",
+            build_diagnostic_payload(
+                message="LLM tool loop run 开始",
+                document_id=document_id,
+                query=query,
+            ),
+        )
         tool_results: list[ToolResult] = []
         seen_calls: dict[tuple, ToolResult] = {}
         round_failed_keys: list[tuple] = []
@@ -659,7 +670,7 @@ class LlmToolLoopRunner:
                 _failed_result(tuple(trace), FailureCode.UNAVAILABLE, _UNAVAILABLE_MESSAGE, token_usage=total_usage)
             )
 
-        # max_steps 耗尽：用已收集证据拼成回答（降级）；interactive 与正常 FinalAnswer 同走终答守卫。
+        # max_steps 耗尽：用已收集证据拼成回答（降级）；降级产物跳过原文粘贴/超长重答，超长直接截断收尾（2026-08-13 方案 2）。
         force_result = _force_answer_from_evidence(tuple(trace), tuple(tool_results), token_usage=total_usage)
         if scene == "interactive":
             force_result = self._apply_interactive_final_guards(
@@ -671,6 +682,7 @@ class LlmToolLoopRunner:
                 total_usage=total_usage,
                 budget=budget,
                 scene=scene,
+                degraded=True,
             )
         return _attach_failed_keys(force_result)
 
@@ -703,6 +715,15 @@ class LlmToolLoopRunner:
         seq += 1
 
         trace: list[ToolTraceEntry] = []
+        verbose(
+            logger,
+            "LLM tool loop run_stream 开始: %s",
+            build_diagnostic_payload(
+                message="LLM tool loop run_stream 开始",
+                document_id=document_id,
+                query=query,
+            ),
+        )
         tool_results: list[ToolResult] = []
         seen_calls: dict[tuple, ToolResult] = {}
         effective_failed_call_keys = (
@@ -961,7 +982,7 @@ class LlmToolLoopRunner:
             )
             return
 
-        # max_steps 耗尽：用已收集证据拼成回答（降级）；interactive 与正常 FinalAnswer 同走终答守卫。
+        # max_steps 耗尽：用已收集证据拼成回答（降级）；降级产物跳过原文粘贴/超长重答，超长直接截断收尾（2026-08-13 方案 2）。
         force_result = _force_answer_from_evidence(tuple(trace), tuple(tool_results), token_usage=total_usage)
         if scene == "interactive":
             force_result = self._apply_interactive_final_guards(
@@ -973,6 +994,7 @@ class LlmToolLoopRunner:
                 total_usage=total_usage,
                 budget=budget,
                 scene=scene,
+                degraded=True,
             )
         if force_result.failure:
             yield StreamEvent(
@@ -1081,12 +1103,18 @@ class LlmToolLoopRunner:
         total_usage: TokenUsage,
         budget: ContextBudgetState | None,
         scene: str,
+        degraded: bool = False,
     ) -> AgentRunResult:
         """interactive 终答守卫：投资建议有界重答 + 原文粘贴/超长有界重答 + 摘要截断。
 
         投资建议守卫失败时最多重试 1 次（既有语义，重试仍失败则 fail-closed）；
-        原文粘贴（answer 与任一 evidence 连续重叠 ≥40 字符）或 answer >200 字时
-        最多重答 1 次，重答后仍超标则截断为摘要格式（含省略说明 ≤200 字）。
+        正常 FinalAnswer 原文粘贴（answer 与任一 evidence 连续重叠 ≥40 字符）或
+        answer >200 字时最多重答 1 次，重答后仍超标则截断为摘要格式（含省略说明 ≤200 字）。
+
+        degraded 为 True（max_steps 耗尽的 force-answer 降级产物，2026-08-13 方案 2）时：
+        投资建议拦截保留（命中仍走有界重答 1 次，仍失败则 fail-closed）；
+        final.failure 非空原样返回；跳过原文粘贴/超长有界重答；
+        answer >200 字直接截断为 ≤200 字摘要（含省略说明），≤200 字原样返回。
 
         参数:
             final: 已过 _final_result 的终答结果（interactive 方案 E，无证据校验）。
@@ -1097,10 +1125,20 @@ class LlmToolLoopRunner:
             total_usage: 已累计 token 用量。
             budget: 上下文预算状态；None 时不做预算消费。
             scene: 调用场景（仅 interactive 触发）。
+            degraded: 是否为 max_steps 耗尽的 force-answer 降级产物；True 时跳过
+                原文粘贴/超长有界重答，超长直接截断收尾，投资建议拦截保留。
 
         返回:
             通过守卫的 AgentRunResult；守卫失败时 fail-closed。
         """
+        if degraded and final.failure is None and contains_investment_advice(final.answer):
+            # 降级产物命中投资建议：合成失败态走同一有界重答，仍失败则 fail-closed（安全红线）。
+            final = _failed_result(
+                tuple(trace),
+                FailureCode.UNAVAILABLE,
+                _INVESTMENT_ADVICE_MESSAGE,
+                token_usage=total_usage,
+            )
         if final.failure is not None and final.failure.message == _INVESTMENT_ADVICE_MESSAGE:
             final = self._retry_final_answer_advice_guard(
                 document_id=document_id,
@@ -1115,6 +1153,11 @@ class LlmToolLoopRunner:
             if final.failure is not None:
                 return final
         if final.failure is not None:
+            return final
+
+        if degraded:
+            if len(final.answer) > _INTERACTIVE_FINAL_ANSWER_MAX_CHARS:
+                return replace(final, answer=_truncate_final_answer_summary(final.answer))
             return final
 
         if not _violates_final_answer_quality(final.answer, tool_results):

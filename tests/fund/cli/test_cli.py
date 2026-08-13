@@ -2504,6 +2504,71 @@ def test_ask_streaming_mode_passes_on_event_callback(
     assert "测试" in stdout  # CONTENT_DELTA payload 被打印
 
 
+def test_ask_stream_enable_tool_trace_outputs_analysis(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """--enable-tool-trace 时 ask 流式成功分支输出工具分析行；不加 flag 时无输出。"""
+
+    from fund_agent.agent.tool_loop import ToolTraceEntry
+    from fund_agent.service.models import AskQuestionResult
+
+    fake_result = AskQuestionResult(
+        answer="测试",
+        citations=(),
+        tool_trace=(
+            ToolTraceEntry(
+                tool_name=ToolName.SEARCH_DOCUMENT,
+                arguments={"query": "基金经理"},
+                result_kind="success",
+            ),
+            ToolTraceEntry(
+                tool_name=ToolName.READ_SECTION,
+                arguments={"section_ref": "section-1"},
+                result_kind="failure",
+                failure_code=FailureCode.NOT_FOUND,
+            ),
+        ),
+        routing_trace=(),
+        failure=None,
+    )
+
+    def _fake_ask_question(self, request, *, on_event=None):
+        return fake_result
+
+    monkeypatch.setattr(
+        service_module.FundReadingService, "ask_question", _fake_ask_question
+    )
+
+    exit_code, stdout, stderr = _run([
+        "ask",
+        "问题",
+        "--document-id",
+        "test-doc-id",
+        "--enable-tool-trace",
+        "--work-dir",
+        str(tmp_path),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE
+    assert "[工具分析: 共 2 次 / 成功 1 / 失败 1]" in stdout
+    assert "[工具分析]" in stdout
+    assert FailureCode.NOT_FOUND.value in stdout
+    assert stderr == ""
+
+    # 不加 flag 时零新增输出（回归保护）
+    exit_code, stdout, stderr = _run([
+        "ask",
+        "问题",
+        "--document-id",
+        "test-doc-id",
+        "--work-dir",
+        str(tmp_path),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE
+    assert "[工具分析:" not in stdout
+
+
 def test_generate_cli_real_pdf_smoke_writes_report_and_audit(monkeypatch, tmp_path: Path) -> None:
     """17C 真实 PDF generate smoke：import -> generate -> 落盘 report/sidecar/audit。"""
 

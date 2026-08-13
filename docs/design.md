@@ -225,7 +225,7 @@ report / judgment contract
   - 投资建议检测（决策 A）：弱词豁免窗口 ±100 字符，事实性上下文词 15 个；指令动词（建议/应当/可考虑/适合/值得持有/应买入/应卖出/应增持/应减持）拦截；无上下文词 fail-closed 兜底；指令动词不含裸「应」（避免误命中 应付/应计）；main.py 用户输入预检合一为单一真源。
   - provider malformed 有界重试 1 次（stream + 非 stream；重试后仍 fail-closed，不回喂）。
   - interactive 终答投资建议守卫有界改写重试 1 次（重答仍走同一守卫；ask/generate 不重试）。
-  - force-answer 分支同走终答守卫（2026-08-11 Fix A）：`max_steps` 耗尽降级（`_force_answer_from_evidence`）在 interactive 下与正常 FinalAnswer 一致，经 `_apply_interactive_final_guards` 统一过投资建议拦截与 ≤200 字约束，不再绕过守卫。
+  - force-answer 分支同走终答守卫（2026-08-11 Fix A；2026-08-13 细化）：`max_steps` 耗尽降级（`_force_answer_from_evidence`）在 interactive 下经 `_apply_interactive_final_guards` 过投资建议拦截与 ≤200 字约束，不再绕过守卫；2026-08-13（用户裁决方案 2）降级产物跳过「原文粘贴 → 有界重答」子规则（产物即证据原文拼接，必然触发且重答轮 provider 不收敛时必失败为 unavailable），超长直接截断为 ≤200 字摘要，投资建议拦截语义不变。
 
 禁止：
 
@@ -788,6 +788,33 @@ R3（Mimo review ACCEPTED 计划）实施结论：
 - 依据：`docs/research/dayu-agent-r-research-20260810.md` §2.1.1 / §5 建议 1；dayu 本地 `bm25f_scorer.py` 仅作算法参考，不复制代码（Apache-2.0 license gate）。
 - 实现与测试：见 `.sisyphus/plans/bm25f-search-ranking-slice-20260812.md`；CIC-lite：DS 实施 + MiMo review。
 
+
+### 6.21 日志 VERBOSE 级 + 有界脱敏诊断载荷（2026-08-13 裁决，规划完成）
+
+- 现状事实：仓库无任何日志级别配置（`basicConfig / dictConfig / fileConfig / setLevel / addHandler` 均 0 命中）；现有日志仅 4 个模块的 `logger.warning`（`llm_tool_loop / chapter_generator / audit_pipeline / extraction`）；LLM provider 异常消息已保证不包含 raw body（`deepseek_llm._parse_response` 只抛固定 `_MALFORMED_MESSAGE`）。
+- 决策：
+  - 新增 `VERBOSE = 15` 日志级别（介于 DEBUG 10 / INFO 20），注册名 `"VERBOSE"`，幂等注册 + `verbose(logger, ...)` 帮助函数；概念级借鉴 dayu `runtime/log_levels.py`，不复制代码（Apache-2.0 license gate）。
+  - 启用路径：env `FUND_CHECKLIST_LOG_LEVEL`（合法值 `DEBUG / VERBOSE / INFO / WARNING / ERROR`）；absent 或空值 → 零行为变更；未知值 → fail-fast `ValueError`（与 `FUND_CHECKLIST_LLM_PROVIDER` 一致）。CLI `main()` 入口调用 `configure_logging()`；不新增 CLI 子命令。
+  - 有界脱敏诊断载荷：`build_diagnostic_payload(message, *, code / document_id / tool_name / provider / query)` 显式命名参数（未知 kwargs 抛 `TypeError`）；逐字段脱敏 + 截断（字段上限 500 字符 + `…(截断)` 后缀）；总量上限 2000 字符，超限按 `query → provider → tool_name → document_id → code` 顺序丢可选字段，`message` 永不丢。
+  - 脱敏规则（正则集中定义）：`sk-`/`pk-` API key、`Bearer` token、URL query secret（`api_key/token/secret/signature/sig=`）、`local_import_id`、本地绝对路径（`/Users/`、`/tmp/`、`/private/`、`~`）、工作目录（`.fund_checklist_*`），替换为 `***`。
+- 硬约束：任何诊断日志不得携带 raw provider response、API key、Bearer token、URL secret、本地绝对路径、工作目录、`local_import_id`；不改现有 `logger.warning` 语义；不改 `StreamEvent / ToolResult / FailureCode` 公共契约；不新增依赖。
+- 接线点：`llm_tool_loop.run / run_stream` 入口 verbose；`deepseek_llm._parse_response` malformed 分支 verbose（只带 `llm_malformed_response` code + 安全消息，不带 body）。
+- 依据：`docs/research/dayu-agent-r-research-20260810.md` §5 建议 2。
+- 实现与测试：见 `.sisyphus/plans/log-verbose-diagnostics-slice-20260813.md`；CIC-lite：MiMo plan review ACCEPTED（2026-08-13，1 条 P2 措辞已按 review 修正），DS 实施待执行。
+
+### 6.22 Tool Trace 只读分析器（operator 层）（2026-08-13 裁决，规划完成）
+
+- 现状事实：`AgentRunResult.tool_trace: tuple[ToolTraceEntry]`（tool_name / arguments / result_kind / failure_code，`tool_loop.py:36`）；`AskQuestionResult.tool_trace` 同构（`service/models.py:1194`）；`ChatTurnResponse.tool_trace` 为字符串摘要（`chat_service.py:95`）；`MinimalHost._compute_tool_trace_summary` 已有 total/success/failure 只读统计（`minimal_host.py:423`）；CLI `--enable-tool-trace` 已有 ask 流式 TOOL_EVENT 实时显示与 interactive `[工具调用: ...]` 打印。缺口：无独立 operator 层——无结构化 report、无 typed policy、无 deterministic JSON renderer、无「分析器只读」显式契约。
+- 决策：
+  - 新增 `fund_agent/agent/tool_trace_analysis.py`（Agent 层，与 `ToolTraceEntry` 同层）：纯函数集，只读消费显式传入的派生 trace（`tuple[ToolTraceEntry]`）+ typed policy，输出 immutable structured report；不读 session / durable internals、不写任何状态、不落盘、不成为 truth 源（模块 docstring + 函数签名锁定）。
+  - `ToolTraceAnalysisPolicy`：`large_argument_chars: int = 120`（arguments 确定性序列化长度阈值）。
+  - `ToolTraceAnalysisReport`：summary（total/success/failure/unique_tools）+ by_tool（首次出现顺序、failure_codes 去重保序）+ findings + limitations（固定 4 条：trace 是派生视图不含 raw payload；arguments 仅含显式参数；provider 首轮失败 trace 为空显示 0 次；分析只读不成为 truth 源）。
+  - findings 确定性规则：`failed_call`（每条失败 entry 一条，failure_code 用 `.value` 归一化，与 `main.py:430` 一致）；`repeated_failure`（同一 `(tool_name, failure_code)` ≥2 次补一条）；`large_arguments`（序列化长度 > 阈值一条，`==` 阈值不触发）。
+  - JSON renderer：`tool_trace_analysis_to_json(report)` → `json.dumps(asdict, ensure_ascii=False, sort_keys=True, indent=2) + "\n"`；`analyze_tool_trace` / renderer 均对类型不符抛 `TypeError`（显式契约）。
+- 硬约束：不改 `AgentRunResult / ToolTraceEntry / AskQuestionResult / StreamEvent / ToolResult / FailureCode` 公共契约；不支持 session `ToolCallSummary` / 字符串摘要输入（backlog）；不新增 CLI 子命令；不引入 dayu 代码（Apache-2.0 license gate，仅概念对齐）。
+- 接线点：ask 流式路径成功分支（`cli/main.py` `result = service.ask_question(...)` 后、`return SUCCESS_EXIT_CODE` 前），`--enable-tool-trace` 开启且 trace 非空时追加 `[工具分析: 共 N 次 / 成功 S / 失败 F]` + findings 行；`--no-stream` JSON 输出不含分析字段；TOOL_EVENT 实时显示不变。
+- 依据：`docs/research/dayu-agent-r-research-20260810.md` §2.2.7 / §5 建议 3；dayu `service/tool_trace_analysis.py` + `host/tool_trace_analysis.py` 仅作边界参考（Analyzer 只读消费派生 trace，不成为 durable truth）。
+- 实现与测试：见 `.sisyphus/plans/tool-trace-operator-slice-20260813.md`；CIC-lite：MiMo plan review `NEEDS_FIX`（2026-08-13，3 项最小修复——failure_code 用 `.value`、by_tool 首现顺序显式断言、large_arguments `==` 阈值边界——已按 review 原文修正），DS 实施待执行。
 
 ## 7. dayu 可迁移部分
 

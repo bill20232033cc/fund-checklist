@@ -21,6 +21,7 @@ from fund_agent.fund.document_tools.persistent_repository import (
     FilesystemReportRepository,
 )
 from fund_agent.agent.deepseek_llm import DeepSeekLlmClient, resolve_provider_model
+from fund_agent.agent.log_levels import configure_logging
 from fund_agent.agent.stream_events import StreamEventType
 from fund_agent.service import (
     AggregateMultiYearAnnualPerformanceResult,
@@ -59,6 +60,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         本函数捕获业务失败和未预期异常，不向调用方抛出。
     """
 
+    configure_logging()
     return run_cli(argv, stdout=sys.stdout, stderr=sys.stderr)
 
 
@@ -478,6 +480,19 @@ def _run_ask_command(args: argparse.Namespace, *, stdout: TextIO, stderr: TextIO
             print(f"\nfailure_code={result.failure.code.value}", file=stderr)
             print(f"message={result.failure.message}", file=stderr)
         return CLASSIFIED_FAILURE_EXIT_CODE
+
+    if show_tool_trace and result.tool_trace:
+        from fund_agent.agent.tool_trace_analysis import (
+            ToolTraceAnalysisPolicy,
+            analyze_tool_trace,
+        )
+
+        report = analyze_tool_trace(result.tool_trace, ToolTraceAnalysisPolicy())
+        summary = report.summary
+        stdout.write(f"[工具分析: 共 {summary.total} 次 / 成功 {summary.success} / 失败 {summary.failure}]\n")
+        for finding in report.findings:
+            stdout.write(f"[工具分析] {finding.detail}\n")
+        stdout.flush()
 
     return SUCCESS_EXIT_CODE
 
