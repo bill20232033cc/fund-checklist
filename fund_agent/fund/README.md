@@ -10,6 +10,7 @@
 - `share_class` 为可选 metadata，不参与 `document_id`。
 - Content-Type、空内容、PDF magic bytes、原子写入失败均分类为稳定 failure code。
 - `DoclingConverter` 使用 `docling.document_converter.DocumentConverter.convert()` 把受控 PDF bytes 转成 Docling JSON，并把输出写到调用方指定的 tmp/cache 根目录。
+- `interruptible_process` 提供进程隔离执行原语（子进程启动 / 结果回收 / terminate+kill / bounded close），`DoclingConverter` 的阻塞转换在可抢占子进程内执行，硬超时即杀子进程且失败路径不残留 JSON。
 - `DoclingDocumentStore` 只从 Docling JSON 暴露受控 section、table、search、locator、citation 模型，不暴露 raw JSON、本地 PDF path 或 cache path。
 - `search_document` 的检索投影覆盖 section text、table caption 和 `DEFAULT_TABLE_MAX_ROWS` 内的 bounded table rows；table-backed result 返回 `table_ref`、table locator、citation 和受控 `match_kind`。
 - `search_document` 对 query 与正文/表格行先做空白归一化（`re.sub` 去空白）再计数，命中后返回原文摘录；表头碎片（如 `份额净值 增长率①`）可命中 `净值增长率`。

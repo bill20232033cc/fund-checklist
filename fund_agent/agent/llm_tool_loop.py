@@ -2121,6 +2121,8 @@ def _aggregate_evidence_text(
         lines.append(f"covered_years={','.join(str(y) for y in series.covered_years)}")
         if series.missing_years:
             lines.append(f"missing_years={','.join(str(y) for y in series.missing_years)}")
+            for note in series.missing_year_notes:
+                lines.append(f"missing_year_note={note.year}: {note.reason}")
         for row in series.rows:
             lines.append(
                 f"year={row.year} | "

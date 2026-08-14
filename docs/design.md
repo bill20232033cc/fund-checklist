@@ -1124,6 +1124,7 @@ Post-MVP 10F 裁决为 annual performance table extraction from title-family mat
 - 10F 目标是从 title-family matched performance comparison table 中抽取年度收益字段。
 - 10F 不依赖章节编号；样本中的 `3.2.1` 只是观察值，不能写入 public contract、locator contract 或测试断言。
 - source title family 固定为：`基金份额净值增长率及其与同期业绩比较基准收益率的比较`。`基金净值表现` 可作为上层 section context，但不能单独作为字段抽取表成功条件。
+- title-family 判定支持 raw-excerpt 兜底：Docling section 切分把 3.2.1 标题嵌在「3.2 基金净值表现」正文内（answer 首行非标题）时，以 answer 正文包含 title-family 判定命中；answer 为有界公开输出，下游仍要求 SECTION/TABLE citation、列签名与「过去一年」行。
 - table signature 必须包含：`source_period_label = 过去一年`、`份额净值增长率` / `基金份额净值增长率` 列、`业绩比较基准收益率` 列。
 - 年度语义裁决为：`report_year = request.year`，`source_period_label = 过去一年`。用户 / DTO 层表达为 `2024` 等自然年度，citation / raw_text 必须保留原文 `过去一年`。
 - 首批字段只抽 `annual_nav_growth_rate` 和 `annual_benchmark_return_rate`。
@@ -1221,8 +1222,8 @@ Post-MVP 10I 裁决为 multi-year annual performance aggregation service：
 - coverage 语义沿用 10H：`minimum_complete_years=3`，`maximum_complete_years=5`；5 年完整为 `coverage_status=complete`，3-4 年完整为 `coverage_status=partial`，少于 3 年整体 `not_found`。
 - `coverage_status=partial` 是成功结果的 coverage metadata，不是 failure code；不新增 `partial_success`。
 - share class 口径：按 share class 独立计算 coverage。用户指定 share class 时只评估该 share class；未指定时返回所有达到 3-5 年 coverage 的 share class series。所有 share class 都不足 3 年时整体 `not_found`。
-- `missing_years` 首批只返回年份列表，不新增 `missing_reasons`。
-- DTO 形态沿用 10H：`MultiYearAnnualPerformanceSeries` 包含 `fund_code`、`requested_years`、`covered_years`、`missing_years`、`coverage_status`、`coverage_count`、`minimum_required_count`、`share_class_scope`、`rows`、`citations`。
+- `missing_years` 保持年份列表；新增 `missing_year_notes`（year + reason）逐条解释缺失原因（单年度抽取失败复用 10F/10G 的 NOT_FOUND message、catalog 无该年度年报时说明「未导入或未匹配」、无显式原因时补默认说明）；数值语义与 failure taxonomy 不变。
+- DTO 形态沿用 10H：`MultiYearAnnualPerformanceSeries` 包含 `fund_code`、`requested_years`、`covered_years`、`missing_years`、`coverage_status`、`coverage_count`、`minimum_required_count`、`share_class_scope`、`rows`、`citations`、`missing_year_notes`。
 - 每个 row 包含：`year`、`annual_nav_growth_rate`、`annual_benchmark_return_rate`、`annual_excess_return`、`citations`。
 - citation 口径：每个 year / field 保留原年度年报 table locator citation；禁止只给汇总 citation。
 - 失败语义沿用现有 failure code：document/year 与 extraction `report_year` 冲突为 `identity_mismatch`；少于 3 个完整年度为 `not_found`；单年度文档不可读、目标表缺失或字段缺失只计入 `missing_years`，若导致不足 3 年则 `not_found`；extractor 配置异常为 `schema_drift`；内部异常为 `unavailable`。
@@ -1841,3 +1842,31 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
   - Phase 5 范围定义（待裁决）
 
   **后续研究**：基金类型划分 + preferred_lens 设计（下一阶段）。
+
+### 6.23 process-backed 工具执行（可抢占超时）（2026-08-13 裁决，规划完成）
+
+- 现状事实：`MinimalHost.run()`（`fund_agent/host/minimal_host.py:141`）在 daemon 线程跑 Agent loop，`thread.join(timeout)` 超时后返回 `timed_out=True` 但**线程不杀**（12A 缺口）；`DoclingConverter.convert_pdf()` 同步阻塞执行 `converter.convert(stream)`，超时仅靠 Docling 内部 `document_timeout`（`_build_docling_converter` → `PdfPipelineOptions(document_timeout=...)`），模型下载 / OCR / C++ 路径卡死时内部超时不可靠、且无进程可杀。
+- 决策：
+  - 新增进程隔离原语 `fund_agent/fund/document_tools/interruptible_process.py`：子进程启动 / 结果回收（Pipe envelope）/ terminate→grace→kill / bounded close；`multiprocessing.get_context("spawn")` + 模块级子进程入口，目标必须是 spawn 可按引用序列化的顶层可调用；`SubprocessTimeoutError` / `SubprocessExecutionError` 两类异常；`InterruptibleProcess`（`run()` 与 `start()` 互斥，重复调用抛 `RuntimeError`）+ `run_in_subprocess` 薄封装。概念对齐 dayu `runtime/interruptible_process.py`，自实现不复制（Apache-2.0 license gate）。
+  - 接线点：`DoclingConverter.convert_pdf` 的阻塞转换移入可抢占子进程；`timeout_seconds` 语义升级为「既是 Docling 内部 document_timeout，也是硬子进程 deadline」；公共签名与返回不变。子进程入口 `_run_conversion_in_child(pdf_bytes, do_ocr, timeout_seconds, output_json_path)` 复用既有 `_build_docling_converter` / `_build_document_stream` / `_save_docling_json` / `_is_unavailable_exception`，失败分类从父进程移入子进程（`unavailable` / `docling_convert_failed` 集合不变）。
+  - 父进程映射与清理：`SubprocessTimeoutError` → 清理 `json_path` → `DocumentToolError(UNAVAILABLE, "Docling 转换超时")`；`SubprocessExecutionError` → 清理 → `DocumentToolError(UNAVAILABLE, "Docling 转换子进程异常")`；`docling_convert_failed` / `unavailable` envelope 原样映射。统一保证：convert_pdf 失败 ⇒ `json_path` 不残留。
+  - Host 12A 的 thread timeout 语义与 `timed_out` 契约不变；不做 Host 级整 loop 进程隔离（Agent 持 LLM client / tool service / 会话状态，spawn 序列化脆弱；研究 §5 决策 5 定位为等真实异步需求，backlog 候选）。
+- 硬约束：不引入 `fund_agent/runtime/` 新分层（原语放 fund/document_tools，架构坐标系不变）；不新增依赖（stdlib `multiprocessing`）；不改 `FailureCode / DocumentToolError / DoclingConversionResult / ReportIdentity / MinimalHost` 公共契约；不新增 CLI 子命令与参数；子进程只运行转换，不碰 Agent / LLM / session；测试 fake 只测边界与错误，生产转换路径真实执行（真实样本 PDF）。
+- 依据：`docs/research/dayu-agent-r-research-20260810.md` §2.1.4 / §5 决策 5。
+- 实现与测试：见 `.sisyphus/plans/process-backed-tool-execution-slice-20260813.md`；CIC-lite：MiMo plan review `NEEDS_FIX`（2026-08-13，1 项最小修复——test 2 改为纯手动 API 避免 start 后 run 孤儿子进程，`run()` 与 `start()` 互斥——已按 review 原文修正），DS 实施待执行。
+
+### 6.24 阶段判定「建仓期」真源修正（2026-08-13 裁决，规划完成）
+
+- 现状事实：`generate_data_table` 的建仓期判定（`fund_agent/service/chapter_generator.py:596-606`）只读 `fund_manager.tenure_start` 年份与 `report_year`，从不读基金成立日期。005680（财通资管价值成长混合，2025 年报）合同 2019-03-25 生效（2021 年报文本「本基金合同于2019年3月25日生效」；2022-2025 年报 §2 基金简介表 `基金合同生效日 | 2019 年 03 月 25 日`），经理李响 2025-07-15 任职，`2025-2025=0<2` → 误判「🟡 建仓期」（修复前模板模式实测）。另外 `chapter_generator.py:562-564` 在 `tenure_start` 为空时直接判「转型期」——经理维度占用 5 阶段枚举。
+- 语义裁定：建仓期属于**基金产品生命周期**（合同生效后建仓），不属于基金经理任期；经理变更风险已有独立信号 `signal_scoring.py:381-391` `score_manager_change`（指标 5，0/20），保留在 Ch7 信号评分，不占用阶段枚举。
+- 决策：
+  - 新增「基金合同生效日」确定性抽取 `FundReadingService._extract_contract_effective_date_with_citation`（`extraction.py`，Service 层，带 Citation）：query「基金简介」锚定 §2 基金简介节 → 表行「基金合同生效日 | YYYY 年 M 月 D 日」正则归一化 `YYYY-MM-DD`；回退「基金合同生效日」query 逐命中节表行扫描；再回退 §2 节文本正则（`基金合同生效日[为：:]?\s*[（(]?日期` / `基金合同于日期…生效`，日期必须紧跟短语，避免 §4.1.2 经理首任任职口径误取——163415 实测陷阱「本期 2025年4月8日（基金合同生效日）至2025年12月31日」）；全部失败返回 `("", None)`（fail-closed）。已实测 005680/004393/163415 均命中 §2 table-0002。
+  - 建仓期判定真源切换：`report_year - 合同生效年份 < 2` 才判建仓期（被动基金仍跳过，`not is_passive` 守卫不变）；判定表新增 `| 基金合同生效日 | ... |` 行；建仓期不覆盖转型期（`stage != "转型期"` 守卫，对齐优先级「转型期 > 建仓期」）。
+  - 删除经理维度占用：`tenure_start` 为空判「转型期」分支删除；建仓期不再引用 `tenure_start`。
+  - fail-closed：成立日期缺失时不做建仓期判定，判定依据明确说明「建仓期判定跳过（不采用基金经理任职年限代理）」；不引入经理任期代理。
+  - 透传：`generate_data_table(..., contract_effective_date: str = "")` 显式公共参数，经 `LlmChapterGenerator.generate_chapter`（`chapter_generator.py:960`）、`FundReadingService._generate_chapters` / `_generate_template_chapter`、`ReportGenerationCoordinator.generate_report` / `_run_chapter_worker` / `_generate_and_audit_chapter` / `_generate_and_audit_chapter_inner`（`audit_pipeline.py:1884/2043/2111/2166`）全链路透传；`ChapterEvidence` 新增 `contract_citation`，Ch5「证据与出处」渲染合同生效日来源（可溯源）。
+  - Prompt 口径同步：`fund_agent/service/prompts/system_base.md` Ch5 正例「基金经理任职超过2年」改为「基金合同 XXXX 年生效，成立已满 2 年」；Ch5「5选1 优先级」表述不变。
+  - `_generate_chapters_with_llm`（`extraction.py:3604`）为 dead code（无调用点），不改；若复活需同步透传。
+- 硬约束：不改 5 阶段枚举与优先级；不改 `score_manager_change` 信号口径；不改 040046 资产配置结构转型检测；不新增 CLI 子命令/参数/依赖；不更新 AGENTS.md（无执行规则变更）。
+- 依据：005680 2025 年报 Docling JSON 实测 + `docs/design.md` Ch5 must_answer「5选1 优先级」。
+- 实现与测试：见 `.sisyphus/plans/stage-determination-contract-date-slice-20260813.md`；CIC-lite：MiMo plan review `NEEDS_FIX`（2026-08-13，2 项最小修复——决策 6 引用不存在的 `_generate_llm_chapters` 已改正、`_generate_chapters_with_llm` dead code 已列入非目标——已按 review 原文修正）；DS 实施完成（2026-08-13，9 文件，测试 6/1/15/26/196 全通过，005680 实跑稳定期），MiMo diff review `ACCEPTED`。

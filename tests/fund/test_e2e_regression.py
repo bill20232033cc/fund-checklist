@@ -6,10 +6,13 @@
 
 每次代码修改后必须运行此测试，确保无回归。
 """
+import io
 import json
 import os
 import pytest
 from pathlib import Path
+
+from fund_agent.cli.main import SUCCESS_EXIT_CODE, run_cli
 
 # 跳过条件：e2e 数据目录不存在时跳过（CI 环境可能未导入）
 E2E_FUNDS = {
@@ -201,3 +204,96 @@ def test_e2e_040046_ch5_has_signal_judgment() -> None:
     content = ch5[0].content
     has_signal = "综合信号" in content or "标准化评分" in content or "信号" in content
     assert has_signal, "Ch5 数据表中未包含信号评分信息"
+
+
+def test_extract_contract_effective_date_005680() -> None:
+    """005680 基金合同生效日抽取应为 2019-03-25 且带 Citation（建仓期真源）。"""
+    work_dir = ".fund_checklist_005680"
+    if not _has_e2e_data(work_dir):
+        pytest.skip(f"005680 数据目录不存在: {work_dir}")
+
+    from pathlib import Path
+
+    from fund_agent.service.extraction import FundReadingService, _repository
+    from fund_agent.service.models import AnnualReportDocument
+
+    service = FundReadingService()
+    repo = _repository(Path(work_dir))
+    catalog = repo.list_reports()
+    annual_docs = [
+        AnnualReportDocument(year=int(r["year"]), document_id=str(r["document_id"]))
+        for r in catalog
+        if r.get("fund_code") == "005680"
+    ]
+    date, citation = service._extract_contract_effective_date_with_citation(
+        "005680", annual_docs, work_dir, "财通资管价值成长混合",
+    )
+
+    assert date == "2019-03-25", f"合同生效日应为 2019-03-25，实际 {date}"
+    assert citation is not None, "合同生效日 citation 不应为空"
+    assert citation.locator.locator_kind.value == "table"
+
+
+def _run(args: list[str]) -> tuple[int, str, str]:
+    """执行 CLI 并捕获 stdout/stderr。"""
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    exit_code = run_cli(args, stdout=stdout, stderr=stderr)
+    return exit_code, stdout.getvalue(), stderr.getvalue()
+
+
+def test_multi_year_004393_missing_year_note() -> None:
+    """004393 真实数据 multi-year CLI：missing_year_notes 含 2022 转型当年原因。"""
+
+    work_dir = ".fund_e2e_004393"
+    if not _has_e2e_data(work_dir):
+        pytest.skip("e2e 数据目录不存在")
+
+    exit_code, stdout, stderr = _run([
+        "multi-year",
+        "--fund-code", "004393",
+        "--years", "2021,2022,2023,2024,2025",
+        "--work-dir", work_dir,
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE, stdout + stderr
+    output = json.loads(stdout)
+    notes = output["series"][0]["missing_year_notes"]
+    assert any(
+        note["year"] == 2022 and "转型当年无全年份额净值增长率" in note["reason"]
+        for note in notes
+    )
+
+
+def test_multi_year_005680_2022_covered() -> None:
+    """005680 真实数据 multi-year CLI：2022 covered（A 类 -22.35%/-15.20%，citation table-0010），2021/2023-2025 不回退。"""
+
+    work_dir = ".fund_checklist_005680"
+    if not _has_e2e_data(work_dir):
+        pytest.skip("e2e 数据目录不存在")
+
+    exit_code, stdout, stderr = _run([
+        "multi-year",
+        "--fund-code", "005680",
+        "--years", "2021,2022,2023,2024,2025",
+        "--work-dir", work_dir,
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE, stdout + stderr
+    output = json.loads(stdout)
+    series = next(s for s in output["series"] if s["share_class_scope"] == "A")
+    assert 2022 in series["covered_years"], f"2022 未覆盖: {series}"
+    assert 2022 not in series["missing_years"], series
+    rows_by_year = {row["year"]: row for row in series["rows"]}
+    row_2022 = rows_by_year[2022]
+    assert row_2022["annual_nav_growth_rate"] == "-22.35%"
+    assert row_2022["annual_benchmark_return_rate"] == "-15.20%"
+    assert row_2022["annual_excess_return"] == "-7.15%"
+    cited_table_refs = {
+        field["citation"]["locator"]["table_ref"]
+        for field in row_2022["citations"]
+    }
+    assert "table-0010" in cited_table_refs, row_2022
+    for year in (2021, 2023, 2024, 2025):
+        assert year in series["covered_years"], f"{year} 回退: {series}"

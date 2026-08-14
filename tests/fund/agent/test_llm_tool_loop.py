@@ -14,6 +14,7 @@ from fund_agent.agent import ChatResponse, FakeLlmClient, FinalAnswer, LlmToolLo
 from fund_agent.agent.context_budget import ContextBudgetState
 from fund_agent.agent.log_levels import VERBOSE_LOG_LEVEL
 from fund_agent.agent.llm_tool_loop import (
+    _aggregate_evidence_text,
     _cap_tool_results,
     _coerce_tool_name,
     _dedup_key,
@@ -49,6 +50,7 @@ from fund_agent.service.extraction import (
     MultiYearAnnualPerformanceRow,
     MultiYearAnnualPerformanceSeries,
 )
+from fund_agent.service.models import MultiYearMissingYearNote
 
 
 def _identity() -> ReportIdentity:
@@ -2353,10 +2355,16 @@ def _fake_multi_year_result(
     *,
     years: tuple[int, ...],
     missing: tuple[int, ...] = (),
+    missing_notes: dict[int, str] | None = None,
 ) -> AggregateMultiYearAnnualPerformanceResult:
     """构造用于测试的 fake AggregateMultiYearAnnualPerformanceResult。"""
 
     covered = tuple(y for y in years if y not in missing)
+    notes = tuple(
+        MultiYearMissingYearNote(year=y, reason=missing_notes[y])
+        for y in missing
+        if missing_notes is not None and y in missing_notes
+    )
     rows = tuple(
         MultiYearAnnualPerformanceRow(
             year=y,
@@ -2393,6 +2401,7 @@ def _fake_multi_year_result(
         share_class_scope="A",
         rows=rows,
         citations=citations,
+        missing_year_notes=notes,
     )
     return AggregateMultiYearAnnualPerformanceResult(series=(series,), failure=None)
 
@@ -2460,6 +2469,21 @@ def test_fake_llm_aggregate_multi_year_partial_coverage_preserves_metadata(tmp_p
     assert tuple(entry.tool_name for entry in result.tool_trace) == (
         ToolName.AGGREGATE_MULTI_YEAR_ANNUAL_PERFORMANCE,
     )
+
+
+def test_aggregate_evidence_text_renders_missing_year_notes() -> None:
+    """_aggregate_evidence_text 必须在 missing_years 行后渲染 missing_year_note。"""
+
+    fake_result = _fake_multi_year_result(
+        years=(2020, 2021, 2022, 2023, 2024),
+        missing=(2022,),
+        missing_notes={2022: "转型当年无全年份额净值增长率"},
+    )
+
+    text = _aggregate_evidence_text(fake_result)
+
+    assert "missing_years=2022" in text
+    assert "missing_year_note=2022: 转型当年无全年份额净值增长率" in text
 
 
 def test_fake_llm_aggregate_multi_year_complete_coverage_no_invented_missing_years(tmp_path: Path) -> None:

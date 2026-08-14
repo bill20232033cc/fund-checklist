@@ -6,6 +6,7 @@ import io
 import importlib
 import hashlib
 import json
+import shutil
 from importlib.metadata import entry_points
 from pathlib import Path
 
@@ -864,6 +865,72 @@ def test_multi_year_json_output_on_success(monkeypatch, tmp_path: Path) -> None:
     assert len(output["series"]) == 1
     assert output["series"][0]["fund_code"] == "004393"
     assert output["series"][0]["coverage_status"] == "complete"
+
+
+def test_multi_year_output_includes_missing_year_notes(monkeypatch, tmp_path: Path) -> None:
+    """multi-year JSON 输出必须带出 missing_year_notes 逐条缺失原因。"""
+
+    from fund_agent.service import (
+        AggregateMultiYearAnnualPerformanceResult,
+        MultiYearAnnualPerformanceSeries,
+    )
+    from fund_agent.service.models import MultiYearMissingYearNote
+
+    fake_series = MultiYearAnnualPerformanceSeries(
+        fund_code="004393",
+        requested_years=(2022, 2023, 2024),
+        covered_years=(2023, 2024),
+        missing_years=(2022,),
+        coverage_status="partial",
+        coverage_count=2,
+        minimum_required_count=3,
+        share_class_scope="A",
+        rows=(),
+        citations=(),
+        missing_year_notes=(
+            MultiYearMissingYearNote(
+                year=2022,
+                reason=(
+                    "annual performance 过去一年完整字段缺失：业绩阶段表存在但无「过去一年」行"
+                    "（表内仅披露「自基金转型起至今」等期间，转型当年无全年份额净值增长率）"
+                ),
+            ),
+        ),
+    )
+
+    class _FakeService:
+        def aggregate_multi_year_annual_performance(self, request):
+            return AggregateMultiYearAnnualPerformanceResult(series=(fake_series,), failure=None)
+
+    monkeypatch.setattr(cli_module, "FundReadingService", _FakeService)
+
+    work_dir = tmp_path / "work"
+    _write_catalog(work_dir, [
+        {"document_id": "doc-2022", "year": 2022, "fund_code": "004393"},
+        {"document_id": "doc-2023", "year": 2023, "fund_code": "004393"},
+        {"document_id": "doc-2024", "year": 2024, "fund_code": "004393"},
+    ])
+
+    exit_code, stdout, stderr = _run([
+        "multi-year",
+        "--fund-code", "004393",
+        "--years", "2022,2023,2024",
+        "--work-dir", str(work_dir),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE
+    assert stderr == ""
+    output = json.loads(stdout)
+    notes = output["series"][0]["missing_year_notes"]
+    assert notes == [
+        {
+            "year": 2022,
+            "reason": (
+                "annual performance 过去一年完整字段缺失：业绩阶段表存在但无「过去一年」行"
+                "（表内仅披露「自基金转型起至今」等期间，转型当年无全年份额净值增长率）"
+            ),
+        }
+    ]
 
 
 def test_multi_year_deduplicates_same_year_entries(monkeypatch, tmp_path: Path) -> None:
@@ -3650,3 +3717,36 @@ def test_interactive_precheck_shares_decision_a_source(tmp_path: Path) -> None:
             stderr=io.StringIO(),
         )
     assert "投资建议关键词" not in stdout_yingshi.getvalue()
+
+
+def test_generate_cli_005680_stage_not_building_phase(tmp_path: Path) -> None:
+    """005680 CLI generate 模板模式（无 --llm、无网络）：Ch5 稳定期、合同 2019 年生效、判定结果非建仓期。"""
+
+    src_dir = Path(".fund_checklist_005680")
+    if not (src_dir / "completed_reports.json").is_file():
+        pytest.skip(f"005680 数据目录不存在: {src_dir}")
+
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    shutil.copy2(src_dir / "completed_reports.json", work_dir / "completed_reports.json")
+    shutil.copytree(src_dir / "docling_json", work_dir / "docling_json")
+    shutil.copytree(src_dir / "pdf_blobs", work_dir / "pdf_blobs")
+
+    exit_code, stdout, stderr = _run([
+        "generate",
+        "--fund-code", "005680",
+        "--fund-name", "财通资管价值成长混合",
+        "--year", "2025",
+        "--format", "markdown",
+        "--work-dir", str(work_dir),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE, stdout + stderr
+
+    md_path = work_dir / "reports" / "005680-2025-analysis.md"
+    assert md_path.is_file(), f"报告文件不存在: {md_path}"
+    content = md_path.read_text(encoding="utf-8")
+
+    assert "🟢 稳定期" in content
+    assert "基金合同 2019 年生效" in content
+    assert "| 判定结果 | 🟡 建仓期 |" not in content

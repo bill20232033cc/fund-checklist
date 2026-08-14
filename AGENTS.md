@@ -50,7 +50,9 @@ PDF
 - **微信入口 / GUI / Web UI**：不在基金分析助手范围（研究 §3）
 - **BM25F 检索排序增强**（研究 §5 建议 1）：✅ 已完成（2026-08-13，确定性排序升级、不改变召回；设计见 `docs/design.md` §6.20）
 - **日志 VERBOSE 分级 + 有界脱敏诊断载荷**（研究 §5 建议 2）：✅ 已完成（2026-08-13，设计见 `docs/design.md` §6.21）
-- **后续 backlog 候选**：Tool Trace operator 对齐（研究 §5 建议 3）已规划（2026-08-13，MiMo plan review，实施状态见 `docs/implementation-control.md`）
+- **Tool Trace operator 对齐**（研究 §5 建议 3）：✅ 已完成（2026-08-13，只读分析器，设计见 `docs/design.md` §6.22）
+- **process-backed 工具执行（可抢占超时）**（研究 §2.1.4，落地 `DoclingConverter.convert_pdf` 阻塞转换子进程化 + 硬 deadline 杀子进程）：已规划（2026-08-13，MiMo plan review，实施状态见 `docs/implementation-control.md`；设计见 `docs/design.md` §6.23）
+- **后续 backlog 候选**：Host 级整 loop 进程隔离（Agent loop 整体子进程化，等真实异步需求，研究 §5 决策 5）、wait-resume 长事务工具治理（研究 §2.1.4 项 3，等批量下载/异步导入真实需求）
 
 Phase 5 已完成（2026-07-24）：
 - **LLM 自主工具调用**：`ask` 子命令走 LLM 自主决策工具调用路径（Slice 19A-19F）

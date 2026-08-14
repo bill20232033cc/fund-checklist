@@ -90,6 +90,7 @@ from .models import (
     MultiYearAnnualPerformanceSeries,
     MultiYearFeeSeries,
     MultiYearHoldingsSeries,
+    MultiYearMissingYearNote,
     PerformanceReturnExtraction,
     QueryRouteAttempt,
     QueryRouteResultKind,
@@ -763,6 +764,22 @@ _MANAGER_HOLDS_INTERVAL_RE = re.compile(
     r"^(?:>=|<=|>|<)?\d+(?:\.\d+)?(?:[~-]\d+(?:\.\d+)?)?$"
 )
 
+# 基金合同生效日抽取正则：日期必须紧跟在「基金合同生效日/合同于」之后，
+# 规避 163415 §4.1.2「本期 2025年4月8日（基金合同生效日）至2025年12月31日」
+# 经理任职口径误取。
+_CONTRACT_EFFECTIVE_DATE_RE = re.compile(
+    r"基金合同生效日\s*(?:为|：|:)?\s*[（(]?\s*(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日"
+)
+_CONTRACT_EXECUTED_RE = re.compile(
+    r"基金合同于\s*(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日[^。]{0,8}生效"
+)
+
+
+def _normalize_contract_effective_date(year: str, month: str, day: str) -> str:
+    """把「2019 年 03 月 25 日」归一化为 "YYYY-MM-DD"。"""
+
+    return f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
+
 
 def _normalize_cell_text(text: str) -> str:
     """去除单元格文本中的全部空白，用于 Docling 单元格噪声归一化。"""
@@ -1361,10 +1378,12 @@ class FundReadingService:
             requested_scope = _normalize_multi_year_requested_share_class(request.share_class)
             repository = _repository(Path(request.work_dir))
             rows_by_share: dict[str, dict[int, MultiYearAnnualPerformanceRow]] = {}
+            missing_notes: dict[int, str] = {}
 
             for year in normalized_years:
                 document = documents_by_year.get(year)
                 if document is None:
+                    missing_notes[year] = "catalog 中无该年度年报（未导入或未匹配）"
                     continue
                 try:
                     store = repository.load_store(document.document_id)
@@ -1402,6 +1421,7 @@ class FundReadingService:
                             series=(),
                             failure=ToolFailure(code=exc.code, message=exc.message),
                         )
+                    missing_notes[year] = exc.message
                     continue
 
                 if requested_scope is not None:
@@ -1422,6 +1442,7 @@ class FundReadingService:
                     requested_years=normalized_years,
                     share_class_scope=share_scope,
                     rows_by_year=rows_by_share.get(share_scope, {}),
+                    missing_notes=missing_notes,
                 )
                 for share_scope in candidate_scopes
                 if _multi_year_complete_count(rows_by_share.get(share_scope, {}))
@@ -2466,6 +2487,9 @@ class FundReadingService:
             fund_manager, fund_manager_citation = self._extract_fund_manager_with_citation(
                 request.fund_code, annual_docs, request.work_dir, request.fund_name,
             )
+            contract_effective_date, contract_citation = self._extract_contract_effective_date_with_citation(
+                request.fund_code, annual_docs, request.work_dir, request.fund_name,
+            )
             scale_info, scale_citation = self._extract_scale_info(request.fund_code, annual_docs, request.work_dir, request.fund_name)
 
             # 构建证据来源汇总
@@ -2477,6 +2501,7 @@ class FundReadingService:
                 performance_citations=performance_citations,
                 fund_manager_citation=fund_manager_citation,
                 scale_citation=scale_citation,
+                contract_citation=contract_citation,
             )
 
             # 计算确定性信号判断和风险清单
@@ -2525,6 +2550,7 @@ class FundReadingService:
                     scale_info=scale_info,
                     evidence=evidence,
                     signal_judgment=signal_judgment,
+                    contract_effective_date=contract_effective_date,
                 )
                 llm_warnings.extend(coordinator_warnings)
 
@@ -2569,6 +2595,7 @@ class FundReadingService:
                     evidence=evidence,
                     signal_judgment=signal_judgment,
                     risk_checklist=risk_checklist,
+                    contract_effective_date=contract_effective_date,
                 )
 
             report = FundReport(
@@ -2988,6 +3015,110 @@ class FundReadingService:
             holds_fund=holds_fund,
         ), manager_citation
 
+    def _extract_contract_effective_date_with_citation(
+        self,
+        fund_code: str,
+        annual_docs: list[AnnualReportDocument],
+        work_dir: Path,
+        fund_name: str = "",
+    ) -> tuple[str, Citation | None]:
+        """从最新年报提取基金合同生效日及 citation（建仓期判定真源）。
+
+        主路径：search_document("基金简介") 锚定标题含「基金简介」的节，扫描该节
+        section_ref 匹配的表，行文本含「基金合同生效日」且日期紧跟短语时归一化为
+        "YYYY-MM-DD"，Citation locator_kind=TABLE；回退 1：search_document
+        ("基金合同生效日") 逐命中节同样表行扫描；回退 2：read_section 节文本正则
+        （日期必须紧跟短语，规避经理任职口径误取），Citation locator_kind=SECTION；
+        全部失败返回 ("", None) fail-closed。
+
+        参数:
+            fund_code: 基金代码。
+            annual_docs: 多年度年报文档列表。
+            work_dir: 受控工作目录。
+            fund_name: 基金名称（写入 citation）。
+
+        返回:
+            (归一化日期 "YYYY-MM-DD" 或 "", Citation 或 None)。
+        """
+
+        if not annual_docs:
+            return "", None
+
+        latest_doc = max(annual_docs, key=lambda d: d.year)
+        repository = _repository(Path(work_dir))
+        try:
+            store = repository.load_store(latest_doc.document_id)
+        except Exception:
+            return "", None
+
+        tool_service = FundDocumentToolService({latest_doc.document_id: store})
+        doc_id = latest_doc.document_id
+
+        def _scan_table_rows(tables: tuple[TableSummary, ...], section_ref: str | None) -> tuple[str, Citation | None]:
+            """扫描指定节下的表行，命中「基金合同生效日」且日期紧跟短语。"""
+
+            for t in tables:
+                if t.section_ref != section_ref:
+                    continue
+                table = tool_service.read_table(doc_id, t.table_ref, max_rows=40)
+                if not hasattr(table, "rows"):
+                    continue
+                for row in table.rows:
+                    row_text = " ".join(str(cell) for cell in row)
+                    if "基金合同生效日" not in row_text:
+                        continue
+                    match = _CONTRACT_EFFECTIVE_DATE_RE.search(row_text)
+                    if match:
+                        return _normalize_contract_effective_date(*match.groups()), table.citation
+            return "", None
+
+        def _scan_section_text(section_ref: str) -> tuple[str, Citation | None]:
+            """从节正文正则提取合同生效日（日期必须紧跟短语）。"""
+
+            section = tool_service.read_section(doc_id, section_ref)
+            if not hasattr(section, "text"):
+                return "", None
+            match = _CONTRACT_EFFECTIVE_DATE_RE.search(section.text) or _CONTRACT_EXECUTED_RE.search(section.text)
+            if match:
+                return _normalize_contract_effective_date(*match.groups()), section.citation
+            return "", None
+
+        # 主路径：锚定标题含「基金简介」的节
+        search_results = tool_service.search_document(doc_id, "基金简介")
+        if not isinstance(search_results, ToolFailure):
+            for hit in search_results:
+                if "基金简介" in (hit.title or "") and hit.section_ref:
+                    tables = tool_service.list_tables(doc_id)
+                    if isinstance(tables, ToolFailure):
+                        continue
+                    date, citation = _scan_table_rows(tables, hit.section_ref)
+                    if date:
+                        return date, citation
+
+        # 回退 1：search_document("基金合同生效日") 逐命中节同样表行扫描
+        search_results = tool_service.search_document(doc_id, "基金合同生效日")
+        if not isinstance(search_results, ToolFailure):
+            for hit in search_results:
+                if not hit.section_ref:
+                    continue
+                tables = tool_service.list_tables(doc_id)
+                if isinstance(tables, ToolFailure):
+                    continue
+                date, citation = _scan_table_rows(tables, hit.section_ref)
+                if date:
+                    return date, citation
+
+        # 回退 2：read_section 节文本正则（只取「基金简介」节，规避任职口径误取）
+        search_results = tool_service.search_document(doc_id, "基金简介")
+        if not isinstance(search_results, ToolFailure):
+            for hit in search_results:
+                if "基金简介" in (hit.title or "") and hit.section_ref:
+                    date, citation = _scan_section_text(hit.section_ref)
+                    if date:
+                        return date, citation
+
+        return "", None
+
     def _extract_scale_info(
         self,
         fund_code: str,
@@ -3248,6 +3379,7 @@ class FundReadingService:
         evidence: ChapterEvidence | None = None,
         signal_judgment: SignalJudgment | None = None,
         risk_checklist: tuple[RiskChecklistItem, ...] | None = None,
+        contract_effective_date: str = "",
     ) -> list[ReportChapter]:
         """生成 8 章报告内容（模板对齐版）。"""
 
@@ -3273,6 +3405,7 @@ class FundReadingService:
                 fund_manager, scale_info, evidence,
                 signal_judgment, risk_checklist,
                 stress_test=stress_test if chapter_id == 6 else None,
+                contract_effective_date=contract_effective_date,
             )
             chapters.append(ReportChapter(
                 chapter_id=chapter_id,
@@ -3742,6 +3875,7 @@ class FundReadingService:
         signal_judgment: SignalJudgment | None = None,
         risk_checklist: tuple[RiskChecklistItem, ...] | None = None,
         stress_test: StressTestResult | None = None,
+        contract_effective_date: str = "",
     ) -> str:
         """回退用的模板章节生成（模板对齐版）。
 
@@ -3757,6 +3891,7 @@ class FundReadingService:
             signal_judgment: 确定性信号判断结果（Ch7 使用）。
             risk_checklist: 风险清单检查结果（Ch6 使用）。
             stress_test: 压力测试结果（Ch6 使用）。
+            contract_effective_date: 基金合同生效日（"YYYY-MM-DD"；未提取到时为空字符串）。
 
         返回:
             模板生成的 Markdown 文本。
@@ -3775,6 +3910,7 @@ class FundReadingService:
                 fund_manager, scale_info, evidence,
                 stress_test=st, signal_judgment=signal_judgment,
                 fund_type=fund_type,
+                contract_effective_date=contract_effective_date,
             )
             if data_table:
                 return data_table
@@ -4526,12 +4662,20 @@ def _multi_year_series_for_share(
     requested_years: tuple[int, ...],
     share_class_scope: str,
     rows_by_year: dict[int, MultiYearAnnualPerformanceRow],
+    missing_notes: dict[int, str],
 ) -> MultiYearAnnualPerformanceSeries:
     """构造单一 share class 的 10I series DTO。"""
 
     rows = tuple(rows_by_year[year] for year in requested_years if year in rows_by_year)
     covered_years = tuple(row.year for row in rows)
     missing_years = tuple(year for year in requested_years if year not in rows_by_year)
+    missing_year_notes = tuple(
+        MultiYearMissingYearNote(
+            year=year,
+            reason=missing_notes.get(year, "该年度未返回完整年度业绩字段"),
+        )
+        for year in missing_years
+    )
     coverage_count = len(covered_years)
     coverage_status = (
         _COVERAGE_STATUS_COMPLETE
@@ -4550,6 +4694,7 @@ def _multi_year_series_for_share(
         share_class_scope=share_class_scope,
         rows=rows,
         citations=citations,
+        missing_year_notes=missing_year_notes,
     )
 
 
@@ -5624,10 +5769,16 @@ def _annual_performance_table_share_scopes(
 
 
 def _annual_performance_share_scope_from_rows(rows: tuple[tuple[str, ...], ...]) -> str | None:
-    """从年度业绩表的受控行标签识别 A/C 份额类别。"""
+    """从年度业绩表的受控行标签识别 A/C 份额类别。
+
+    判别顺序：含「自基金转型起至今」→ A（转型基金 A 类）；含「过去三年/过去五年」
+    → A（非转型 A 类历史更长，多年度行存在）；仅「自基金合同生效起至今」→ C。
+    """
 
     normalized_rows = tuple(_normalize_disclosure_text(cell) for row in rows for cell in row)
     if any("自基金转型起至今" in cell for cell in normalized_rows):
+        return _SHARE_SCOPE_A
+    if any(("过去三年" in cell or "过去五年" in cell) for cell in normalized_rows):
         return _SHARE_SCOPE_A
     if any("自基金合同生效起至今" in cell for cell in normalized_rows):
         return _SHARE_SCOPE_C
@@ -5713,10 +5864,18 @@ def _performance_table_citation_refs(result: AgentRunResult) -> tuple[tuple[str,
 
 
 def _annual_performance_source_section_refs(result: AgentRunResult) -> tuple[str, ...]:
-    """返回命中 10F 固定 title family 的 section refs。"""
+    """返回命中 10F 固定 title family 的 section refs。
+
+    title-family 命中 = 前缀行命中 OR answer 正文包含（raw-excerpt 兜底：Docling
+    section 切分把 3.2.1 标题嵌在「3.2 基金净值表现」正文内时首行/前缀行未命中）。
+    answer 为有界公开输出；下游仍要求 SECTION/TABLE citation、列签名与「过去一年」行。
+    """
 
     title_lines = _target_title_lines(result.answer)
-    if not any(_ANNUAL_PERFORMANCE_TITLE_FAMILY in line for line in title_lines):
+    title_family_hit = any(_ANNUAL_PERFORMANCE_TITLE_FAMILY in line for line in title_lines) or (
+        _ANNUAL_PERFORMANCE_TITLE_FAMILY in result.answer
+    )
+    if not title_family_hit:
         raise DocumentToolError(FailureCode.NOT_FOUND, "annual performance 目标 title-family 未找到")
     section_refs = tuple(
         dict.fromkeys(

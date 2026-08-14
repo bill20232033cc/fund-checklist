@@ -1895,6 +1895,7 @@ class ReportGenerationCoordinator:
         evidence: Any = None,
         signal_judgment: Any = None,
         fund_type: str = "",
+        contract_effective_date: str = "",
     ) -> tuple[dict[int, str], list[str]]:
         """生成报告。
 
@@ -1906,6 +1907,7 @@ class ReportGenerationCoordinator:
             fund_manager: 基金经理信息。
             scale_info: 规模信息。
             evidence: 证据来源汇总。
+            contract_effective_date: 基金合同生效日（"YYYY-MM-DD"；未提取到时为空字符串）。
 
         返回:
             (章节内容字典, 警告列表)。
@@ -1927,6 +1929,7 @@ class ReportGenerationCoordinator:
                 fund_manager, scale_info, evidence,
                 stress_test=st, signal_judgment=signal_judgment,
                 fund_type=fund_type,
+                contract_effective_date=contract_effective_date,
             )
             global_numbers.update(re.findall(r'\d+\.?\d*', dt.replace(',', '')))
 
@@ -1962,6 +1965,7 @@ class ReportGenerationCoordinator:
                     signal_judgment=signal_judgment,
                     global_allowed_numbers=global_numbers,
                     fund_type=fund_type,
+                    contract_effective_date=contract_effective_date,
                 )
                 for cid in range(1, 7)
             }
@@ -2026,6 +2030,7 @@ class ReportGenerationCoordinator:
                     signal_judgment=signal_judgment,
                     global_allowed_numbers=global_numbers,
                     fund_type=fund_type,
+                    contract_effective_date=contract_effective_date,
                     use_chapter_summaries=True,
                     chapter_summaries={cid: chapter_contents.get(cid, "") for cid in range(1, 7)},
                 )
@@ -2058,6 +2063,7 @@ class ReportGenerationCoordinator:
         signal_judgment: Any = None,
         global_allowed_numbers: set[str] | None = None,
         fund_type: str = "",
+        contract_effective_date: str = "",
         use_chapter_summaries: bool = False,
         chapter_summaries: dict[int, str] | None = None,
     ) -> tuple[int, str | None, ChapterProcessState, list[str]]:
@@ -2095,6 +2101,7 @@ class ReportGenerationCoordinator:
                 signal_judgment=signal_judgment,
                 global_allowed_numbers=global_allowed_numbers,
                 fund_type=fund_type,
+                contract_effective_date=contract_effective_date,
                 llm_client=llm_client,
             )
             state = self._get_state(chapter_id) or ChapterProcessState(chapter_id=chapter_id)
@@ -2126,6 +2133,7 @@ class ReportGenerationCoordinator:
         signal_judgment: Any = None,
         global_allowed_numbers: set[str] | None = None,
         fund_type: str = "",
+        contract_effective_date: str = "",
         llm_client: Any | None = None,
     ) -> str | None:
         """生成并审计单个章节。
@@ -2154,6 +2162,7 @@ class ReportGenerationCoordinator:
                 signal_judgment=signal_judgment,
                 global_allowed_numbers=global_allowed_numbers,
                 fund_type=fund_type,
+                contract_effective_date=contract_effective_date,
                 llm_client=llm_client,
             )
         except Exception:
@@ -2181,6 +2190,7 @@ class ReportGenerationCoordinator:
         chapter_summaries: dict[int, str] | None = None,
         signal_judgment: Any = None,
         fund_type: str = "",
+        contract_effective_date: str = "",
         llm_client: Any | None = None,
     ) -> str | None:
         """内部实现，由 _generate_and_audit_chapter 包装异常处理。"""
@@ -2207,6 +2217,7 @@ class ReportGenerationCoordinator:
             stress_test=stress_test,
             signal_judgment=signal_judgment,
             fund_type=fund_type,
+            contract_effective_date=contract_effective_date,
         )
 
         # 生成章节内容（LLM 或模板）

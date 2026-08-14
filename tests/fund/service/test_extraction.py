@@ -357,6 +357,7 @@ class _PerformanceExtractionHost:
     include_table_citation: bool = True
     cited_table_refs: tuple[str, ...] = ("table-0000",)
     source_title_line: str | None = None
+    raw_excerpt: bool = False
 
     def __init__(self, tool_service) -> None:
         """保存 tool service 但不访问其内部 store。"""
@@ -386,9 +387,16 @@ class _PerformanceExtractionHost:
                 )
                 for table_ref in _PerformanceExtractionHost.cited_table_refs
             )
-        title_line = _PerformanceExtractionHost.source_title_line or f"来源章节: 3.2.1 {target_title}"
+        if _PerformanceExtractionHost.raw_excerpt:
+            answer = (
+                "3.2 基金净值表现\n\n"
+                "本基金份额净值增长率及其与同期业绩比较基准收益率的比较如下表所示。"
+            )
+        else:
+            title_line = _PerformanceExtractionHost.source_title_line or f"来源章节: 3.2.1 {target_title}"
+            answer = f"{title_line}\n\n相关表格:\n{target_title}"
         return AgentRunResult(
-            answer=f"{title_line}\n\n相关表格:\n{target_title}",
+            answer=answer,
             citations=tuple(citations),
             tool_trace=(_trace_search(document_id, query, "success"),),
             failure=None,
@@ -2313,6 +2321,141 @@ def test_extract_annual_performance_config_error_maps_to_schema_drift(monkeypatc
     assert result.failure.code is FailureCode.SCHEMA_DRIFT
 
 
+def test_annual_performance_source_section_refs_accepts_raw_excerpt_answer() -> None:
+    """raw-excerpt answer（3.2.1 标题嵌在正文、首行非标题）→ 命中 title-family。"""
+
+    result = AgentRunResult(
+        answer="3.2 基金净值表现\n\n本基金份额净值增长率及其与同期业绩比较基准收益率的比较如下：",
+        citations=(_citation("doc-1", LocatorKind.SECTION, section_ref="section-0041"),),
+        tool_trace=(),
+    )
+    assert reading_service_module._annual_performance_source_section_refs(result) == ("section-0041",)
+
+
+def test_annual_performance_source_section_refs_rejects_answer_without_title_family() -> None:
+    """answer 首行与正文均不含 title-family → NOT_FOUND。"""
+
+    result = AgentRunResult(
+        answer="3.2 基金净值表现\n\n本基金近一年份额净值增长率为-22.35%。",
+        citations=(_citation("doc-1", LocatorKind.SECTION, section_ref="section-0041"),),
+        tool_trace=(),
+    )
+    with pytest.raises(DocumentToolError) as exc:
+        reading_service_module._annual_performance_source_section_refs(result)
+    assert exc.value.code is FailureCode.NOT_FOUND
+    assert "title-family" in exc.value.message
+
+
+def test_annual_performance_share_scope_from_rows_past_three_years_maps_to_a() -> None:
+    """非转型 A 表含「过去三年」行 → A（尽管同时含「自基金合同生效起至今」）。"""
+
+    rows = (
+        ("阶段", "份额净值 增长率①", "业绩比较基准收益率③"),
+        ("过去一年", "-22.35%", "-15.20%"),
+        ("过去三年", "-10.00%", "-8.00%"),
+        ("自基金合同生效起至今", "-5.00%", "-4.00%"),
+    )
+    assert reading_service_module._annual_performance_share_scope_from_rows(rows) == "A"
+
+
+def test_annual_performance_share_scope_from_rows_past_five_years_maps_to_a() -> None:
+    """非转型 A 表含「过去五年」行 → A。"""
+
+    rows = (
+        ("阶段", "份额净值 增长率①", "业绩比较基准收益率③"),
+        ("过去一年", "5.00%", "4.00%"),
+        ("过去五年", "20.00%", "18.00%"),
+        ("自基金合同生效起至今", "25.00%", "22.00%"),
+    )
+    assert reading_service_module._annual_performance_share_scope_from_rows(rows) == "A"
+
+
+def test_annual_performance_share_scope_from_rows_contract_effective_only_maps_to_c() -> None:
+    """C 表仅「自基金合同生效起至今」（无过去三年/五年）→ C。"""
+
+    rows = (
+        ("阶段", "份额净值 增长率①", "业绩比较基准收益率③"),
+        ("过去一年", "-22.59%", "-15.30%"),
+        ("自基金合同生效起至今", "-5.10%", "-4.10%"),
+    )
+    assert reading_service_module._annual_performance_share_scope_from_rows(rows) == "C"
+
+
+def test_annual_performance_share_scope_from_rows_transition_label_still_maps_to_a() -> None:
+    """004393 转型年回归：含「自基金转型起至今」→ A。"""
+
+    rows = (
+        ("阶段", "份额净值 增长率①", "业绩比较基准收益率③"),
+        ("过去一年", "2.12%", "1.50%"),
+        ("自基金转型起至今", "5.00%", "4.00%"),
+    )
+    assert reading_service_module._annual_performance_share_scope_from_rows(rows) == "A"
+
+
+def test_extract_annual_performance_raw_excerpt_binds_share_a_from_cited_table_0010(tmp_path: Path) -> None:
+    """005680-2022 场景：raw-excerpt answer + 仅 cite A 表 → share=A，未 cite 的 C 表不消费。"""
+
+    _PerformanceExtractionHost.calls.clear()
+    _PerformanceExtractionHost.include_table_citation = True
+    _PerformanceExtractionHost.cited_table_refs = ("table-0000",)
+    _PerformanceExtractionHost.raw_excerpt = True
+    _PerformanceConverter.payload = staticmethod(
+        lambda: _performance_docling_payload(
+            section_title="3.2 基金净值表现",
+            section_lines=("财通资管价值成长混合A", "财通资管价值成长混合C"),
+            table_rows=(
+                (
+                    ("阶段", "份额净值 增长率①", "份额净值增长率标准差②", "业绩比较基准收益率③", "业绩比较基准收益率标准差④", "①－③", "②－④"),
+                    ("过去三个月", "-0.10%", "1.00%", "-0.05%", "0.90%", "-0.05%", "0.10%"),
+                    ("过去六个月", "-2.00%", "1.10%", "-1.50%", "1.00%", "-0.50%", "0.10%"),
+                    ("过去一年", "-22.35%", "1.20%", "-15.20%", "1.10%", "-7.15%", "0.10%"),
+                    ("过去三年", "-10.00%", "1.30%", "-8.00%", "1.20%", "-2.00%", "0.10%"),
+                    ("自基金合同生效起至今", "-5.00%", "1.40%", "-4.00%", "1.30%", "-1.00%", "0.10%"),
+                ),
+                (
+                    ("阶段", "份额净值 增长率①", "份额净值增长率标准差②", "业绩比较基准收益率③", "业绩比较基准收益率标准差④", "①－③", "②－④"),
+                    ("过去三个月", "-0.15%", "1.00%", "-0.05%", "0.90%", "-0.10%", "0.10%"),
+                    ("过去六个月", "-2.05%", "1.10%", "-1.50%", "1.00%", "-0.55%", "0.10%"),
+                    ("过去一年", "-22.59%", "1.20%", "-15.30%", "1.10%", "-7.29%", "0.10%"),
+                    ("自基金合同生效起至今", "-5.10%", "1.40%", "-4.10%", "1.30%", "-1.00%", "0.10%"),
+                ),
+            ),
+        )
+    )
+    pdf_path = tmp_path / "report.pdf"
+    work_dir = tmp_path / "work"
+    _write_pdf(pdf_path)
+    service = FundReadingService(
+        converter_factory=_PerformanceConverter,
+        host_factory=_PerformanceExtractionHost,
+    )
+
+    try:
+        result = service.extract_annual_performance(
+            reading_service_module.ExtractAnnualPerformanceRequest(
+                pdf_path=pdf_path,
+                fund_code="005680",
+                fund_name="财通资管价值成长混合",
+                year=2022,
+                work_dir=work_dir,
+            )
+        )
+    finally:
+        _PerformanceExtractionHost.raw_excerpt = False
+
+    assert result.failure is None
+    assert len(result.fields) == 2
+    assert all(field.share_class_scope == "A" for field in result.fields)
+    assert all(field.report_year == 2022 for field in result.fields)
+    assert all(field.source_period_label == "过去一年" for field in result.fields)
+    assert all(field.citation.locator.table_ref == "table-0000" for field in result.fields)
+    values = {field.field_name: field.decimal_percent_text for field in result.fields}
+    assert values == {
+        "annual_nav_growth_rate": "-22.35%",
+        "annual_benchmark_return_rate": "-15.20%",
+    }
+
+
 def test_extract_annual_excess_return_reads_disclosed_column_without_section_number(tmp_path: Path) -> None:
     """10G 只从固定标题族标准表 ①－③ 列抽取年度超额收益。"""
 
@@ -2549,6 +2692,7 @@ def test_aggregate_multi_year_annual_performance_returns_complete_five_year_seri
     assert series.requested_years == years
     assert series.covered_years == years
     assert series.missing_years == ()
+    assert series.missing_year_notes == ()
     assert series.coverage_status == "complete"
     assert series.coverage_count == 5
     assert series.minimum_required_count == 3
@@ -2587,6 +2731,8 @@ def test_aggregate_multi_year_annual_performance_returns_partial_for_four_comple
     assert series.coverage_count == 4
     assert series.covered_years == (2020, 2022, 2023, 2024)
     assert series.missing_years == (2021,)
+    assert tuple(note.year for note in series.missing_year_notes) == (2021,)
+    assert "catalog 中无该年度年报" in series.missing_year_notes[0].reason
 
 
 def test_aggregate_multi_year_annual_performance_returns_partial_for_three_complete_years(
@@ -2619,6 +2765,126 @@ def test_aggregate_multi_year_annual_performance_returns_partial_for_three_compl
     assert series.coverage_count == 3
     assert series.covered_years == (2020, 2022, 2024)
     assert series.missing_years == (2021, 2023)
+    assert tuple(note.year for note in series.missing_year_notes) == (2021, 2023)
+    assert all(note.reason == "missing annual fields" for note in series.missing_year_notes)
+
+
+def test_aggregate_multi_year_annual_performance_carries_missing_year_note(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """单年度 10F NOT_FOUND message 必须透传到 missing_year_notes。"""
+
+    years = (2020, 2021, 2022, 2023, 2024)
+    service = FundReadingService(converter_factory=_FakeConverter)
+    work_dir, documents = _import_annual_documents(service, tmp_path, years)
+    values = {
+        year: {"A": (f"{year}.1%", f"{year}.2%", f"{year}.3%")}
+        for year in years
+    }
+    _install_multi_year_fake_extractors(monkeypatch, service, values)
+
+    original_annual = service._extract_annual_performance_from_store
+    transition_message = (
+        "annual performance 过去一年完整字段缺失：业绩阶段表存在但无「过去一年」行"
+        "（表内仅披露「自基金转型起至今」等期间，转型当年无全年份额净值增长率）"
+    )
+
+    def fake_annual_2022(*, document_id, store, report_year, share_class):
+        if report_year == 2022:
+            return reading_service_module.ExtractAnnualPerformanceResult(
+                document_id=document_id,
+                fields=(),
+                failure=ToolFailure(code=FailureCode.NOT_FOUND, message=transition_message),
+            )
+        return original_annual(document_id=document_id, store=store, report_year=report_year, share_class=share_class)
+
+    monkeypatch.setattr(service, "_extract_annual_performance_from_store", fake_annual_2022)
+
+    result = service.aggregate_multi_year_annual_performance(
+        AggregateMultiYearAnnualPerformanceRequest(
+            fund_code=REAL_SMOKE_FUND_CODE,
+            requested_years=years,
+            annual_report_documents=documents,
+            work_dir=work_dir,
+        )
+    )
+
+    assert result.failure is None
+    series = result.series[0]
+    assert series.coverage_status == "partial"
+    assert series.missing_years == (2022,)
+    assert len(series.missing_year_notes) == 1
+    note = series.missing_year_notes[0]
+    assert note.year == 2022
+    assert "转型当年无全年份额净值增长率" in note.reason
+    assert tuple(row.year for row in series.rows) == (2020, 2021, 2023, 2024)
+
+
+def test_aggregate_multi_year_annual_performance_carries_not_in_catalog_note(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """catalog 外年份的缺失原因必须说明「未导入或未匹配」。"""
+
+    years = (2020, 2021, 2022, 2023, 2024)
+    service = FundReadingService(converter_factory=_FakeConverter)
+    work_dir, documents = _import_annual_documents(service, tmp_path, years)
+    provided_documents = tuple(document for document in documents if document.year != 2021)
+    values = {
+        year: {"A": (f"{year}.1%", f"{year}.2%", f"{year}.3%")}
+        for year in years
+    }
+    _install_multi_year_fake_extractors(monkeypatch, service, values)
+
+    result = service.aggregate_multi_year_annual_performance(
+        AggregateMultiYearAnnualPerformanceRequest(
+            fund_code=REAL_SMOKE_FUND_CODE,
+            requested_years=years,
+            annual_report_documents=provided_documents,
+            work_dir=work_dir,
+        )
+    )
+
+    assert result.failure is None
+    series = result.series[0]
+    assert series.missing_years == (2021,)
+    assert len(series.missing_year_notes) == 1
+    note = series.missing_year_notes[0]
+    assert note.year == 2021
+    assert "catalog 中无该年度年报" in note.reason
+
+
+def test_aggregate_multi_year_annual_performance_fills_fallback_note_for_missing_year(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """缺失年份无显式原因时必须补默认说明，保证每个缺失年份都有原因。"""
+
+    years = (2020, 2021, 2022, 2023, 2024)
+    service = FundReadingService(converter_factory=_FakeConverter)
+    work_dir, documents = _import_annual_documents(service, tmp_path, years)
+    values = {
+        year: {"A": (f"{year}.1%", f"{year}.2%", f"{year}.3%")}
+        for year in years
+    }
+    for year in (2020, 2022, 2024):
+        values[year]["C"] = (f"{year}.4%", f"{year}.5%", f"{year}.6%")
+    _install_multi_year_fake_extractors(monkeypatch, service, values)
+
+    result = service.aggregate_multi_year_annual_performance(
+        AggregateMultiYearAnnualPerformanceRequest(
+            fund_code=REAL_SMOKE_FUND_CODE,
+            requested_years=years,
+            annual_report_documents=documents,
+            work_dir=work_dir,
+        )
+    )
+
+    assert result.failure is None
+    series_c = next(series for series in result.series if series.share_class_scope == "C")
+    assert series_c.missing_years == (2021, 2023)
+    assert all(note.reason == "该年度未返回完整年度业绩字段" for note in series_c.missing_year_notes)
 
 
 def test_aggregate_multi_year_annual_performance_fails_not_found_below_three_complete_years(

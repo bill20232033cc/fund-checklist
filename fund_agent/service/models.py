@@ -340,6 +340,26 @@ class AnnualPerformanceFieldCitation:
 
 
 @dataclass(frozen=True)
+class MultiYearMissingYearNote:
+    """10I 多年度缺失年份的单条原因说明。
+
+    参数:
+        year: 缺失的自然年度。
+        reason: 缺失原因；单年度抽取失败时复用 10F/10G 的 NOT_FOUND message，
+            catalog 无该年度年报时给出「未导入或未匹配」说明。
+
+    返回:
+        不可变缺失原因 note DTO。
+
+    异常:
+        本模型不执行 I/O，不抛出业务异常。
+    """
+
+    year: int
+    reason: str
+
+
+@dataclass(frozen=True)
 class MultiYearAnnualPerformanceRow:
     """10I 多年度年度业绩单年 row。
 
@@ -379,6 +399,7 @@ class MultiYearAnnualPerformanceSeries:
         share_class_scope: 本 series 对应的份额类别。
         rows: 按年度升序排列的年度业绩 rows。
         citations: 所有 row 的字段级 table locator citations。
+        missing_year_notes: 缺失年份的逐条原因说明；仅覆盖 missing_years 内的年份。
 
     返回:
         不可变多年度 series DTO。
@@ -397,6 +418,7 @@ class MultiYearAnnualPerformanceSeries:
     share_class_scope: str
     rows: tuple[MultiYearAnnualPerformanceRow, ...]
     citations: tuple[AnnualPerformanceFieldCitation, ...]
+    missing_year_notes: tuple[MultiYearMissingYearNote, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -963,6 +985,7 @@ class ChapterEvidence:
         performance_citations: 业绩数据 citation（按年份）。
         fund_manager_citation: 基金经理信息 citation。
         scale_citation: 规模信息 citation。
+        contract_citation: 基金合同生效日 citation（建仓期判定真源；可空）。
 
     返回:
         不可变证据来源 DTO。
@@ -975,6 +998,7 @@ class ChapterEvidence:
     performance_citations: dict[int, Citation | None] = field(default_factory=dict)
     fund_manager_citation: Citation | None = None
     scale_citation: Citation | None = None
+    contract_citation: Citation | None = None
 
 
 @dataclass(frozen=True)

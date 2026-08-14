@@ -243,6 +243,7 @@ def generate_data_table(
     stress_test: StressTestResult | None = None,
     signal_judgment: SignalJudgment | None = None,
     fund_type: str = "",
+    contract_effective_date: str = "",
 ) -> str:
     """程序化生成数据表格（数字 100% 从数据 dict 提取，不经过 LLM）。
 
@@ -254,6 +255,7 @@ def generate_data_table(
         scale_info: 规模信息。
         evidence: 证据来源汇总（可选）。
         fund_type: 基金类型（用于条件渲染）。
+        contract_effective_date: 基金合同生效日（"YYYY-MM-DD"；未提取到时为空字符串）。
 
     返回:
         Markdown 格式的数据表格文本（含证据来源小节）。
@@ -558,10 +560,6 @@ def generate_data_table(
                                     stage_reason = f"权益投资规模变动（代理指标）同比下降 {abs(growth_rate):.0%}，超过30%阈值"
                 except (ValueError, AttributeError):
                     pass
-            # 基金经理变更检测（如果 fund_manager 有变更记录）
-            if fund_manager and not fund_manager.tenure_start:
-                stage = "转型期"
-                stage_reason = "基金经理信息缺失，可能涉及变更"
         # 资产配置结构转型检测（权益→基金大幅切换 → 转型期，优先级高于建仓期）
         alloc_years = sorted(allocation.keys())
         if len(alloc_years) >= 2 and stage != "转型期":
@@ -593,18 +591,21 @@ def generate_data_table(
                         f"基金投资从{earliest_fund:,.0f}增至{latest_fund:,.0f}（>10倍）"
                     )
 
-        # 建仓期检测（被动基金跳过：仓位由指数规则决定，不依赖经理建仓）
-        if not is_passive and fund_manager and fund_manager.tenure_start:
-            try:
-                import re as _re
-                year_match = _re.search(r'(\d{4})', fund_manager.tenure_start)
-                if year_match:
-                    start_year = int(year_match.group(1))
-                    if report_year - start_year < 2:
-                        stage = "建仓期"
-                        stage_reason = f"基金经理任职于{start_year}年，管理本基金不足2年"
-            except (ValueError, AttributeError):
-                pass
+        # 建仓期检测（产品生命周期口径：合同生效后成立不足 2 年才判建仓期；
+        # 被动基金跳过：仓位由指数规则决定，不依赖建仓；成立日期缺失 fail-closed，
+        # 不采用基金经理任职年限代理）
+        if not is_passive and contract_effective_date:
+            import re as _re
+            year_match = _re.search(r'(\d{4})', contract_effective_date)
+            if year_match:
+                contract_year = int(year_match.group(1))
+                if report_year - contract_year < 2 and stage != "转型期":
+                    stage = "建仓期"
+                    stage_reason = f"基金合同 {contract_year} 年生效，成立不足2年"
+                elif stage == "稳定期":
+                    stage_reason = f"基金合同 {contract_year} 年生效，成立已满2年，未触发建仓期"
+        elif not is_passive and not contract_effective_date and stage == "稳定期":
+            stage_reason = "未提取到基金合同生效日，建仓期判定跳过（不采用基金经理任职年限代理）"
 
         stage_labels = {
             "转型期": "🔴 转型期（优先级最高）",
@@ -615,6 +616,7 @@ def generate_data_table(
         }
         lines.append(f"| 判定结果 | {stage_labels.get(stage, stage)} |")
         lines.append(f"| 判定依据 | {stage_reason} |")
+        lines.append(f"| 基金合同生效日 | {contract_effective_date or '未提取到'} |")
         lines.append("")
         lines.append("阶段优先级：转型期 > 建仓期 > 膨胀期 > 萎缩期 > 稳定期")
         lines.append("时间窗口：同比（当前年 vs 上一年）")
@@ -916,6 +918,10 @@ def generate_evidence_section(
             formatted = format_citation(evidence.scale_citation)
             if formatted:
                 lines.append(f"**规模数据来源**：{formatted}")
+        if evidence.contract_citation:
+            formatted = format_citation(evidence.contract_citation)
+            if formatted:
+                lines.append(f"**基金合同生效信息来源**：{formatted}")
 
     if len(lines) <= 1:
         return ""
@@ -960,6 +966,7 @@ class LlmChapterGenerator:
         stress_test: StressTestResult | None = None,
         signal_judgment: SignalJudgment | None = None,
         fund_type: str = "",
+        contract_effective_date: str = "",
     ) -> str | None:
         """生成单个章节（程序表格 + LLM 分析）。
 
@@ -971,6 +978,7 @@ class LlmChapterGenerator:
             scale_info: 规模信息。
             evidence: 证据来源汇总（可选）。
             fund_type: 基金类型（index_etf/index_feeder/index_fund/bond_fund/active_fund）。
+            contract_effective_date: 基金合同生效日（"YYYY-MM-DD"；未提取到时为空字符串）。
 
         返回:
             完整的章节 Markdown；LLM 失败时返回 None（调用方应回退模板）。
@@ -983,6 +991,7 @@ class LlmChapterGenerator:
             performance, holdings, allocation, fees,
             fund_manager, scale_info, evidence, stress_test,
             signal_judgment, fund_type=fund_type,
+            contract_effective_date=contract_effective_date,
         )
 
         # 阶段 2：使用 PromptComposer 渲染模板

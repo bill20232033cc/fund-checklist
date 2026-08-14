@@ -93,3 +93,69 @@ def test_parser_health_fails_when_no_text_and_no_sections(tmp_path) -> None:
         DoclingDocumentStore(identity=_identity(), json_path=json_path)
 
     assert exc_info.value.code is FailureCode.PARSER_HEALTH_FAILED
+
+
+def test_convert_timeout_maps_unavailable_and_cleans_json(tmp_path, monkeypatch) -> None:
+    """子进程超时必须映射为 UNAVAILABLE 并清理残留 JSON。"""
+
+    from fund_agent.fund.document_tools.interruptible_process import SubprocessTimeoutError
+
+    identity = _identity()
+    json_path = (
+        tmp_path / "docling" / identity.document_id / f"{identity.document_id}.docling.json"
+    )
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text('{"partial": true}', encoding="utf-8")
+
+    def _raise_timeout(self, pdf_bytes, do_ocr, json_path) -> None:
+        """模拟子进程硬超时。"""
+
+        raise SubprocessTimeoutError("subprocess timeout")
+
+    monkeypatch.setattr(DoclingConverter, "_run_child_conversion", _raise_timeout)
+    converter = DoclingConverter(output_root=tmp_path / "docling")
+
+    with pytest.raises(DocumentToolError) as exc_info:
+        converter.convert_pdf(identity=identity, pdf_bytes=b"fake")
+
+    assert exc_info.value.code is FailureCode.UNAVAILABLE
+    assert "Docling 转换超时" in exc_info.value.message
+    assert not json_path.exists()
+
+
+def test_convert_child_failure_code_maps(tmp_path, monkeypatch) -> None:
+    """子进程 envelope 失败分类必须映射到稳定 FailureCode 并清理残留 JSON。"""
+
+    def _fail_convert(self, pdf_bytes, do_ocr, json_path) -> dict[str, str | None]:
+        """模拟子进程返回 docling_convert_failed。"""
+
+        return {"failure_code": "docling_convert_failed", "message": "Docling PDF 转换失败"}
+
+    monkeypatch.setattr(DoclingConverter, "_run_child_conversion", _fail_convert)
+    converter = DoclingConverter(output_root=tmp_path / "docling")
+
+    with pytest.raises(DocumentToolError) as exc_info:
+        converter.convert_pdf(identity=_identity(), pdf_bytes=b"fake")
+
+    assert exc_info.value.code is FailureCode.DOCLING_CONVERT_FAILED
+    assert exc_info.value.message == "Docling PDF 转换失败"
+
+    def _unavailable(self, pdf_bytes, do_ocr, json_path) -> dict[str, str | None]:
+        """模拟子进程返回 unavailable。"""
+
+        return {"failure_code": "unavailable", "message": "Docling 转换超时"}
+
+    identity = _identity()
+    json_path = (
+        tmp_path / "docling" / identity.document_id / f"{identity.document_id}.docling.json"
+    )
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text('{"partial": true}', encoding="utf-8")
+    monkeypatch.setattr(DoclingConverter, "_run_child_conversion", _unavailable)
+    converter_unavailable = DoclingConverter(output_root=tmp_path / "docling")
+
+    with pytest.raises(DocumentToolError) as exc_info:
+        converter_unavailable.convert_pdf(identity=identity, pdf_bytes=b"fake")
+
+    assert exc_info.value.code is FailureCode.UNAVAILABLE
+    assert not json_path.exists()

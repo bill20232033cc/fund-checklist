@@ -16,6 +16,10 @@ uv run pytest tests/fund/cli/test_cli.py
 - 改名后同一 PDF 仍使用内容指纹生成稳定 `document_id`。
 - 重复导入同一 PDF 复用 `document_id`，但 `local_import_id` 不进入 public identity route。
 - 真实本地样本 PDF 通过 `DoclingConverter` 写出受控 Docling JSON。
+- 新增 `tests/fund/document_tools/test_interruptible_process.py`：进程隔离执行原语（子进程结果回收 / 超时 terminate→kill→reap / 子进程异常 envelope / 单次生命周期互斥）的真实子进程测试。
+- 新增 `tests/fund/service/test_stage_determination.py`（阶段判定「建仓期」真源修正：合同生效日口径 6 确定性用例）+ `tests/fund/test_e2e_regression.py::test_extract_contract_effective_date_005680` + `tests/fund/cli/test_cli.py::test_generate_cli_005680_stage_not_building_phase`；验证命令：`uv run pytest tests/fund/service/test_stage_determination.py -v --tb=short`、`uv run pytest tests/fund/cli/test_cli.py -k "005680_stage" -v --tb=short`、`uv run pytest tests/fund/test_e2e_regression.py -v --tb=short`。
+- 新增 multi-year 缺失原因透传：`MultiYearAnnualPerformanceSeries.missing_year_notes` 逐条透传缺失年份原因（10F/10G NOT_FOUND message / catalog 缺失说明 / 默认说明），CLI JSON 与 interactive 证据文本均带出；验证命令：`uv run pytest tests/fund/service/test_extraction.py -k "aggregate_multi_year or missing_year_note" -v --tb=short`、`uv run pytest tests/fund/agent/test_llm_tool_loop.py -k "aggregate or missing_year" -v --tb=short`、`uv run pytest tests/fund/cli/test_cli.py -k "multi_year" -v --tb=short`、`uv run pytest tests/fund/test_e2e_regression.py -v --tb=short`。
+- 新增 005680-2022 年度业绩抽取缺口修复：title-family raw-excerpt 兜底判定 + 非转型 A/C 行级 share-scope 判别（`tests/fund/service/test_extraction.py` 用例 + `tests/fund/test_e2e_regression.py::test_multi_year_005680_2022_covered`）；验证命令：`uv run pytest tests/fund/service/test_extraction.py -k "annual_performance or share_scope or missing_year_note" -v --tb=short`、`uv run pytest tests/fund/test_e2e_regression.py -v --tb=short`。
 - Docling conversion 失败分类为 `docling_convert_failed`。
 - Docling JSON 无可读文本/章节索引时分类为 `parser_health_failed`。
 - DoclingDocumentStore 返回带 locator 的章节、bounded section content、表格投影和 ranked search excerpt。

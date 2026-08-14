@@ -14,6 +14,11 @@ from fund_agent.fund.document_tools.constants import (
     FailureCode,
 )
 from fund_agent.fund.document_tools.errors import DocumentToolError
+from fund_agent.fund.document_tools.interruptible_process import (
+    SubprocessExecutionError,
+    SubprocessTimeoutError,
+    run_in_subprocess,
+)
 from fund_agent.fund.document_tools.models import DoclingConversionResult, ReportIdentity
 
 
@@ -22,7 +27,8 @@ class DoclingConverter:
 
     参数:
         output_root: Docling JSON 输出根目录；测试应使用 tmp_path 或忽略目录。
-        timeout_seconds: 单 PDF 转换超时预算，默认 300 秒。
+        timeout_seconds: 单 PDF 转换超时预算，默认 300 秒；既是 Docling 内部
+            document_timeout，也是可抢占子进程的硬 deadline。
         do_ocr: 是否启用 Docling OCR；本地文本型 PDF smoke 默认关闭。
 
     返回:
@@ -46,7 +52,7 @@ class DoclingConverter:
         self._do_ocr = do_ocr
 
     def convert_pdf(self, *, identity: ReportIdentity, pdf_bytes: bytes) -> DoclingConversionResult:
-        """执行真实 Docling PDF 转换并写出受控 JSON。
+        """在可抢占子进程中执行真实 Docling PDF 转换并写出受控 JSON。
 
         参数:
             identity: PDF 对应的报告内容身份。
@@ -56,8 +62,9 @@ class DoclingConverter:
             DoclingConversionResult，包含受控 JSON 引用、Fund 内部路径和耗时。
 
         异常:
-            DocumentToolError: Docling 依赖、模型资源或写入目录不可用时返回
-                unavailable；Docling PDF 转换失败时返回 docling_convert_failed。
+            DocumentToolError: Docling 依赖、模型资源、写入目录或转换子进程不可用时
+                返回 unavailable；Docling PDF 转换失败时返回 docling_convert_failed。
+                失败路径统一保证 json_path 不残留。
         """
 
         started_at = time.monotonic()
@@ -70,43 +77,60 @@ class DoclingConverter:
             raise DocumentToolError(FailureCode.UNAVAILABLE, "Docling JSON 输出目录不可用") from exc
 
         try:
-            converter = _build_docling_converter(
-                timeout_seconds=self._timeout_seconds,
-                do_ocr=self._do_ocr,
-            )
-        except ImportError as exc:
-            raise DocumentToolError(FailureCode.UNAVAILABLE, "Docling 依赖不可用") from exc
-        except OSError as exc:
-            raise DocumentToolError(FailureCode.UNAVAILABLE, "Docling runtime 资源不可用") from exc
-
-        try:
-            stream = _build_document_stream(pdf_bytes)
-            result = converter.convert(stream, raises_on_error=True)
-            if result.has_timeout_errors():
-                raise DocumentToolError(FailureCode.UNAVAILABLE, "Docling 转换超时")
-            if result.has_parse_errors() or result.document is None:
-                raise DocumentToolError(FailureCode.DOCLING_CONVERT_FAILED, "Docling PDF 转换失败")
-        except DocumentToolError:
-            raise
-        except TimeoutError as exc:
+            envelope = self._run_child_conversion(pdf_bytes, self._do_ocr, json_path)
+        except SubprocessTimeoutError as exc:
+            _remove_json_if_exists(json_path)
             raise DocumentToolError(FailureCode.UNAVAILABLE, "Docling 转换超时") from exc
-        except Exception as exc:
-            if _is_unavailable_exception(exc):
-                raise DocumentToolError(FailureCode.UNAVAILABLE, "Docling runtime 资源不可用") from exc
-            raise DocumentToolError(FailureCode.DOCLING_CONVERT_FAILED, "Docling PDF 转换失败") from exc
+        except SubprocessExecutionError as exc:
+            _remove_json_if_exists(json_path)
+            raise DocumentToolError(FailureCode.UNAVAILABLE, "Docling 转换子进程异常") from exc
 
-        try:
-            _save_docling_json(result.document, json_path)
-        except DocumentToolError:
-            raise
-        except OSError as exc:
-            raise DocumentToolError(FailureCode.UNAVAILABLE, "Docling JSON 写入失败") from exc
+        failure_code = envelope.get("failure_code")
+        message = envelope.get("message")
+        if failure_code == FailureCode.DOCLING_CONVERT_FAILED.value:
+            _remove_json_if_exists(json_path)
+            raise DocumentToolError(
+                FailureCode.DOCLING_CONVERT_FAILED, message or "Docling PDF 转换失败"
+            )
+        if failure_code == FailureCode.UNAVAILABLE.value:
+            _remove_json_if_exists(json_path)
+            raise DocumentToolError(FailureCode.UNAVAILABLE, message or "Docling 转换不可用")
+        if failure_code is not None:
+            _remove_json_if_exists(json_path)
+            raise DocumentToolError(FailureCode.UNAVAILABLE, "Docling 转换子进程异常")
 
         return DoclingConversionResult(
             document_id=identity.document_id,
             docling_json_ref=make_docling_json_ref(identity.document_id),
             json_path=json_path,
             elapsed_seconds=time.monotonic() - started_at,
+        )
+
+    def _run_child_conversion(
+        self,
+        pdf_bytes: bytes,
+        do_ocr: bool,
+        json_path: Path,
+    ) -> dict[str, str | None]:
+        """在可抢占子进程中执行 Docling 转换并回收失败分类 envelope。
+
+        参数:
+            pdf_bytes: 已通过 integrity check 的 PDF bytes。
+            do_ocr: 是否启用 Docling OCR。
+            json_path: 受控 Docling JSON 输出路径。
+
+        返回:
+            {"failure_code": None, "message": None} 或稳定失败分类与安全消息。
+
+        异常:
+            SubprocessTimeoutError: 子进程在硬 deadline 内未完成。
+            SubprocessExecutionError: 子进程执行异常或无结果崩溃。
+        """
+
+        return run_in_subprocess(
+            _run_conversion_in_child,
+            args=(pdf_bytes, do_ocr, self._timeout_seconds, str(json_path)),
+            timeout=float(self._timeout_seconds),
         )
 
 
@@ -124,6 +148,75 @@ def make_docling_json_ref(document_id: str) -> str:
     """
 
     return f"{DOCLING_JSON_REF_PREFIX}:{document_id}"
+
+
+def _run_conversion_in_child(
+    pdf_bytes: bytes,
+    do_ocr: bool,
+    timeout_seconds: int,
+    output_json_path: str,
+) -> dict[str, str | None]:
+    """仅在子进程内执行 Docling 转换并落盘，返回失败分类 envelope。
+
+    参数:
+        pdf_bytes: 已通过 integrity check 的 PDF bytes。
+        do_ocr: 是否启用 Docling OCR。
+        timeout_seconds: 传给 Docling 内部 document_timeout 的超时预算。
+        output_json_path: 受控 Docling JSON 输出路径字符串。
+
+    返回:
+        {"failure_code": None, "message": None} 表示成功；否则为稳定失败分类
+        （unavailable / docling_convert_failed）与面向调用方的安全消息。
+
+    异常:
+        本函数不抛出业务异常；所有失败以 envelope 分类返回。
+    """
+
+    try:
+        converter = _build_docling_converter(
+            timeout_seconds=timeout_seconds,
+            do_ocr=do_ocr,
+        )
+    except ImportError:
+        return {"failure_code": FailureCode.UNAVAILABLE.value, "message": "Docling 依赖不可用"}
+    except OSError:
+        return {"failure_code": FailureCode.UNAVAILABLE.value, "message": "Docling runtime 资源不可用"}
+
+    try:
+        stream = _build_document_stream(pdf_bytes)
+        result = converter.convert(stream, raises_on_error=True)
+        if result.has_timeout_errors():
+            return {"failure_code": FailureCode.UNAVAILABLE.value, "message": "Docling 转换超时"}
+        if result.has_parse_errors() or result.document is None:
+            return {
+                "failure_code": FailureCode.DOCLING_CONVERT_FAILED.value,
+                "message": "Docling PDF 转换失败",
+            }
+    except TimeoutError:
+        return {"failure_code": FailureCode.UNAVAILABLE.value, "message": "Docling 转换超时"}
+    except Exception as exc:
+        if _is_unavailable_exception(exc):
+            return {"failure_code": FailureCode.UNAVAILABLE.value, "message": "Docling runtime 资源不可用"}
+        return {
+            "failure_code": FailureCode.DOCLING_CONVERT_FAILED.value,
+            "message": "Docling PDF 转换失败",
+        }
+
+    try:
+        _save_docling_json(result.document, Path(output_json_path))
+    except OSError:
+        return {"failure_code": FailureCode.UNAVAILABLE.value, "message": "Docling JSON 写入失败"}
+
+    return {"failure_code": None, "message": None}
+
+
+def _remove_json_if_exists(json_path: Path) -> None:
+    """幂等清理失败路径残留的 Docling JSON，保证 convert_pdf 失败不残留部分文件。"""
+
+    try:
+        json_path.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _build_docling_converter(*, timeout_seconds: int, do_ocr: bool):
