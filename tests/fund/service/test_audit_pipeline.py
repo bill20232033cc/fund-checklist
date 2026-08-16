@@ -1068,3 +1068,127 @@ def test_decision_select_strategy_no_critical_at_score_51() -> None:
     )
     strategy, _ = select_repair_strategy(decision)
     assert strategy == "repair"
+
+
+# ============================================================
+# 审计管道收紧（2026-08-15）：critical 阻断 + 装配审计
+# ============================================================
+
+
+def test_decision_select_strategy_high_score_with_critical_regenerates() -> None:
+    """score=87.4 + CRITICAL → regenerate（旧逻辑 score>=80 直接 skip，可证伪）。"""
+    from fund_agent.service.audit_pipeline import select_repair_strategy
+
+    decision = AuditDecision(
+        chapter_id=2,
+        score=87.4,
+        violations=(
+            AuditViolation(
+                code="C1", category=ViolationCategory.CONTENT,
+                severity=ViolationSeverity.CRITICAL, description="事实错误",
+            ),
+            AuditViolation(
+                code="S1", category=ViolationCategory.STRUCTURE,
+                severity=ViolationSeverity.CRITICAL, description="章节结构不完整",
+            ),
+        ),
+        recommendation="pass",
+    )
+    strategy, reason = select_repair_strategy(decision)
+    assert strategy == "regenerate"
+    assert "C1" in reason
+    assert "S1" in reason
+
+
+def test_decision_select_strategy_high_score_no_critical_still_skip() -> None:
+    """score=87.4 + 无 CRITICAL → 仍 skip（既有语义保留）。"""
+    from fund_agent.service.audit_pipeline import select_repair_strategy
+
+    decision = AuditDecision(
+        chapter_id=2,
+        score=87.4,
+        violations=(
+            AuditViolation(
+                code="C4", category=ViolationCategory.CONTENT,
+                severity=ViolationSeverity.MAJOR, description="分析深度不足",
+            ),
+        ),
+        recommendation="pass",
+    )
+    strategy, _ = select_repair_strategy(decision)
+    assert strategy == "skip"
+
+
+def test_passes_audit_pure_function() -> None:
+    """_passes_audit 三态：≥门槛无 critical True / ≥门槛有 critical False / <门槛 False。"""
+    from fund_agent.service.audit_pipeline import _passes_audit
+
+    no_violations: tuple[AuditViolation, ...] = ()
+    critical = (
+        AuditViolation(
+            code="P1", category=ViolationCategory.PLACEHOLDER,
+            severity=ViolationSeverity.CRITICAL, description="数据未获取",
+        ),
+    )
+    major = (
+        AuditViolation(
+            code="S2", category=ViolationCategory.STRUCTURE,
+            severity=ViolationSeverity.MAJOR, description="必须字段缺失",
+        ),
+    )
+    # ≥门槛且无 critical → True（major/minor 不阻断）
+    assert _passes_audit(87.4, 80.0, no_violations) is True
+    assert _passes_audit(87.4, 80.0, major) is True
+    # ≥门槛但有 critical → False（不因高分放行）
+    assert _passes_audit(87.4, 80.0, critical) is False
+    # <门槛 → False（即使无 critical）
+    assert _passes_audit(79.9, 80.0, no_violations) is False
+    # 降级门槛：数据不足只降分数门槛（75），不豁免 critical
+    assert _passes_audit(75.0, 75.0, critical) is False
+    assert _passes_audit(75.0, 75.0, no_violations) is True
+
+
+def test_audit_loop_critical_high_score_goes_regenerate_then_degraded(tmp_path: Path) -> None:
+    """fake LLM 持续返回高分+critical → 章节跳过 PATCH 走 regenerate → 耗尽 → 降级非 passed。"""
+    from fund_agent.service.audit_pipeline import ReportGenerationCoordinator
+    from fund_agent.service.models import FeeRateItem
+
+    class _HighScoreCriticalClient:
+        """内容生成返回正常文本；LLM 审计持续返回高分 + CRITICAL（C1）。"""
+
+        def generate_text(self, *, system_prompt: str, user_prompt: str, temperature: float = 0) -> str:
+            if "审计" in system_prompt:
+                return (
+                    '{"score": 100, "violations": [{"code": "C1", '
+                    '"description": "事实错误", "location": "Ch2"}]}'
+                )
+            return "该基金2024年净值增长率为17.32%，超越基准14.45%，超额收益2.87%。"
+
+    client = _HighScoreCriticalClient()
+    coordinator = ReportGenerationCoordinator(client, tmp_path)
+
+    performance = {2024: {"nav_growth_rate": "17.32%", "benchmark_return_rate": "14.45%", "excess_return": "2.87%"}}
+    fees = {2024: (FeeRateItem(fee_name="管理费", rate="1.50%"), FeeRateItem(fee_name="托管费", rate="0.25%"))}
+
+    result = coordinator._generate_and_audit_chapter_inner(
+        chapter_id=2,
+        fund_code="000001",
+        fund_name="测试基金",
+        report_year=2024,
+        performance=performance,
+        holdings={},
+        allocation={},
+        fees=fees,
+    )
+
+    assert result is not None
+    state = coordinator._get_state(2)
+    assert state is not None
+    # 高分 + critical 不得 passed（旧逻辑 final_score >= 门槛即放行，可证伪）
+    assert state.status != "passed"
+    assert state.status == "passed_with_degradation"
+    # critical 只能 regenerate，不能 patch
+    assert state.patch_attempts == 0
+    assert state.regenerate_attempts == 3
+    # 确证本次走的是「高分 + critical」路径（综合分数达门槛）
+    assert state.current_score >= 80.0

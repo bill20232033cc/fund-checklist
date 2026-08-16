@@ -339,3 +339,78 @@ def test_list_reports_returns_all_entries(tmp_path: Path) -> None:
     assert len(summaries) == 2
     years = {s["year"] for s in summaries}
     assert years == {2023, 2024}
+
+
+def test_catalog_round_trips_quarter_and_period_fields(tmp_path: Path) -> None:
+    """catalog 必须持久化并恢复 quarterly quarter 与 semiannual period 字段（§6.25 裁决 13）。"""
+
+    work_dir = tmp_path / "work"
+    provider = LocalPdfSourceProvider(work_dir / "pdf_blobs")
+    quarterly = provider.import_pdf(
+        PdfImportRequest(
+            path=_pdf_path(tmp_path),
+            fund_code="005680",
+            fund_name="财通资管价值成长混合",
+            year=2026,
+            report_type=ReportType.QUARTERLY_REPORT,
+            quarter=2,
+        )
+    )
+    repository = _repository(tmp_path)
+    json_path = work_dir / "docling_json" / quarterly.identity.document_id / f"{quarterly.identity.document_id}.docling.json"
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(json.dumps(_docling_payload(), ensure_ascii=False), encoding="utf-8")
+    store = DoclingDocumentStore(identity=quarterly.identity, json_path=json_path)
+    repository.record_completed_report(
+        identity=quarterly.identity,
+        stored_blob_ref=quarterly.stored_blob_ref,
+        docling_json_ref=make_docling_json_ref(quarterly.identity.document_id),
+        parser_health=store.parser_health,
+    )
+
+    loaded = repository.load_store(quarterly.identity.document_id)
+    assert loaded.identity.quarter == 2
+    assert loaded.identity.period is None
+    catalog = _load_catalog(tmp_path)
+    identity_payload = catalog["reports"][quarterly.identity.document_id]["identity"]
+    assert identity_payload["quarter"] == 2
+    assert identity_payload["period"] is None
+
+    summary = repository.list_reports()[0]
+    assert summary["quarter"] == 2
+    assert summary["period"] is None
+
+
+def test_old_catalog_records_without_quarter_period_default_to_none(tmp_path: Path) -> None:
+    """旧 catalog 记录（无 quarter/period 字段）必须向后兼容解析为 None（§6.25 裁决 13）。"""
+
+    work_dir = tmp_path / "work"
+    catalog_path = work_dir / CATALOG_FILENAME
+    catalog_path.parent.mkdir(parents=True, exist_ok=True)
+    doc_id = "004393-2024-annual_report-0123456789abcdef"
+    catalog_path.write_text(json.dumps({
+        "schema_version": 1,
+        "reports": {
+            doc_id: {
+                "schema_version": 1,
+                "document_id": doc_id,
+                "identity": {
+                    "fund_code": "004393",
+                    "fund_name": "安信企业价值优选",
+                    "year": 2024,
+                    "report_type": "annual_report",
+                    "source_kind": "local_pdf",
+                    "content_fingerprint": "abc123",
+                    "document_id": doc_id,
+                },
+                "stored_blob_ref": "local_pdf:004393-2024-annual_report-0123456789abcdef",
+                "docling_json_ref": f"docling_json:{doc_id}",
+            },
+        },
+    }, ensure_ascii=False), encoding="utf-8")
+
+    repository = _repository(tmp_path)
+    summary = repository.list_reports()[0]
+    assert summary["quarter"] is None
+    assert summary["period"] is None
+    assert summary["report_type"] == "annual_report"

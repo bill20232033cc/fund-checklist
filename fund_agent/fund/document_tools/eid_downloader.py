@@ -37,6 +37,31 @@ ANNUAL_REPORT_SPEC = {
     "report_desp": "年度报告",
 }
 
+# 2026-08-14 EID 实证（docs/research/quarterly-semiannual-data-source-research-20260814.md）：
+# 半年报 reportType=FB020 / reportCode=FB020010 / reportDesp=中期报告；
+# 季报 reportType=FB030 / reportCode=FB0300X / reportDesp=第N季度报告（N=1..4）。
+SEMIANNUAL_REPORT_SPEC = {
+    "report_type": "FB020",
+    "report_code": "FB020010",
+    "report_desp": "中期报告",
+}
+QUARTERLY_REPORT_CODE_BY_QUARTER = {
+    1: "FB030010",
+    2: "FB030020",
+    3: "FB030030",
+    4: "FB030040",
+}
+QUARTERLY_REPORT_DESP_BY_QUARTER = {
+    1: "第1季度报告",
+    2: "第2季度报告",
+    3: "第3季度报告",
+    4: "第4季度报告",
+}
+REPORT_SPECS = {
+    "annual_report": ANNUAL_REPORT_SPEC,
+    "semiannual_report": SEMIANNUAL_REPORT_SPEC,
+}
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -74,7 +99,7 @@ def download_annual_report(
     force: bool = False,
     sleep_seconds: float = 0.2,
 ) -> DownloadResult:
-    """下载单只基金的年报 PDF。
+    """下载单只基金的年报 PDF（annual 兼容入口）。
 
     参数:
         fund_code: 基金代码。
@@ -89,19 +114,65 @@ def download_annual_report(
     异常:
         EidDownloadError: 基金代码无效、报告未找到、网络失败。
     """
+
+    return download_report(
+        fund_code=fund_code,
+        year=year,
+        output_dir=output_dir,
+        report_type="annual_report",
+        force=force,
+        sleep_seconds=sleep_seconds,
+    )
+
+
+def download_report(
+    fund_code: str,
+    year: int,
+    output_dir: Path,
+    *,
+    report_type: str = "annual_report",
+    quarter: int | None = None,
+    force: bool = False,
+    sleep_seconds: float = 0.2,
+) -> DownloadResult:
+    """下载单只基金的指定报告类型 PDF（年报/半年报/季报）。
+
+    参数:
+        fund_code: 基金代码。
+        year: 报告年份。
+        output_dir: 输出目录。
+        report_type: 报告类型（annual_report / semiannual_report / quarterly_report）。
+        quarter: 季报期次 1-4；仅 report_type=quarterly_report 必填。
+        force: 是否强制重新下载。
+        sleep_seconds: 请求间隔（秒）。
+
+    返回:
+        DownloadResult。
+
+    异常:
+        EidDownloadError: 基金代码无效、报告未找到、网络失败或参数不合法。
+    """
     fund_code = _normalize_fund_code(fund_code)
+    if report_type not in ("annual_report", "semiannual_report", "quarterly_report"):
+        raise EidDownloadError(f"不支持的 report_type: {report_type}", code="schema_drift")
+    if report_type == "quarterly_report":
+        if quarter not in (1, 2, 3, 4):
+            raise EidDownloadError("quarterly_report 必须指定 quarter 1-4", code="schema_drift")
+    elif quarter is not None:
+        raise EidDownloadError("quarter 仅适用于 quarterly_report", code="schema_drift")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. 验证基金代码（获取 eid 内部 fundId）
     fund_id = _validate_fund(fund_code)
     time.sleep(sleep_seconds)
 
-    # 2. 搜索年报（同时获取基金简称）
+    # 2. 搜索目标报告（同时获取基金简称）
+    spec = _spec_for(report_type, quarter)
     candidate, fund_short_name = _search_report(
         fund_code=fund_code,
         fund_id=fund_id,
         year=year,
-        spec=ANNUAL_REPORT_SPEC,
+        spec=spec,
     )
     upload_info_id = str(candidate["uploadInfoId"])
     time.sleep(sleep_seconds)
@@ -109,7 +180,11 @@ def download_annual_report(
     # 3. 下载 PDF
     pdf_url = _pdf_url(upload_info_id)
     safe_name = _safe_filename(fund_short_name)[:60]
-    file_path = output_dir / f"{fund_code}_{safe_name}_{year}_annual_report.pdf"
+    if report_type == "quarterly_report":
+        file_path = output_dir / f"{fund_code}_{safe_name}_{year}_Q{quarter}_quarterly_report.pdf"
+    else:
+        report_suffix = "semiannual_report" if report_type == "semiannual_report" else "annual_report"
+        file_path = output_dir / f"{fund_code}_{safe_name}_{year}_{report_suffix}.pdf"
 
     if file_path.exists() and not force and _looks_like_pdf(file_path.read_bytes()):
         return DownloadResult(
@@ -137,6 +212,18 @@ def download_annual_report(
         source_url=pdf_url,
         status="downloaded",
     )
+
+
+def _spec_for(report_type: str, quarter: int | None) -> dict[str, str]:
+    """返回 EID 搜索 spec（reportType/reportCode/reportDesp）。"""
+
+    if report_type == "quarterly_report":
+        return {
+            "report_type": "FB030",
+            "report_code": QUARTERLY_REPORT_CODE_BY_QUARTER[quarter],  # type: ignore[index]
+            "report_desp": QUARTERLY_REPORT_DESP_BY_QUARTER[quarter],  # type: ignore[index]
+        }
+    return dict(REPORT_SPECS[report_type])
 
 
 # -- 内部函数 --

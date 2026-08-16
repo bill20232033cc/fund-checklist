@@ -38,6 +38,7 @@ class PdfImportRequest:
     fund_name: str
     year: int
     report_type: ReportType = ReportType.ANNUAL_REPORT
+    quarter: int | None = None
     share_class: str | None = None
     content_type: str = PDF_CONTENT_TYPE
 
@@ -72,6 +73,8 @@ class ReportIdentity:
     local_import_id: str
     content_fingerprint: str
     document_id: str
+    quarter: int | None = None
+    period: str | None = None
     share_class: str | None = None
 
 
@@ -143,6 +146,8 @@ class ReportSummary:
     source_kind: str
     source_summary: str
     content_fingerprint: str
+    quarter: int | None = None
+    period: str | None = None
     share_class: str | None = None
 
 

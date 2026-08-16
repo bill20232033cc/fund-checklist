@@ -153,6 +153,8 @@ class FilesystemReportRepository:
                 "fund_name": str(identity_payload.get("fund_name", "")),
                 "year": identity_payload.get("year"),
                 "report_type": str(identity_payload.get("report_type", "")),
+                "quarter": identity_payload.get("quarter"),
+                "period": identity_payload.get("period"),
                 "share_class": identity_payload.get("share_class"),
             })
         return tuple(summaries)
@@ -221,6 +223,8 @@ def _identity_to_catalog(identity: ReportIdentity) -> dict[str, object]:
         "source_kind": identity.source_kind.value,
         "content_fingerprint": identity.content_fingerprint,
         "document_id": identity.document_id,
+        "quarter": identity.quarter,
+        "period": identity.period,
         "share_class": identity.share_class,
     }
 
@@ -253,6 +257,8 @@ def _identity_from_record(record: dict[str, object], *, requested_document_id: s
         local_import_id=_INTERNAL_RESTORED_IMPORT_ID,
         content_fingerprint=_required_str(identity_payload, "content_fingerprint"),
         document_id=requested_document_id,
+        quarter=_optional_int(identity_payload.get("quarter")),
+        period=_optional_str(identity_payload.get("period")),
         share_class=_optional_str(identity_payload.get("share_class")),
     )
 
@@ -302,7 +308,17 @@ def _optional_str(value: object) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "catalog share_class 不符合契约")
+        raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "catalog 可选字符串字段不符合契约")
+    return value
+
+
+def _optional_int(value: object) -> int | None:
+    """读取可选整数字段；旧 catalog 记录（无 quarter）返回 None。"""
+
+    if value is None:
+        return None
+    if not isinstance(value, int):
+        raise DocumentToolError(FailureCode.SCHEMA_DRIFT, "catalog quarter 不符合契约")
     return value
 
 

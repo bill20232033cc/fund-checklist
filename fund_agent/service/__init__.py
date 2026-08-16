@@ -53,6 +53,8 @@ from fund_agent.service.models import (
     FundReport,
     GenerateReportRequest,
     GenerateReportResult,
+    SnapshotReportRequest,
+    SnapshotReportResult,
     HoldingExtraction,
     IndustryAllocationItem,
     MultiYearAllocationSeries,

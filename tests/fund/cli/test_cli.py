@@ -21,7 +21,7 @@ from fund_agent.cli.main import (
     build_parser,
     run_cli,
 )
-from fund_agent.fund.document_tools.constants import DOCLING_JSON_SUFFIX, FailureCode, LocatorKind, PDF_FILENAME, ToolName
+from fund_agent.fund.document_tools.constants import DOCLING_JSON_SUFFIX, FailureCode, LocatorKind, PDF_FILENAME, ReportType, ToolName
 from fund_agent.fund.document_tools.errors import DocumentToolError
 from fund_agent.fund.document_tools.models import Citation, Locator, ToolFailure
 from fund_agent.fund.document_tools.persistent_repository import CATALOG_FILENAME
@@ -985,6 +985,173 @@ def test_import_parser_accepts_valid_args() -> None:
     assert args.pdf_dir == Path("/tmp/pdfs")
     assert args.fund_code == "004393"
     assert args.year_range == "2020-2024"
+
+
+def test_import_parser_accepts_quarterly_args() -> None:
+    """import 子命令 parser 必须接受 --report-type quarterly_report + --quarter。"""
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "import",
+        "--pdf-dir", "/tmp/pdfs",
+        "--fund-code", "005680",
+        "--fund-name", "财通资管价值成长混合",
+        "--report-type", "quarterly_report",
+        "--quarter", "2",
+        "--year-range", "2026-2026",
+    ])
+
+    assert args.command == "import"
+    assert args.report_type == "quarterly_report"
+    assert args.quarter == 2
+
+
+def test_import_quarterly_requires_quarter(tmp_path: Path) -> None:
+    """--report-type quarterly_report 缺 --quarter 时必须 exit 2（contract-first）。"""
+
+    pdf_dir = tmp_path / "pdfs"
+    pdf_dir.mkdir()
+    (pdf_dir / "005680_财通资管价值成长混合_2026_Q1_quarterly_report.pdf").write_bytes(b"%PDF-1.4\n")
+
+    exit_code, stdout, stderr = _run([
+        "import",
+        "--pdf-dir", str(pdf_dir),
+        "--fund-code", "005680",
+        "--fund-name", "财通资管价值成长混合",
+        "--report-type", "quarterly_report",
+        "--year-range", "2026-2026",
+        "--work-dir", str(tmp_path / "work"),
+    ])
+
+    assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
+    assert "--quarter" in stderr
+
+
+def test_import_quarter_requires_quarterly_report(tmp_path: Path) -> None:
+    """--quarter 必须配合 --report-type quarterly_report，否则 exit 2。"""
+
+    pdf_dir = tmp_path / "pdfs"
+    pdf_dir.mkdir()
+    (pdf_dir / "005680_财通资管价值成长混合_2025_annual_report.pdf").write_bytes(b"%PDF-1.4\n")
+
+    exit_code, stdout, stderr = _run([
+        "import",
+        "--pdf-dir", str(pdf_dir),
+        "--fund-code", "005680",
+        "--fund-name", "财通资管价值成长混合",
+        "--report-type", "annual_report",
+        "--quarter", "2",
+        "--year-range", "2025-2025",
+        "--work-dir", str(tmp_path / "work"),
+    ])
+
+    assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
+    assert "quarter" in stderr
+
+
+def test_import_imports_quarterly_pdfs_with_quarter(monkeypatch, tmp_path: Path) -> None:
+    """import 必须按显式 quarter 导入季报，且文件名 Q 标记与 --quarter 不一致时过滤。"""
+
+    from fund_agent.service import ImportLocalReportResult
+    from fund_agent.fund.document_tools.models import ReportSummary
+
+    captured: list[dict[str, object]] = []
+
+    class _FakeService:
+        def import_local_report(self, request):
+            captured.append({
+                "report_type": request.report_type,
+                "quarter": request.quarter,
+                "year": request.year,
+                "filename": Path(request.pdf_path).name,
+            })
+            return ImportLocalReportResult(
+                document_id=f"{request.fund_code}-{request.year}-Q{request.quarter}-quarterly_report-fake",
+                report=ReportSummary(
+                    document_id=f"{request.fund_code}-{request.year}-Q{request.quarter}-quarterly_report-fake",
+                    fund_code=request.fund_code,
+                    fund_name=request.fund_name,
+                    year=request.year,
+                    report_type="quarterly_report",
+                    source_kind="local_pdf",
+                    source_summary="fake",
+                    content_fingerprint="fake",
+                    quarter=request.quarter,
+                ),
+            )
+
+    monkeypatch.setattr(cli_module, "FundReadingService", _FakeService)
+
+    pdf_dir = tmp_path / "pdfs"
+    pdf_dir.mkdir()
+    (pdf_dir / "005680_财通资管价值成长混合_2026_Q1_quarterly_report.pdf").write_bytes(b"%PDF-1.4\n")
+    (pdf_dir / "005680_财通资管价值成长混合_2026_Q2_quarterly_report.pdf").write_bytes(b"%PDF-1.4\n")
+
+    exit_code, stdout, stderr = _run([
+        "import",
+        "--pdf-dir", str(pdf_dir),
+        "--fund-code", "005680",
+        "--fund-name", "财通资管价值成长混合",
+        "--report-type", "quarterly_report",
+        "--quarter", "2",
+        "--year-range", "2026-2026",
+        "--work-dir", str(tmp_path / "work"),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE
+    assert len(captured) == 1
+    assert captured[0]["report_type"] is ReportType.QUARTERLY_REPORT
+    assert captured[0]["quarter"] == 2
+    assert "Q2" in str(captured[0]["filename"])
+    assert "1 imported" in stdout
+
+
+def test_import_imports_semiannual_pdfs(monkeypatch, tmp_path: Path) -> None:
+    """import 必须支持 semiannual_report 类型导入。"""
+
+    from fund_agent.service import ImportLocalReportResult
+    from fund_agent.fund.document_tools.models import ReportSummary
+
+    captured: list[dict[str, object]] = []
+
+    class _FakeService:
+        def import_local_report(self, request):
+            captured.append({"report_type": request.report_type, "quarter": request.quarter})
+            return ImportLocalReportResult(
+                document_id=f"{request.fund_code}-{request.year}-semiannual_report-fake",
+                report=ReportSummary(
+                    document_id=f"{request.fund_code}-{request.year}-semiannual_report-fake",
+                    fund_code=request.fund_code,
+                    fund_name=request.fund_name,
+                    year=request.year,
+                    report_type="semiannual_report",
+                    source_kind="local_pdf",
+                    source_summary="fake",
+                    content_fingerprint="fake",
+                ),
+            )
+
+    monkeypatch.setattr(cli_module, "FundReadingService", _FakeService)
+
+    pdf_dir = tmp_path / "pdfs"
+    pdf_dir.mkdir()
+    (pdf_dir / "005680_财通资管价值成长混合_2025_semiannual_report.pdf").write_bytes(b"%PDF-1.4\n")
+
+    exit_code, stdout, stderr = _run([
+        "import",
+        "--pdf-dir", str(pdf_dir),
+        "--fund-code", "005680",
+        "--fund-name", "财通资管价值成长混合",
+        "--report-type", "semiannual_report",
+        "--year-range", "2025-2025",
+        "--work-dir", str(tmp_path / "work"),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE
+    assert len(captured) == 1
+    assert captured[0]["report_type"] is ReportType.SEMIANNUAL_REPORT
+    assert captured[0]["quarter"] is None
+    assert "1 imported" in stdout
 
 
 def test_import_exits_2_when_directory_not_found(tmp_path: Path) -> None:
@@ -3750,3 +3917,206 @@ def test_generate_cli_005680_stage_not_building_phase(tmp_path: Path) -> None:
     assert "🟢 稳定期" in content
     assert "基金合同 2019 年生效" in content
     assert "| 判定结果 | 🟡 建仓期 |" not in content
+
+
+# ============================================================
+# 快照（季报/半年报）CLI 测试（Slice E，§6.25 裁决 10/16）
+# ============================================================
+
+
+def test_snapshot_quarterly_parser() -> None:
+    """snapshot-quarterly parser 必须解析期次参数。"""
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "snapshot-quarterly",
+        "--fund-code", "005680",
+        "--fund-name", "财通资管价值成长混合",
+        "--year", "2026",
+        "--quarter", "2",
+        "--format", "markdown",
+        "--work-dir", "/tmp/work",
+    ])
+
+    assert args.command == "snapshot-quarterly"
+    assert args.fund_code == "005680"
+    assert args.year == 2026
+    assert args.quarter == 2
+    assert args.output_format == "markdown"
+
+
+def test_snapshot_semiannual_parser() -> None:
+    """snapshot-semiannual parser 必须解析期次参数。"""
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "snapshot-semiannual",
+        "--fund-code", "005680",
+        "--fund-name", "财通资管价值成长混合",
+        "--year", "2025",
+        "--period", "H1",
+        "--work-dir", "/tmp/work",
+    ])
+
+    assert args.command == "snapshot-semiannual"
+    assert args.fund_code == "005680"
+    assert args.year == 2025
+    assert args.period == "H1"
+
+
+def test_snapshot_quarterly_missing_catalog_fails_classified(monkeypatch, tmp_path: Path) -> None:
+    """catalog 中无匹配季报文档时必须返回 classified failure。"""
+
+    from fund_agent.service import SnapshotReportResult
+    from fund_agent.fund.document_tools.models import ToolFailure as TF
+
+    class _FakeService:
+        def generate_snapshot_report(self, request, llm_client=None):
+            return SnapshotReportResult(
+                failure=TF(code=FailureCode.NOT_FOUND, message="catalog 中未找到 005680 quarterly_report 2026 Q2 文档"),
+            )
+
+    monkeypatch.setattr(cli_module, "FundReadingService", _FakeService)
+
+    exit_code, stdout, stderr = _run([
+        "snapshot-quarterly",
+        "--fund-code", "005680",
+        "--fund-name", "财通资管价值成长混合",
+        "--year", "2026",
+        "--quarter", "2",
+        "--work-dir", str(tmp_path / "work"),
+    ])
+
+    assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
+    assert "not_found" in stderr
+
+
+def test_snapshot_quarterly_success_json(monkeypatch, tmp_path: Path) -> None:
+    """snapshot-quarterly 成功时输出 JSON 章节。"""
+
+    from fund_agent.service import SnapshotReportResult
+    from fund_agent.service.models import FundReport, ReportChapter
+
+    class _FakeService:
+        def generate_snapshot_report(self, request, llm_client=None):
+            return SnapshotReportResult(
+                report=FundReport(
+                    fund_code="005680",
+                    fund_name="财通资管价值成长混合",
+                    report_year=2026,
+                    chapters=(
+                        ReportChapter(chapter_id=1, title="当期业绩与超额", content="## 业绩数据\n内容"),
+                        ReportChapter(chapter_id=2, title="持仓与资产配置", content="## 持仓\n内容"),
+                        ReportChapter(chapter_id=3, title="管理人动作", content="## 管理人\n内容"),
+                        ReportChapter(chapter_id=4, title="风险与跟踪", content="## 风险\n内容"),
+                        ReportChapter(chapter_id=0, title="概览", content="## 概览\n内容"),
+                    ),
+                    metadata={"quarter": 2, "snapshot_score": {"total_score": 75, "grade": "优秀"}},
+                ),
+                output_path=None,
+                warnings=(),
+                failure=None,
+            )
+
+    monkeypatch.setattr(cli_module, "FundReadingService", _FakeService)
+
+    exit_code, stdout, stderr = _run([
+        "snapshot-quarterly",
+        "--fund-code", "005680",
+        "--fund-name", "财通资管价值成长混合",
+        "--year", "2026",
+        "--quarter", "2",
+        "--work-dir", str(tmp_path / "work"),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE, stderr
+    output = json.loads(stdout)
+    assert len(output["chapters"]) == 5
+    assert output["report_type"] == "quarterly_report"
+    assert output["quarter"] == 2
+    assert output["metadata"]["snapshot_score"]["grade"] == "优秀"
+
+
+def test_snapshot_semiannual_success_json(monkeypatch, tmp_path: Path) -> None:
+    """snapshot-semiannual 成功时输出 6 章 JSON。"""
+
+    from fund_agent.service import SnapshotReportResult
+    from fund_agent.service.models import FundReport, ReportChapter
+
+    class _FakeService:
+        def generate_snapshot_report(self, request, llm_client=None):
+            return SnapshotReportResult(
+                report=FundReport(
+                    fund_code="005680",
+                    fund_name="财通资管价值成长混合",
+                    report_year=2025,
+                    chapters=tuple(
+                        ReportChapter(chapter_id=cid, title=f"章{cid}", content="## 内容")
+                        for cid in (1, 2, 3, 4, 5, 0)
+                    ),
+                    metadata={"quarter": None, "snapshot_score": {"total_score": 35, "grade": "关注"}},
+                ),
+                output_path=None,
+                warnings=(),
+                failure=None,
+            )
+
+    monkeypatch.setattr(cli_module, "FundReadingService", _FakeService)
+
+    exit_code, stdout, stderr = _run([
+        "snapshot-semiannual",
+        "--fund-code", "005680",
+        "--fund-name", "财通资管价值成长混合",
+        "--year", "2025",
+        "--work-dir", str(tmp_path / "work"),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE, stderr
+    output = json.loads(stdout)
+    assert len(output["chapters"]) == 6
+    assert output["report_type"] == "semiannual_report"
+
+
+
+def test_multi_year_collect_ignores_snapshot_in_mixed_workdir(tmp_path: Path) -> None:
+    """防污染（§6.25 裁决 17）：mixed workdir（3 年年报 + 1 份季报）multi-year 只匹配 annual_report。"""
+
+    from fund_agent.cli.main import _collect_matching_docs
+    import json as _json
+
+    work_dir = tmp_path / "mixed"
+    catalog_path = work_dir / CATALOG_FILENAME
+    catalog_path.parent.mkdir(parents=True)
+
+    def _record(doc_id: str, year: int, report_type: str) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "document_id": doc_id,
+            "identity": {
+                "fund_code": "005680",
+                "fund_name": "财通资管价值成长混合",
+                "year": year,
+                "report_type": report_type,
+                "source_kind": "local_pdf",
+                "content_fingerprint": "f" * 64,
+                "document_id": doc_id,
+            },
+            "stored_blob_ref": f"local_pdf:{doc_id}",
+            "docling_json_ref": f"docling_json:{doc_id}",
+        }
+
+    reports = {
+        "005680-2023-annual_report-aaaaaaaaaaaaaaaa": _record("005680-2023-annual_report-aaaaaaaaaaaaaaaa", 2023, "annual_report"),
+        "005680-2024-annual_report-bbbbbbbbbbbbbbbb": _record("005680-2024-annual_report-bbbbbbbbbbbbbbbb", 2024, "annual_report"),
+        "005680-2025-annual_report-cccccccccccccccc": _record("005680-2025-annual_report-cccccccccccccccc", 2025, "annual_report"),
+        # 季报：同基金同年，不得进入 multi-year
+        "005680-2026-Q1-quarterly_report-dddddddddddddddd": _record("005680-2026-Q1-quarterly_report-dddddddddddddddd", 2026, "quarterly_report"),
+    }
+    catalog_path.write_text(_json.dumps({"schema_version": 1, "reports": reports}, ensure_ascii=False), encoding="utf-8")
+
+    matching = _collect_matching_docs(work_dir, "005680", (2023, 2024, 2025, 2026))
+    assert matching is not None
+    years = [doc.year for doc in matching]
+    # 只含 annual 年份；2026 季报被过滤
+    assert years == [2023, 2024, 2025]
+    assert 2026 not in years

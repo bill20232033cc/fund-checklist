@@ -82,6 +82,8 @@ from .models import (
     FundReport,
     GenerateReportRequest,
     GenerateReportResult,
+    SnapshotReportRequest,
+    SnapshotReportResult,
     HoldingExtraction,
     IndustryAllocationItem,
     ThresholdEvent,
@@ -264,11 +266,60 @@ DISCLOSURE_LOCATOR_CONTRACT_REGISTRY = (
     ),
     _DisclosureLocatorContract(
         profile_name="performance_returns",
-        aliases=("净值增长率", "业绩比较基准收益率", "基准收益率", "收益表现", "基金净值表现"),
+        aliases=(
+            "净值增长率",
+            "业绩比较基准收益率",
+            "基准收益率",
+            "收益表现",
+            "基金净值表现",
+            # 2026-08-14 第4个任务：performance 类词面收口。
+            # 匹配机制为子串包含（any(alias in query ...)），「超额表现」
+            # 经「超额」子串 alias 命中（非「超额收益/超额收益率」）。
+            "超额收益",
+            "超额收益率",
+            "超额",
+            "净值表现",
+        ),
         candidate_queries=(
             "净值增长率",
             "基金份额净值增长率及其与同期业绩比较基准收益率的比较",
             "基金净值表现",
+            "业绩比较基准收益率",
+        ),
+        acceptable_title_family=(
+            "基金份额净值增长率及其与同期业绩比较基准收益率的比较",
+            "基金净值表现",
+        ),
+        requires_table_citation=True,
+        extraction_allowed=False,
+        anchor_title_family=_ANCHOR_PERFORMANCE_RETURNS_HEADER_SIGNATURE,
+    ),
+    # 2026-08-14 快照（§6.25 裁决 9）：季报/半年报当期业绩受控 profile，
+    # 独立 title-family + table anchor；不污染 10G annual 契约。
+    # extraction_allowed=False 口径与 performance_returns 一致（受控检索/锚点用途），
+    # 快照确定性抽取在 Service 层按 template_id 独立实现（snapshot_extraction.py）。
+    _DisclosureLocatorContract(
+        profile_name="quarterly_performance",
+        aliases=("季报业绩", "季报净值", "当期业绩"),
+        candidate_queries=(
+            "基金份额净值增长率及其与同期业绩比较基准收益率的比较",
+            "净值增长率",
+            "业绩比较基准收益率",
+        ),
+        acceptable_title_family=(
+            "基金份额净值增长率及其与同期业绩比较基准收益率的比较",
+            "基金净值表现",
+        ),
+        requires_table_citation=True,
+        extraction_allowed=False,
+        anchor_title_family=_ANCHOR_PERFORMANCE_RETURNS_HEADER_SIGNATURE,
+    ),
+    _DisclosureLocatorContract(
+        profile_name="semiannual_performance",
+        aliases=("半年报业绩", "半年报净值", "中期业绩"),
+        candidate_queries=(
+            "基金份额净值增长率及其与同期业绩比较基准收益率的比较",
+            "净值增长率",
             "业绩比较基准收益率",
         ),
         acceptable_title_family=(
@@ -570,6 +621,7 @@ class ImportLocalReportRequest:
     year: int
     work_dir: Path
     report_type: ReportType = ReportType.ANNUAL_REPORT
+    quarter: int | None = None
     share_class: str | None = None
 
 
@@ -2430,10 +2482,14 @@ class FundReadingService:
             catalog_reports = repository.list_reports()
 
             # 查找匹配的年报（按年份去重，保留最后一条）
+            # 防污染（§6.25 裁决 17）：只匹配 annual_report，快照文档不进 generate 系列
             docs_by_year: dict[int, str] = {}
             available_years: list[int] = []
             for report in catalog_reports:
-                if report.get("fund_code") == request.fund_code:
+                if (
+                    report.get("fund_code") == request.fund_code
+                    and report.get("report_type") == "annual_report"
+                ):
                     year = int(report["year"])
                     available_years.append(year)
                     docs_by_year[year] = str(report["document_id"])
@@ -2581,6 +2637,21 @@ class FundReadingService:
                 failed_count = sum(1 for s in process_states.values() if s.status == "failed")
                 llm_warnings.append(f"审计结果: {passed_count}章通过, {failed_count}章失败")
 
+                # 报告级装配审计：章节集合/顺序/标题与模板 manifest 一致（回归防线）
+                from fund_agent.service.audit_pipeline import verify_report_assembly
+                from fund_agent.service.report_template import ANNUAL_TEMPLATE
+                assembly_ok, assembly_problems = verify_report_assembly(
+                    ANNUAL_TEMPLATE, chapters,
+                )
+                if not assembly_ok:
+                    return GenerateReportResult(
+                        failure=ToolFailure(
+                            code=FailureCode.SCHEMA_DRIFT,
+                            message="年报报告装配与模板 manifest 不一致: "
+                            + "; ".join(assembly_problems),
+                        ),
+                    )
+
             else:
                 chapters = self._generate_chapters(
                     fund_code=request.fund_code,
@@ -2634,6 +2705,260 @@ class FundReadingService:
             return GenerateReportResult(failure=ToolFailure(code=exc.code, message=exc.message))
         except Exception as exc:
             return GenerateReportResult(failure=ToolFailure(code=FailureCode.UNAVAILABLE, message=f"报告生成暂不可用: {exc}"))
+
+
+    def generate_snapshot_report(
+        self,
+        request: SnapshotReportRequest,
+        llm_client: Any | None = None,
+    ) -> SnapshotReportResult:
+        """生成季报/半年报单期快照报告（§6.25 裁决 10/11/16）。
+
+        参数:
+            request: 快照报告生成请求。
+            llm_client: 可选 LLM client；None 时使用模板模式（数据表 + 模板章节）。
+
+        返回:
+            SnapshotReportResult；成功时包含 FundReport 与输出路径。
+        """
+
+        try:
+            from fund_agent.service.report_template import (
+                QUARTERLY_SNAPSHOT_TEMPLATE,
+                QUARTERLY_SNAPSHOT_TEMPLATE_ID,
+                SEMIANNUAL_SNAPSHOT_TEMPLATE,
+                SEMIANNUAL_SNAPSHOT_TEMPLATE_ID,
+            )
+            from fund_agent.service.snapshot_extraction import extract_snapshot_data
+            from fund_agent.service.snapshot_scoring import compute_snapshot_score
+
+            template_id = (
+                QUARTERLY_SNAPSHOT_TEMPLATE_ID
+                if request.report_type == "quarterly_report"
+                else SEMIANNUAL_SNAPSHOT_TEMPLATE_ID
+            )
+            template = (
+                QUARTERLY_SNAPSHOT_TEMPLATE
+                if request.report_type == "quarterly_report"
+                else SEMIANNUAL_SNAPSHOT_TEMPLATE
+            )
+            work_dir = Path(request.work_dir)
+            repository = _repository(work_dir)
+            catalog_reports = repository.list_reports()
+
+            # 按 fund_code + report_type + year (+ quarter) 匹配 catalog 已导入文档
+            matches = [
+                r for r in catalog_reports
+                if r.get("fund_code") == request.fund_code
+                and r.get("report_type") == request.report_type
+                and r.get("year") == request.report_year
+                and (request.quarter is None or r.get("quarter") == request.quarter)
+            ]
+            if not matches:
+                return SnapshotReportResult(
+                    failure=ToolFailure(
+                        code=FailureCode.NOT_FOUND,
+                        message=f"catalog 中未找到 {request.fund_code} {request.report_type} {request.report_year}"
+                        + (f" Q{request.quarter}" if request.quarter else "") + " 文档",
+                    ),
+                )
+            document_id = str(matches[0]["document_id"])
+            store = repository.load_store(document_id)
+
+            # 1. 快照确定性抽取
+            data = extract_snapshot_data(
+                document_id=document_id,
+                store=store,
+                fund_code=request.fund_code,
+                fund_name=request.fund_name,
+                report_year=request.report_year,
+                template_id=template_id,
+                quarter=request.quarter,
+                period="H1" if request.report_type == "semiannual_report" else None,
+            )
+            snapshot_context = data.to_context_dict()
+            snapshot_score = compute_snapshot_score(data)
+
+            # 2. 生成章节
+            warnings: list[str] = []
+            chapter_contents: dict[int, str] = {}
+            if llm_client is not None:
+                from fund_agent.service.audit_pipeline import ReportGenerationCoordinator
+                chapter_concurrency = request.chapter_concurrency
+                if chapter_concurrency is None:
+                    env_value = os.environ.get("FUND_CHECKLIST_CHAPTER_CONCURRENCY", "").strip()
+                    chapter_concurrency = int(env_value) if env_value else 4
+                coordinator = ReportGenerationCoordinator(
+                    llm_client=llm_client,
+                    work_dir=work_dir,
+                    chapter_concurrency=chapter_concurrency,
+                    template=template,
+                )
+                chapter_contents, coordinator_warnings = coordinator.generate_report(
+                    fund_code=request.fund_code,
+                    fund_name=request.fund_name,
+                    report_year=request.report_year,
+                    performance={},
+                    holdings={},
+                    allocation={},
+                    fees={},
+                    snapshot_data=snapshot_context,
+                    snapshot_score=snapshot_score,
+                    # 报告期透传：LLM 路径数据表格头部必须与标题期次一致
+                    # （此前缺省导致「2026 年QNone」），半年报传 period="H1"。
+                    quarter=request.quarter,
+                    period="H1" if request.report_type == "semiannual_report" else None,
+                )
+                warnings.extend(coordinator_warnings)
+            else:
+                # 模板模式：数据表 + 模板章节
+                for cid in template.chapter_ids:
+                    data_table = template.build_data_table(
+                        chapter_id=cid,
+                        fund_code=request.fund_code,
+                        fund_name=request.fund_name,
+                        report_year=request.report_year,
+                        quarter=request.quarter,
+                        period="H1" if request.report_type == "semiannual_report" else None,
+                        snapshot_data=snapshot_context,
+                        snapshot_score=snapshot_score,
+                    )
+                    template_chapter = template.build_template_chapter(
+                        chapter_id=cid,
+                        fund_name=request.fund_name,
+                        report_year=request.report_year,
+                        quarter=request.quarter,
+                        snapshot_data=snapshot_context,
+                        snapshot_score=snapshot_score,
+                    )
+                    chapter_contents[cid] = data_table + "\n\n## 分析\n\n" + template_chapter
+
+            # 章节按 chapter_id 升序组装（快照 template.chapter_ids 为生成顺序
+            # front(1,2,3,4)+closing(0)，概览 ch0 最后生成但必须排在最前展示；
+            # 以生成结果章节集合为准，缺章/多章交由装配校验 fail-closed）
+            chapters = tuple(
+                ReportChapter(
+                    chapter_id=cid,
+                    title=template.chapter_titles.get(cid, f"章节 {cid}"),
+                    content=chapter_contents[cid],
+                    data_sources=(),
+                )
+                for cid in sorted(chapter_contents.keys())
+            )
+            if any(not ch.content for ch in chapters):
+                warnings.append("部分快照章节内容为空")
+
+            # 报告级装配审计：章节集合/顺序/标题与模板 manifest 一致（违反 fail-closed）
+            from fund_agent.service.audit_pipeline import verify_report_assembly
+            assembly_ok, assembly_problems = verify_report_assembly(template, chapters)
+            if not assembly_ok:
+                return SnapshotReportResult(
+                    failure=ToolFailure(
+                        code=FailureCode.SCHEMA_DRIFT,
+                        message="快照报告装配与模板 manifest 不一致: "
+                        + "; ".join(assembly_problems),
+                    ),
+                )
+
+            report = FundReport(
+                fund_code=request.fund_code,
+                fund_name=request.fund_name,
+                report_year=request.report_year,
+                chapters=chapters,
+                metadata={
+                    "generated_at": date.today().isoformat(),
+                    "template_version": "snapshot-v1",
+                    "generation_mode": "llm" if llm_client else "template",
+                    "report_type": request.report_type,
+                    "quarter": request.quarter,
+                    "snapshot_score": {
+                        "excess_score": snapshot_score.excess_score,
+                        "position_score": snapshot_score.position_score,
+                        "concentration_score": snapshot_score.concentration_score,
+                        "total_score": snapshot_score.total_score,
+                        "grade": snapshot_score.grade,
+                    },
+                },
+            )
+
+            # 3. 输出
+            output_path = None
+            if request.output_format in ("markdown", "pdf"):
+                output_path = self._export_snapshot_markdown(report, work_dir, template_id, snapshot_score)
+                if request.output_format == "pdf":
+                    output_path, pdf_warning = self._export_pdf(output_path, work_dir)
+                    if pdf_warning:
+                        warnings.append(pdf_warning)
+
+            return SnapshotReportResult(
+                report=report,
+                output_path=output_path,
+                warnings=tuple(warnings),
+                failure=None,
+            )
+        except DocumentToolError as exc:
+            return SnapshotReportResult(failure=ToolFailure(code=exc.code, message=exc.message))
+        except Exception as exc:
+            return SnapshotReportResult(failure=ToolFailure(code=FailureCode.UNAVAILABLE, message=f"快照报告生成暂不可用: {exc}"))
+
+    def _export_snapshot_markdown(
+        self,
+        report: FundReport,
+        work_dir: Path,
+        template_id: str,
+        snapshot_score: Any = None,
+    ) -> str:
+        """导出快照 Markdown 文件（命名：{fund_code}-{year}Q{quarter}-quarterly-snapshot.md）。
+
+        参数:
+            report: 快照报告。
+            work_dir: 工作目录。
+            template_id: 快照模板 id（用于命名与标题）。
+            snapshot_score: 快照评分（可选，用于 sidecar）。
+
+        返回:
+            Markdown 文件路径。
+        """
+
+        from fund_agent.service.report_template import QUARTERLY_SNAPSHOT_TEMPLATE_ID
+        output_dir = Path(work_dir) / "reports"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        quarter = int(report.metadata.get("quarter") or 0) if report.metadata else 0
+        if template_id == QUARTERLY_SNAPSHOT_TEMPLATE_ID:
+            base_name = f"{report.fund_code}-{report.report_year}Q{quarter}-quarterly-snapshot"
+            report_label = "季度快照"
+        else:
+            base_name = f"{report.fund_code}-{report.report_year}H1-semiannual-snapshot"
+            report_label = "半年度快照"
+        output_path = output_dir / f"{base_name}.md"
+        sidecar_path = output_dir / f"{base_name}.meta.json"
+
+        period_label = f"{report.report_year}Q{quarter}" if template_id == QUARTERLY_SNAPSHOT_TEMPLATE_ID else f"{report.report_year}H1"
+        lines = [f"# {report.fund_name}（{report.fund_code}）{period_label} {report_label}\n"]
+        lines.append(
+            f"**风险警示与免责声明**：本文由 AI/大模型基于 {report.fund_name}（{report.fund_code}）"
+            "已公开披露且可核查的基金季报、半年度报告、招募说明书及其他监管披露文件辅助生成，"
+            "仅用于个人投资研究与信息交流之目的。因 AI/大模型存在幻觉，本文不可避免地会产生不完全符合报告原文的情况，"
+            "阅读本文后产生的任何观点需核对原文，使用本文内容所产生的任何直接或间接后果，均由使用者自行承担。\n\n"
+            "**风险提示**：本文所提到的观点仅代表个人的意见，所涉及标的不作推荐，据此买卖，风险自负。\n"
+        )
+        for chapter in report.chapters:
+            lines.append(f"\n---\n\n## 第 {chapter.chapter_id + 1} 章：{chapter.title}\n")
+            lines.append(chapter.content)
+
+        output_path.write_text("\n".join(lines), encoding="utf-8")
+
+        sidecar: dict[str, object] = {
+            "fund_code": report.fund_code,
+            "fund_name": report.fund_name,
+            "report_year": report.report_year,
+            "report_type": report.metadata.get("report_type") if report.metadata else None,
+            "quarter": quarter or None,
+            "generation_time": datetime.now(timezone.utc).isoformat(),
+            "snapshot_score": report.metadata.get("snapshot_score") if report.metadata else None,
+        }
+        sidecar_path.write_text(json.dumps(sidecar, ensure_ascii=False, indent=2), encoding="utf-8")
+        return str(output_path)
 
     def _extract_report_holdings_with_citations(
         self,
@@ -2691,6 +3016,9 @@ class FundReadingService:
         target_years = {doc.year for doc in annual_docs}
         for record in repository.list_reports():
             if record.get("fund_code") != source_fund:
+                continue
+            # 防污染（§6.25 裁决 17）：关联持仓源只取 annual_report
+            if record.get("report_type") != "annual_report":
                 continue
             year = int(record["year"])
             if year not in target_years:
@@ -3413,6 +3741,17 @@ class FundReadingService:
                 content=content,
                 data_sources=data_sources,
             ))
+
+        # 报告级装配审计：章节集合/顺序/标题与模板 manifest 一致（模板模式同样生效）
+        from fund_agent.service.audit_pipeline import verify_report_assembly
+        from fund_agent.service.report_template import ANNUAL_TEMPLATE
+        assembly_ok, assembly_problems = verify_report_assembly(ANNUAL_TEMPLATE, chapters)
+        if not assembly_ok:
+            raise DocumentToolError(
+                code=FailureCode.SCHEMA_DRIFT,
+                message="年报模板章节装配与模板 manifest 不一致: "
+                + "; ".join(assembly_problems),
+            )
 
         return chapters
 
@@ -4315,6 +4654,7 @@ class FundReadingService:
                 fund_name=request.fund_name,
                 year=request.year,
                 report_type=request.report_type,
+                quarter=request.quarter,
                 share_class=request.share_class,
             )
         )

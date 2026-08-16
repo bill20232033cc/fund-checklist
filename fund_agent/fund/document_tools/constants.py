@@ -13,9 +13,20 @@ class StrValueEnum(str, Enum):
 
 
 class ReportType(StrValueEnum):
-    """基金报告类型；MVP 首批只支持年报。"""
+    """基金报告类型；年报主链 + 季报/半年报单期快照（§6.25）。"""
 
     ANNUAL_REPORT = "annual_report"
+    SEMIANNUAL_REPORT = "semiannual_report"
+    QUARTERLY_REPORT = "quarterly_report"
+
+
+class SnapshotQuarter(StrValueEnum):
+    """季报期次；用于 quarterly document_id 的 -Q[1-4] 段与 catalog quarter 字段。"""
+
+    Q1 = "q1"
+    Q2 = "q2"
+    Q3 = "q3"
+    Q4 = "q4"
 
 
 class SourceKind(StrValueEnum):

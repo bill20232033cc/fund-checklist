@@ -172,6 +172,44 @@ uv run fund-checklist fees \
 
 `multi-year` 输出对每个缺失年份附 `missing_year_notes` 原因说明（如转型当年无全年份额净值增长率、catalog 未导入），不伪造年度数据。
 
+## 5.5 季报/半年报快照（snapshot）
+
+对已导入的单期季报/半年报生成当期快照分析（5 章 / 6 章，非多年；季报缺失项 fail-closed 声明）：
+
+```bash
+# 导入季报（contract-first：显式 --report-type + --quarter）
+uv run fund-checklist import \
+  --pdf-dir 基金季报 \
+  --fund-code 005680 \
+  --fund-name '财通资管价值成长混合' \
+  --report-type quarterly_report \
+  --quarter 2 \
+  --year-range 2026-2026 \
+  --work-dir .fund_checklist_005680_snapshot
+
+# 生成季报快照
+uv run fund-checklist snapshot-quarterly \
+  --fund-code 005680 \
+  --fund-name '财通资管价值成长混合' \
+  --year 2026 \
+  --quarter 2 \
+  --format markdown \
+  --work-dir .fund_checklist_005680_snapshot
+
+# 生成半年报快照（--period H1）
+uv run fund-checklist snapshot-semiannual \
+  --fund-code 005680 \
+  --fund-name '财通资管价值成长混合' \
+  --year 2025 \
+  --period H1 \
+  --format markdown \
+  --work-dir .fund_checklist_005680_snapshot
+```
+
+- 落盘：`reports/{fund_code}-{year}Q{n}-quarterly-snapshot.md` / `reports/{fund_code}-{year}H1-semiannual-snapshot.md`；`--format json | markdown | pdf`。
+- 快照文档（quarterly/semiannual）**不会**进入 `multi-year` / `generate` 的 annual 系列（catalog 过滤按 `report_type=annual_report` 防污染）。
+- 从 EID 下载季报/半年报：`download --report-type quarterly_report --quarter 2` / `download --report-type semiannual_report`。
+
 ## 6. 生成基金分析报告
 
 `generate` 生成 8 章分析报告（程序数据表格 + LLM 定性分析）：

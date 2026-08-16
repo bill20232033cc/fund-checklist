@@ -126,3 +126,97 @@ def test_import_local_pdf_uses_content_fingerprint_not_filename(tmp_path) -> Non
     assert changed.identity.document_id != original.identity.document_id
     assert "original" not in original.identity.document_id
     assert "renamed" not in renamed.identity.document_id
+
+
+def test_import_quarterly_report_document_id_carries_quarter_segment(tmp_path) -> None:
+    """季报 document_id 带 -Q[n] 期次段，且 blob ref 可解析（§6.25 裁决 1）。"""
+
+    source_path = tmp_path / "quarterly.pdf"
+    pdf_bytes = _write_pdf(source_path, marker=b"quarterly-q2")
+    expected_fingerprint = hashlib.sha256(pdf_bytes).hexdigest()
+    provider = LocalPdfSourceProvider(blob_root=tmp_path / "blob")
+
+    result = provider.import_pdf(
+        PdfImportRequest(
+            path=source_path,
+            fund_code="005680",
+            fund_name="财通资管价值成长混合",
+            year=2026,
+            report_type=ReportType.QUARTERLY_REPORT,
+            quarter=2,
+        )
+    )
+
+    assert result.identity.report_type is ReportType.QUARTERLY_REPORT
+    assert result.identity.quarter == 2
+    assert result.identity.document_id == f"005680-2026-Q2-quarterly_report-{expected_fingerprint[:16]}"
+    # blob ref 必须能被 parse_blob_ref 接受（_PARSED_DOCUMENT_ID_PATTERN 放行）
+    assert provider.blob_store.read_pdf(result.stored_blob_ref) == pdf_bytes
+
+
+def test_import_semiannual_report_document_id_without_quarter(tmp_path) -> None:
+    """半年报 document_id 不带期次段，period 记为 H1（§6.25 裁决 1/13）。"""
+
+    source_path = tmp_path / "semiannual.pdf"
+    pdf_bytes = _write_pdf(source_path, marker=b"semiannual-2025")
+    expected_fingerprint = hashlib.sha256(pdf_bytes).hexdigest()
+    provider = LocalPdfSourceProvider(blob_root=tmp_path / "blob")
+
+    result = provider.import_pdf(
+        PdfImportRequest(
+            path=source_path,
+            fund_code="005680",
+            fund_name="财通资管价值成长混合",
+            year=2025,
+            report_type=ReportType.SEMIANNUAL_REPORT,
+        )
+    )
+
+    assert result.identity.report_type is ReportType.SEMIANNUAL_REPORT
+    assert result.identity.quarter is None
+    assert result.identity.period == "H1"
+    assert result.identity.document_id == f"005680-2025-semiannual_report-{expected_fingerprint[:16]}"
+    assert provider.blob_store.read_pdf(result.stored_blob_ref) == pdf_bytes
+
+
+def test_quarterly_report_requires_quarter(tmp_path) -> None:
+    """quarterly_report 缺 --quarter 等价输入必须 fail-closed 为 identity_mismatch。"""
+
+    source_path = tmp_path / "quarterly.pdf"
+    _write_pdf(source_path)
+    provider = LocalPdfSourceProvider(blob_root=tmp_path / "blob")
+
+    with pytest.raises(DocumentToolError) as exc_info:
+        provider.import_pdf(
+            PdfImportRequest(
+                path=source_path,
+                fund_code="005680",
+                fund_name="财通资管价值成长混合",
+                year=2026,
+                report_type=ReportType.QUARTERLY_REPORT,
+            )
+        )
+
+    assert exc_info.value.code is FailureCode.IDENTITY_MISMATCH
+
+
+def test_quarter_rejected_for_non_quarterly_report(tmp_path) -> None:
+    """quarter 仅适用于 quarterly_report；annual 带 quarter 必须 fail-closed。"""
+
+    source_path = tmp_path / "annual.pdf"
+    _write_pdf(source_path)
+    provider = LocalPdfSourceProvider(blob_root=tmp_path / "blob")
+
+    with pytest.raises(DocumentToolError) as exc_info:
+        provider.import_pdf(
+            PdfImportRequest(
+                path=source_path,
+                fund_code="005680",
+                fund_name="财通资管价值成长混合",
+                year=2025,
+                report_type=ReportType.ANNUAL_REPORT,
+                quarter=2,
+            )
+        )
+
+    assert exc_info.value.code is FailureCode.IDENTITY_MISMATCH

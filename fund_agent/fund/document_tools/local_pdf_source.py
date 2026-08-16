@@ -27,10 +27,12 @@ from fund_agent.fund.document_tools.models import PdfImportRequest, PdfImportRes
 _ACCEPTED_CONTENT_TYPES = frozenset({PDF_CONTENT_TYPE})
 _DOCUMENT_ID_FUND_CODE_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 _PARSED_DOCUMENT_ID_PATTERN = re.compile(
-    r"^[A-Za-z0-9_.-]+-\d{4}-"  # fund_code-year-
-    r"(?:annual_report)-"       # report_type (MVP: annual_report only)
+    r"^[A-Za-z0-9_.-]+-\d{4}"  # fund_code-year
+    r"(?:-Q[1-4])?-"            # optional quarterly period segment + dash
+    r"(?:annual_report|semiannual_report|quarterly_report)-"
     r"[a-f0-9]{16}$"            # fingerprint prefix (16 hex chars)
 )
+_QUARTERLY_DOCUMENT_ID_PATTERN = re.compile(r"-Q([1-4])-quarterly_report-")
 
 
 class PdfBlobStore:
@@ -148,6 +150,7 @@ class LocalPdfSourceProvider:
             year=normalized.year,
             report_type=normalized.report_type,
             content_fingerprint=content_fingerprint,
+            quarter=normalized.quarter,
         )
         _assert_known_identity(
             index=_read_identity_index(self._blob_root),
@@ -183,6 +186,8 @@ class LocalPdfSourceProvider:
             local_import_id=f"local-{uuid4().hex}",
             content_fingerprint=content_fingerprint,
             document_id=document_id,
+            quarter=normalized.quarter,
+            period="H1" if normalized.report_type is ReportType.SEMIANNUAL_REPORT else None,
             share_class=normalized.share_class,
         )
         return PdfImportResult(identity=identity, stored_blob_ref=stored_blob_ref)
@@ -212,6 +217,7 @@ def build_document_id(
     year: int,
     report_type: ReportType,
     content_fingerprint: str,
+    quarter: int | None = None,
 ) -> str:
     """按裁决规则构造 public document_id。
 
@@ -220,17 +226,20 @@ def build_document_id(
         year: 报告年份。
         report_type: 报告类型。
         content_fingerprint: PDF 内容指纹。
+        quarter: 季报期次（1-4）；仅 quarterly_report 使用，annual/semiannual 必须为 None。
 
     返回:
-        `fund_code-year-report_type-fingerprint_prefix` 格式的 document_id。
+        `fund_code-year-report_type-fingerprint_prefix` 格式的 document_id；
+        quarterly 为 `fund_code-year-Q{n}-quarterly_report-fingerprint_prefix`（§6.25 期次编码）。
 
     异常:
-        DocumentToolError: fund_code 或 report_type 不满足 MVP 身份约束。
+        DocumentToolError: fund_code / report_type / quarter 不满足身份约束。
     """
 
-    _assert_supported_identity(fund_code=fund_code, report_type=report_type)
+    _assert_supported_identity(fund_code=fund_code, report_type=report_type, quarter=quarter)
     fingerprint_prefix = content_fingerprint[:FINGERPRINT_PREFIX_LENGTH]
-    return f"{fund_code}-{year}-{report_type.value}-{fingerprint_prefix}"
+    period_segment = f"-Q{quarter}" if report_type is ReportType.QUARTERLY_REPORT else ""
+    return f"{fund_code}-{year}{period_segment}-{report_type.value}-{fingerprint_prefix}"
 
 
 def make_blob_ref(document_id: str) -> str:
@@ -280,6 +289,7 @@ def _normalize_request(request: PdfImportRequest) -> PdfImportRequest:
         fund_name=request.fund_name.strip(),
         year=request.year,
         report_type=_coerce_report_type(request.report_type),
+        quarter=request.quarter,
         share_class=request.share_class.strip() if request.share_class else None,
         content_type=request.content_type.strip().lower(),
     )
@@ -291,7 +301,7 @@ def _coerce_report_type(report_type: ReportType) -> ReportType:
     try:
         return ReportType(report_type)
     except ValueError as exc:
-        raise DocumentToolError(FailureCode.IDENTITY_MISMATCH, "report_type 不在 MVP 支持范围") from exc
+        raise DocumentToolError(FailureCode.IDENTITY_MISMATCH, "report_type 不在支持范围") from exc
 
 
 def _read_local_pdf_bytes(path: Path) -> bytes:
@@ -316,11 +326,16 @@ def _assert_pdf_integrity(content_type: str, pdf_bytes: bytes) -> None:
         raise DocumentToolError(FailureCode.INTEGRITY_ERROR, "PDF magic bytes 校验失败")
 
 
-def _assert_supported_identity(*, fund_code: str, report_type: ReportType) -> None:
-    """校验 Slice 1 支持的 public identity 输入。"""
+def _assert_supported_identity(*, fund_code: str, report_type: ReportType, quarter: int | None = None) -> None:
+    """校验支持的 public identity 输入（annual 主链 + 季报/半年报快照）。"""
 
-    if report_type is not ReportType.ANNUAL_REPORT:
-        raise DocumentToolError(FailureCode.IDENTITY_MISMATCH, "report_type 不在 MVP 支持范围")
+    if report_type not in (ReportType.ANNUAL_REPORT, ReportType.SEMIANNUAL_REPORT, ReportType.QUARTERLY_REPORT):
+        raise DocumentToolError(FailureCode.IDENTITY_MISMATCH, "report_type 不在支持范围")
+    if report_type is ReportType.QUARTERLY_REPORT:
+        if quarter not in (1, 2, 3, 4):
+            raise DocumentToolError(FailureCode.IDENTITY_MISMATCH, "quarterly_report 必须显式指定 quarter 1-4")
+    elif quarter is not None:
+        raise DocumentToolError(FailureCode.IDENTITY_MISMATCH, "quarter 仅适用于 quarterly_report")
     if not fund_code or not _DOCUMENT_ID_FUND_CODE_PATTERN.fullmatch(fund_code):
         raise DocumentToolError(FailureCode.IDENTITY_MISMATCH, "fund_code 不满足 document_id 规则")
 
@@ -334,6 +349,8 @@ def _identity_fields_for_match(request: PdfImportRequest, document_id: str) -> d
         "fund_name": request.fund_name,
         "year": request.year,
         "report_type": request.report_type.value,
+        "quarter": request.quarter,
+        "period": "H1" if request.report_type is ReportType.SEMIANNUAL_REPORT else None,
         "source_kind": SourceKind.LOCAL_PDF.value,
     }
 

@@ -4,7 +4,7 @@
 
 - `LocalPdfSourceProvider` 只支持本地 PDF 导入。
 - `PdfBlobStore` 负责受控落盘和读取，不向 public identity 暴露本地路径。
-- `document_id` 按 `fund_code-year-report_type-fingerprint_prefix` 生成。
+- `document_id` 按 `fund_code-year-report_type-fingerprint_prefix` 生成；`quarterly_report` 在 year 与 report_type 之间插入 `-Q[1-4]` 期次段（如 `005680-2026-Q2-quarterly_report-…`），`semiannual_report` 不带期次段（design.md §6.25）。
 - `content_fingerprint` 使用 PDF bytes 的 `sha256`。
 - `local_import_id` 仅表示导入事件，不参与 public tool route。
 - `share_class` 为可选 metadata，不参与 `document_id`。
@@ -54,4 +54,4 @@ Slice 6 不做 SQLite、schema migration、concurrent write locking、repair/reb
 
 ## Post-MVP Slice 10L Repository list_reports
 
-`FilesystemReportRepository.list_reports()` 返回 catalog 中所有 completed report 的安全摘要（`document_id`、`fund_code`、`fund_name`、`year`、`report_type`、`share_class`），不加载 Docling store。catalog 不存在时返回空元组。CLI `multi-year` 子命令使用此方法按 fund_code + year 查找已导入年报。
+`FilesystemReportRepository.list_reports()` 返回 catalog 中所有 completed report 的安全摘要（`document_id`、`fund_code`、`fund_name`、`year`、`report_type`、`quarter`、`period`、`share_class`），不加载 Docling store。catalog 不存在时返回空元组。CLI `multi-year` 子命令使用此方法按 fund_code + year + report_type=annual_report 查找已导入年报（快照文档被过滤，防污染）。

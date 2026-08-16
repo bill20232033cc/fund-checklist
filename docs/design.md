@@ -1,6 +1,6 @@
 # fund-checklist 设计真源
 
-更新时间：2026-07-25
+更新时间：2026-08-15（季报/半年报快照：design.md §6.25 + implementation-control.md「快照大任务」节，2026-08-14 启动，2026-08-15 收口）
 文档状态：设计真源，覆盖基金分析助手完整链路；不得作为实现完成证据。
 适用范围：基金分析助手，覆盖年报导入 → 结构化抽取 → 多年度追踪 → 信号评分 → 报告生成 → 审计管道。
 关联文档：AGENTS.md（执行规则）、docs/implementation-control.md（当前执行面板）
@@ -10,7 +10,7 @@
 ### 0.1 当前代码事实
 
 - 本仓库已实现 `fund_agent/` 完整分层（fund / service / host / agent / cli），`tests/` 覆盖 document_tools / service / agent / cli，`docs/design.md` 与 `docs/implementation-control.md` 为真源文档。
-- CLI 已实现 11 个子命令：`read` / `multi-year` / `import` / `holdings` / `download` / `allocation` / `fees` / `audit` / `deep-audit` / `generate` / `ask`。
+- CLI 已实现 17 个子命令：`read` / `multi-year` / `import` / `holdings` / `download` / `allocation` / `fees` / `audit` / `deep-audit` / `generate` / `ask` / `interactive` / `repair` / `regenerate` / `fix` / `snapshot-quarterly` / `snapshot-semiannual`（后两者为季报/半年报单期快照，2026-08-14，见 §6.25）。
 - 已实现能力：本地 PDF 导入、Docling 转换、7 个 reading tools、Service 层 profile routing + disclosure target contract、结构化字段抽取（费率/业绩/持仓/资产配置）、多年度聚合、确定性信号评分（基金类型感知：主动基金 6 指标；被动基金 3 指标 100 分制）、8 章分析报告生成、三层审计管道。
 - 当前样本材料位于 `基金年报/`，包含多只基金多个年度的 PDF；已通过受控 import 管理。
 - `docs/fund-analysis-template-draft.md` 存在，按 `AGENTS.md` 规则，在报告生成、字段抽取或投资判断路径中使用。
@@ -282,8 +282,7 @@ report / judgment contract
 - `share_class` 为可选 metadata；当前不强制解析，不参与 `document_id`。
 - 无法明确 A/C 类时记录 `share_class = null`，不得从文件名或标题猜测。
 - 若同一年同 `report_type` 下不同份额类别 PDF 内容不同，`content_fingerprint` 会区分 `document_id`。
-- `report_type` 当前仅支持 `annual_report`。
-- `semiannual_report` / `quarterly_report` 保留为未来扩展，不进入当前实现。
+- `report_type` 支持 `annual_report`（年报主链）；`semiannual_report` / `quarterly_report` 自 2026-08-14 起支持（季报/半年报单期快照，见 §6.25；quarterly 的 document_id 带 `-Q[1-4]` 期次段）。
 
 ### 4.2 Source 与 Blob
 
@@ -695,7 +694,7 @@ interactive 表号一致性校验（2026-08-11 Fix C，仅 interactive）：`rea
 interactive 问答的检索与终答语义（Mimo review ACCEPTED，用户按推荐裁决）：
 
 - 受控检索路由：新增 `manager_holdings` profile（target：9.4 期末基金管理人的从业人员持有本基金；candidate_queries 覆盖 持有本基金 / 基金经理持有 / 期末基金管理人的从业人员持有本基金 / 基金经理持有本基金），复用 `_extract_manager_holding` 的 9.4 定位语义；该 profile 的候选词为 4 个，Service 候选上限（原始 query + 受控候选）同步调整为 5；规模、份额、基准收益率、超额收益率、十大持仓 等 profile 排后续 slice。
-- 受控表锚点（2026-08-09 裁决 + P0-1 实施；2026-08-11 Fix C 扩展 `performance_returns`）：Service 层对高误命中 query 类（`manager_holdings`、`holdings_top10`、`performance_returns`）组合 public tools 解析 `table_ref` 锚点注入 prompt（「候选表锚点: table-XXXX——请先 list_tables 确认表号在列，再 read_table 该表，勿自行猜测表号」，2026-08-11 与 runner 表号一致性校验对齐，锚点表号同样必须先经 list_tables 确认）；`manager_holdings` 按 9.4 行头优先、9.2 行头回退，`holdings_top10` 按表头签名（序号/股票名称/公允价值）且 row_count ≥10，`performance_returns` 按 3.2.1 表头签名（阶段/份额净值增长率/业绩比较基准收益率）且 A 类标题优先（含 A 排除 C，004393-2025 命中 table-0009）；解析失败 / document_id 为 None / 工具不可用 → fail-open 不注入（不走候选词路径的 fail-open 语义保持不变）；其余 profile 不注入锚点，保持 LLM 自由选表（Phase 7.2「全量走 LLM」的受控扩展）。
+- 受控表锚点（2026-08-09 裁决 + P0-1 实施；2026-08-11 Fix C 扩展 `performance_returns`）：Service 层对高误命中 query 类（`manager_holdings`、`holdings_top10`、`performance_returns`）组合 public tools 解析 `table_ref` 锚点注入 prompt（「候选表锚点: table-XXXX——请先 list_tables 确认表号在列，再 read_table 该表，勿自行猜测表号」，2026-08-11 与 runner 表号一致性校验对齐，锚点表号同样必须先经 list_tables 确认）；`manager_holdings` 按 9.4 行头优先、9.2 行头回退，`holdings_top10` 按表头签名（序号/股票名称/公允价值）且 row_count ≥10，`performance_returns` 按 3.2.1 表头签名（阶段/份额净值增长率/业绩比较基准收益率）且 A 类标题优先（含 A 排除 C，004393-2025 命中 table-0009）；解析失败 / document_id 为 None / 工具不可用 → fail-open 不注入（不走候选词路径的 fail-open 语义保持不变）；其余 profile 不注入锚点，保持 LLM 自由选表（Phase 7.2「全量走 LLM」的受控扩展）。（2026-08-14 第4个任务收口：`performance_returns` aliases 扩展「超额收益/超额收益率/超额/净值表现」，净值增长率/基准收益率/超额收益/净值表现词面全部进入受控路由并复用 3.2.1 表锚点；规模/份额因正文 note 数据落点且 search 首命中不可靠，排后续独立 slice，本设计不新增节锚点机制）
 - 空结果收敛契约：search 连续 2 次 0 命中（interactive）→ runner 强制收敛返回「未找到相关数据」，不依赖模型自觉；有 profile 且候选词未用尽时自动用候选词重试（最多 1 轮）。候选词注入在 Service 层（chat_service 基于 `_route_plan_for_query`），收敛执行在 Agent 层（runner 不 import service）。
 - 终答契约：保持「最终回答必须返回 JSON」；runner 解包（content 为 JSON 且含 answer 字段 → 提取 answer 展示，citations/key_facts 落盘）。原文粘贴检测：answer 与任一 evidence 连续重叠 ≥40 字符或 >200 字 → 有界重答 1 次，仍超标截断为 ≤200 字摘要（含省略说明；2026-08-09 F1 修复：终答 ≤200 字为 runner 硬约束，`_INTERACTIVE_FINAL_ANSWER_MAX_CHARS=200`，截断正文按 200-len(note) 计）。
 - 预算：interactive `max_iterations` 20 → 12 → 8（2026-08-09 下调）；interactive 方案 E（跳过 evidence/citation 校验）保持不变（Phase 7.4 已裁决口径）。
@@ -1370,7 +1369,7 @@ fingerprint_prefix = content_fingerprint 前 16 位 hex
 document_id 表示内容身份，用于 public reading tools
 local_import_id 表示导入事件身份，仅用于审计 metadata，不作为 public tool 输入
 share_class 为可选 metadata；当前不强制解析，不参与 document_id；无法明确则为 null
-report_type 当前仅 annual_report
+report_type 支持 annual_report；semiannual_report / quarterly_report（快照，quarterly document_id 带 -Q[1-4] 期次段，见 §6.25）
 ```
 
 约束：
@@ -1870,3 +1869,37 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 - 硬约束：不改 5 阶段枚举与优先级；不改 `score_manager_change` 信号口径；不改 040046 资产配置结构转型检测；不新增 CLI 子命令/参数/依赖；不更新 AGENTS.md（无执行规则变更）。
 - 依据：005680 2025 年报 Docling JSON 实测 + `docs/design.md` Ch5 must_answer「5选1 优先级」。
 - 实现与测试：见 `.sisyphus/plans/stage-determination-contract-date-slice-20260813.md`；CIC-lite：MiMo plan review `NEEDS_FIX`（2026-08-13，2 项最小修复——决策 6 引用不存在的 `_generate_llm_chapters` 已改正、`_generate_chapters_with_llm` dead code 已列入非目标——已按 review 原文修正）；DS 实施完成（2026-08-13，9 文件，测试 6/1/15/26/196 全通过，005680 实跑稳定期），MiMo diff review `ACCEPTED`。
+
+### 6.25 季报/半年报快照（snapshot）设计（2026-08-14 裁决，19 项定案）
+
+- 定位：季报/半年报以**单期快照**（latest disclosure snapshot）身份进入分析管线——单份 PDF → 当期分析，**非多年**；与 5 年年报系列（10F/10G/multi-year）互补不替代。年报主链保持 annual-only；快照不进 multi-year 聚合。
+- 依据：`docs/research/quarterly-semiannual-data-source-research-20260814.md`（005680 实证：EID 下载码、§3.2.1 行集、数据能力对比、catalog 过滤风险）。
+- 裁决项（全部定案，直接写入本设计）：
+  1. **document_id 期次编码**：快照 document_id 为 `fund_code-year-Q[1-4]-quarterly_report-fingerprint_prefix` 与 `fund_code-year-semiannual_report-fingerprint_prefix`（半年报不带期次段）；即 quarterly 在 year 与 report_type 之间插入 `-Q[1-4]` 段。`_PARSED_DOCUMENT_ID_PATTERN`（`local_pdf_source.py:31`）加可选 `-Q[1-4]` 段，`_assert_supported_identity` 同步放行 quarterly/semiannual；annual 格式不变。fingerprint 天然区分 Q1/Q2。
+  2. **单期快照**：快照分析只消费当期单一 PDF；不要求同基金多年份快照数据。
+  3. **LLM + 审计**：快照复用三层审计（程序+LLM+复核）的既有机制（`audit_pipeline.py` ProgrammaticAuditor/LlmAuditor/ChapterRepairer），但按**新 manifest 章节**驱动；必须解耦 `ReportGenerationCoordinator`（`audit_pipeline.py:1815`）对 8 章 specs（`CHAPTER_CONTRACTS` ch0-7 + `generate_data_table` 8 章分支）与 `prompts/ch0.md..ch7.md` 的绑定，改为按 template_id 取章节契约与 prompt。
+  4. **评分**：采用简化评分（裁决项 b）——当期超额收益（净值增长率-基准收益率 ①-③ 列）+ 仓位 + 集中度三维确定性规则，**不依赖多年数据**；独立于 `signal_scoring.py` 年报 6 指标评分。
+  5. **章节**：季报 5 章（概览 / 当期业绩与超额 / 持仓与资产配置 / 管理人动作 / 风险与跟踪）；半年报 6 章（多「财务质量+持有人」）。独立于年报 ch0-ch7。
+  6. **模板**：独立文件 `docs/fund-quarterly-snapshot-template.md`、`docs/fund-semiannual-snapshot-template.md`，各自内嵌 manifest（含章节契约）；prompt 模板按 template_id 建命名空间（新增 `prompts/quarterly_snapshot/`、`prompts/semiannual_snapshot/`），现有 `ch0.md..ch7.md` 为年报专用，**不动**。
+  7. **字段边界**：只覆盖真实存在字段——净值增长率各阶段行 + ①-③ 超额列、主要财务指标（半年报）、期末规模/份额、仓位（权益/债券占比）、前十大持仓（季报）/全部持仓+重大变动（半年报）、行业配置、基金经理、份额变动、固有资金（固有资金投资本基金）；半年报增加财务三表关键科目（标注「未经审计」）。**季报缺失项（全部持仓/财务三表/托管人报告）必须 fail-closed 声明，不从年报补**。
+  8. **份额**：快照默认 A 类优先；沿用 share_class 显式限定；无法明确记 null，**不从文件名猜测**（与年报 share_class 规则一致）。
+  9. **抽取**：新建受控 profile `quarterly_performance` / `semiannual_performance`（`DISCLOSURE_LOCATOR_CONTRACT_REGISTRY`），独立 title-family + table anchor（3.2.1 表头签名「阶段/份额净值增长率/业绩比较基准收益率」复用，行标签精确匹配、禁止假设固定窗口集合，C 类缺行走 F2 可解释 not_found 语义）；**不污染 10G annual 契约**；registry 的 `extraction_allowed=False` 口径对快照独立评估。
+  10. **命令**：`snapshot-quarterly` / `snapshot-semiannual` 两个子命令；参数对齐 generate（`--fund-code` / `--fund-name` / `--work-dir` / `--llm` / `--format`）；期次参数 `--year 2026 --quarter 2`（季报）/ `--year 2025 --period H1`（半年报）。
+  11. **输入**：从 catalog 读取已导入 document（generate 风格：fund_code + year 匹配、last-wins 去重），保持统一 Fund documents / tool service 边界；快照命令不直接消费 raw PDF 路径。
+  12. **import 扩展**：加 `--report-type` + `--quarter` 显式参数（contract-first）；文件名推断仅便利；`_extract_year_from_filename`（`cli/main.py:543`）避免吞 Q1/Q2（年度正则只取 4 位年份，不受影响，但文件名匹配需按 report_type 过滤目录）。
+  13. **catalog schema**：`ReportSummary` / `persistent_repository` 增加 `quarter` / `period` 字段，**向后兼容**（旧记录 → None；`list_reports` 缺省字段不报错）。
+  14. **download 扩展（本期含）**：EID 实证——半年报 reportType=FB020 / reportCode=FB020010（reportDesp=中期报告）；季报 reportType=FB030 / reportCode=FB030010/020/030/040（Q1-Q4）；reportYear 与 `--year` 对齐；复用 `_candidate_matches` / `_strict_match`。
+  15. **interactive**：本期不扩开放问答；快照命令独立闭环，不接入 interactive 检索路由。
+  16. **输出**：json / markdown / pdf 三格式；markdown 落盘 `reports/{fund_code}-{year}Q{quarter}-quarterly-snapshot.md` / `reports/{fund_code}-{year}H1-semiannual-snapshot.md`；pdf 走既有渲染 fallback 链。
+  17. **回归约束**：read / multi-year / generate 的 annual 行为保持回归不变；`_multi_year_documents_by_year`（annual_report_documents SCHEMA_DRIFT 边界）与 `_validate_multi_year_report_identity`（annual-only）不动；快照文档导入同一 work_dir 时 multi-year 过滤按 `report_type=annual_report` 维度防污染（catalog 查询修复）。
+  18. **流程**：CIC-lite 8 slices（设计 → control 面板 → A 域模型 → B download → C 模板/prompts/coordinator 解耦 → D 受控 profile+抽取 → E CLI+输出 → F 回归+文档同步）；每 slice implement → tests → diff review；验收 = 最小验证集 + 005680 本地真实 PDF（`基金季报/*Q1*`、`基金季报/*Q2*`、`基金半年报/005680_*_2025_semiannual_report.pdf`）CLI 端到端（json/markdown/pdf 三格式）。
+  19. **章节迭代与摘要注入按模板驱动**：LLM 分析摘要注入（Ch0/Ch7 读前序摘要）与审计上下文均按 `template.front_chapter_ids` 驱动（`audit_pipeline.py` `_generate_chapter_content` / `_run_chapter_worker`），禁止硬编码 `range(1,7)`；三模板 front ids：annual (1..6)、quarterly (1..4)、semiannual (1..5)。
+  20. **审计通过判据 + 报告级装配审计（2026-08-15 裁决）**：审计通过判据 = 加权分数达门槛（数据充足 80 / 数据不足或 LLM_ERROR 75）**且**无 CRITICAL 违规（`audit_pipeline.py` `_passes_audit`）；critical 不因高分放行，一律走 REGENERATE（不 PATCH；LLM 审计 critical 与程序化 critical 同等阻断，误报代价 ≤3 次 regenerate 后模板降级，有界；数据不足只降分数门槛、不豁免 critical，「数据完整性声明」场景 data_table 非空不误触）。报告级装配审计（`verify_report_assembly`）：章节集合 == 模板 `chapter_ids`（缺章/多章 fail）、展示顺序 == sorted（乱序 fail）、每章标题 == `chapter_titles[cid]`（与 manifest 不一致 fail），违反 fail-closed 返回 `schema_drift`（不新增 failure code；模板模式同样生效）；内容为空仅 warning 不 fail。三处装配点全接：`generate_snapshot_report`（快照）、`generate_report` LLM 路径（年报）、`_generate_chapters` 模板路径（年报）。
+  21. **`to_context_dict()` 序列化契约（2026-08-15 裁决，候选 B）**：`SnapshotReportData.to_context_dict()` 序列化范围 = dataclass 字段全集（22 key，含身份字段 `fund_code`/`fund_name`/`report_year`/`template_id`/`quarter`/`period` 与 `citations`）；身份字段原样序列化，`citations` 以 `[dict(c) for c in self.citations]` 序列化（与既有 rows 风格一致）；既有 15 个 key 纯增量不变、向后兼容。**新增字段必须同步序列化**，回归防线为 `dataclasses.fields` 全集断言（`tests/fund/service/test_snapshot_extraction.py`，新增字段不同步序列化即红）。消费者传参契约不变：身份字段仍由 service 层显式 kwargs 传入 generator（`extraction.py` `generate_snapshot_report`），不从 dict 读取；`citations` 不接入 generator 渲染 / prompt 注入。
+  22. **search excerpt 窗口截断对齐数字串边界（2026-08-15 裁决，候选 C）**：`docling_store.py` `_excerpt` / `_search_excerpt` 的 240 字符窗口（`DEFAULT_SEARCH_EXCERPT_CHARS`）截断点落在数字串内部（数字串字符集 `0123456789,，.`；仅当截断点前一字符与当前字符均属该集合才判定，避免吞孤立标点）时，end 只向后扩展至数字串结束、start 只向前回退至数字串起点（命中区间永不缩短）；两函数 no-hit fallback 改为 `text[:_align_end_no_number_cut(text, max_chars)]`（仅 excerpt fallback 对齐）。`_bounded`（list_sections preview / read_section 截断行为）与跨页/跨节数字拼接不纳入。快照 `_search_texts` 被动消费方不改，自动受益。
+
+- 章节与字段边界（季报 5 章 / 半年报 6 章）：
+  - 季报：① 概览（基金简介、期末规模/份额、当期净值表现、综合结论）；② 当期业绩与超额（3.2.1 各阶段行 + ①-③、窗口口径标注）；③ 持仓与资产配置（仓位、行业配置、前十大持仓、份额变动）；④ 管理人动作（运作分析 §4.4、基金经理、固有资金）；⑤ 风险与跟踪（单一投资者 ≥20%、持有人数/净值预警、fail-closed 缺失声明）。
+  - 半年报：① 概览；② 当期业绩与超额；③ 持仓与资产配置（全部持仓 + 重大变动、行业配置、仓位）；④ 财务质量（主要财务指标 + 财务三表关键科目，标注「未经审计」）；⑤ 管理人动作（运作分析、基金经理、份额变动、固有资金）；⑥ 风险与持有人（持有人结构、单一投资者 ≥20%、预警说明、fail-closed 缺失声明）。
+
+- 实现与测试：按 `docs/implementation-control.md`「季报/半年报快照」节逐 slice 记录；plan artifacts 见 `.sisyphus/plans/snapshot-*.md`。

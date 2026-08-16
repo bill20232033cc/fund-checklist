@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+from collections.abc import Sequence
 from concurrent.futures import ALL_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -1755,7 +1756,7 @@ SCORE_PATCH = 50.0     # 50-79分需修复
 # <50分需重写
 
 # 数据不足场景的评分调整
-SCORE_PASS_DEGRADED = 75.0   # 数据不足时 ≥70分通过
+SCORE_PASS_DEGRADED = 75.0   # 数据不足时 ≥75分通过
 WEIGHT_PROG_NORMAL = 0.3     # 数据充足时程序审计权重
 WEIGHT_LLM_NORMAL = 0.7      # 数据充足时 LLM 审计权重
 WEIGHT_PROG_DEGRADED = 0.5   # 数据不足时程序审计权重
@@ -1766,11 +1767,92 @@ MAX_PATCH_ATTEMPTS = 3
 MAX_REGENERATE_ATTEMPTS = 3
 
 
+def _passes_audit(
+    final_score: float,
+    score_pass: float,
+    violations: tuple[AuditViolation, ...],
+) -> bool:
+    """判断审计是否通过：分数达到门槛且无 CRITICAL 违规。
+
+    参数:
+        final_score: 综合审计分数（0-100）。
+        score_pass: 通过分数门槛（数据充足 80 / 数据不足或 LLM_ERROR 75）。
+        violations: 审计违规项列表。
+
+    返回:
+        True 表示通过（final_score >= score_pass 且无 CRITICAL）；否则 False。
+    """
+
+    return final_score >= score_pass and not any(
+        v.severity == ViolationSeverity.CRITICAL for v in violations
+    )
+
+
+def verify_report_assembly(
+    template: Any,
+    chapters: Sequence[Any],
+) -> tuple[bool, list[str]]:
+    """校验报告章节装配与模板 manifest 一致。
+
+    规则:
+        - 章节集合 == set(template.chapter_ids)（缺章/多章 → fail）
+        - 展示顺序 == sorted(template.chapter_ids)（乱序 → fail）
+        - 每章标题 == template.chapter_titles[cid]（与 manifest 不一致 → fail）
+        - 章节内容为空 → 仅 warning，不 fail
+
+    参数:
+        template: 报告模板（兼容 ReportTemplate：chapter_ids / chapter_titles）。
+        chapters: 已装配章节序列（兼容 ReportChapter：chapter_id / title / content）。
+
+    返回:
+        (ok, problems)。ok=False 表示存在集合/顺序/标题违反，应 fail-closed；
+        problems 为校验明细（含 warning 级内容为空提示）。
+    """
+
+    problems: list[str] = []
+    ok = True
+
+    expected_ids = list(template.chapter_ids)
+    expected_sorted = sorted(expected_ids)
+    actual_ids = [ch.chapter_id for ch in chapters]
+
+    # 集合一致性（缺章/多章）
+    missing_ids = sorted(set(expected_ids) - set(actual_ids))
+    extra_ids = sorted(set(actual_ids) - set(expected_ids))
+    if missing_ids or extra_ids:
+        ok = False
+        problems.append(f"章节集合与模板不一致: 缺章 {missing_ids}, 多章 {extra_ids}")
+
+    # 展示顺序一致性
+    if actual_ids != expected_sorted:
+        ok = False
+        problems.append(
+            f"章节顺序与模板不一致: 实际 {actual_ids}, 期望 {expected_sorted}"
+        )
+
+    # 标题与模板 manifest 一致性
+    for ch in chapters:
+        expected_title = template.chapter_titles.get(ch.chapter_id)
+        if expected_title is not None and ch.title != expected_title:
+            ok = False
+            problems.append(
+                f"章节 Ch{ch.chapter_id} 标题 '{ch.title}' 与模板 '{expected_title}' 不一致"
+            )
+
+    # 内容为空：warning，不 fail
+    for ch in chapters:
+        if not (ch.content or "").strip():
+            problems.append(f"章节 Ch{ch.chapter_id} 内容为空（warning）")
+
+    return ok, problems
+
+
 def select_repair_strategy(decision: AuditDecision | None) -> tuple[str, str]:
     """基于审计分数和违规严重度自动选择修复策略。
 
     策略选择规则：
-    - 分数 >= 80（SCORE_PASS）→ skip
+    - 分数 >= 80（SCORE_PASS）且无 CRITICAL → skip
+    - 分数 >= 80 但有 CRITICAL → regenerate（critical 不能因高分放行）
     - 分数 50-79（SCORE_PATCH）且无 CRITICAL 违规 → repair
     - 分数 50-79 且有 CRITICAL 违规 → regenerate
     - 分数 < 50 → regenerate
@@ -1791,6 +1873,15 @@ def select_repair_strategy(decision: AuditDecision | None) -> tuple[str, str]:
     )
 
     if score >= SCORE_PASS:
+        if has_critical:
+            critical_codes = sorted({
+                v.code for v in decision.violations
+                if v.severity == ViolationSeverity.CRITICAL
+            })
+            return (
+                "regenerate",
+                f"分数 {score:.1f} >= {SCORE_PASS} 但存在 CRITICAL 违规 {critical_codes}，需重新生成",
+            )
         return "skip", f"分数 {score:.1f} >= {SCORE_PASS}，通过"
 
     if score >= SCORE_PATCH:
@@ -1810,6 +1901,136 @@ def select_repair_strategy(decision: AuditDecision | None) -> tuple[str, str]:
 
     # score < SCORE_PATCH
     return "regenerate", f"分数 {score:.1f} < {SCORE_PATCH}，需重新生成"
+
+
+
+
+def generate_annual_template_chapter(
+    chapter_id: int,
+    fund_name: str,
+    report_year: int,
+    performance: dict[int, dict[str, str]],
+    evidence: Any = None,
+    fund_code: str = "",
+    fund_manager: Any = None,
+    scale_info: Any = None,
+    signal_judgment: Any = None,
+    risk_checklist: Any = None,
+    stress_test: Any = None,
+    **_ignored: object,
+) -> str:
+    """生成年报模板章节（LLM 失败 fallback；§6.25 解耦后由 annual 模板调用）。
+
+    参数:
+        chapter_id: 章节编号。
+        fund_name: 基金名称。
+        report_year: 报告年份。
+        performance: 多年度业绩数据。
+        evidence: 证据来源汇总（可选）。
+        fund_code: 基金代码（可选）。
+        fund_manager: 基金经理信息（可选）。
+        scale_info: 规模信息（可选）。
+        signal_judgment: 信号判断结果（可选）。
+        risk_checklist: 风险清单（可选）。
+        stress_test: 压力测试结果（可选）。
+
+    返回:
+        模板生成的 Markdown 文本（含证据来源小节）。
+    """
+
+    if chapter_id == 0:
+        latest = performance.get(report_year, {})
+        base_content = (
+            f"## 一眼看懂\n\n"
+            f"- **基金名称**：{fund_name}\n"
+            f"- **基金代码**：{fund_code}\n"
+            f"- **报告年份**：{report_year}\n"
+            f"- **最新净值增长率**：{latest.get('nav_growth_rate', 'N/A')}\n\n"
+            f"## 投资要点\n\n"
+            f"基于 {report_year} 年报数据分析，该基金业绩表现和持仓情况详见后续章节。\n"
+        )
+    elif chapter_id == 1:
+        lines = [
+            f"## 基金概况\n",
+            f"- 基金代码：{fund_code}",
+            f"- 基金名称：{fund_name}",
+            f"- 报告年份：{report_year}",
+        ]
+        if fund_manager:
+            lines.append(f"- 基金经理：{fund_manager.name}（从业{fund_manager.years_of_service}）")
+        base_content = "\n".join(lines) + "\n"
+    elif chapter_id == 2:
+        lines = ["## 业绩数据\n"]
+        if report_year in performance:
+            perf = performance[report_year]
+            lines.extend([
+                "| 年份 | 净值增长率 | 基准收益率 | 超额收益 |",
+                "|------|-----------|-----------|---------|",
+                f"| {report_year} | {perf.get('nav_growth_rate', 'N/A')} | {perf.get('benchmark_return_rate', 'N/A')} | {perf.get('excess_return', 'N/A')} |",
+            ])
+        else:
+            lines.append("暂无业绩数据。")
+        base_content = "\n".join(lines) + "\n"
+    elif chapter_id == 3:
+        lines = ["## 基金经理信息"]
+        if fund_manager:
+            lines.extend([
+                f"- 姓名：{fund_manager.name}",
+                f"- 任职日期：{fund_manager.tenure_start}",
+                f"- 从业年限：{fund_manager.years_of_service}",
+                f"- 持有本基金：{fund_manager.holds_fund or '未披露'}",
+            ])
+        else:
+            lines.append("基金经理信息暂不可用。")
+        base_content = "\n".join(lines) + "\n"
+    elif chapter_id == 4:
+        base_content = "## 投资者获得感\n\n投资者实际收益数据暂不可用，详见原始年报。\n"
+    elif chapter_id == 5:
+        lines = ["## 当前阶段与关键变化"]
+        if scale_info:
+            lines.extend([
+                f"- A类份额总数：{scale_info.total_shares_a}",
+                f"- C类份额总数：{scale_info.total_shares_c}",
+                f"- 管理人持有比例：{scale_info.management_holds}",
+            ])
+        else:
+            lines.append("规模信息暂不可用。")
+        base_content = "\n".join(lines) + "\n"
+    elif chapter_id == 6:
+        lines = ["## 核心风险与风险分级\n"]
+        if stress_test:
+            fund_type_labels = {"index_fund": "指数基金", "bond_fund": "债券基金", "active_fund": "主动基金"}
+            lines.extend([
+                "### 压力测试\n",
+                f"- 基金类型: {fund_type_labels.get(stress_test.fund_type, stress_test.fund_type)}",
+            ])
+            if stress_test.current_scale_billion is not None:
+                lines.append(f"- 当前规模: {stress_test.current_scale_billion:.2f}亿元")
+            if stress_test.excess_return is not None:
+                lines.append(f"- 超额收益: {stress_test.excess_return:.2%}")
+            lines.append("")
+        lines.extend(["### 风险清单\n", "| 风险项 | 状态 | 说明 |", "|--------|------|------|"])
+        if risk_checklist:
+            for item in risk_checklist:
+                lines.append(f"| {item.name} | {item.status} | {item.detail} |")
+        else:
+            lines.append("| （无数据） | 🟡 | 需要补充数据 |")
+        base_content = "\n".join(lines) + "\n"
+    elif chapter_id == 7:
+        latest = performance.get(report_year, {})
+        base_content = (
+            f"## 综合评估\n\n"
+            f"基于 {report_year} 年报数据，该基金最新净值增长率为 {latest.get('nav_growth_rate', 'N/A')}。"
+            f"详见前6章分析。\n"
+        )
+    else:
+        base_content = ""
+
+    from fund_agent.service.chapter_generator import generate_evidence_section
+    evidence_section = generate_evidence_section(chapter_id, evidence)
+    if evidence_section:
+        return base_content + "\n" + evidence_section
+    return base_content
 
 
 class ReportGenerationCoordinator:
@@ -1835,6 +2056,7 @@ class ReportGenerationCoordinator:
         llm_client: Any,
         work_dir: Path,
         chapter_concurrency: int = 1,
+        template: Any = None,
     ) -> None:
         """初始化协调器。
 
@@ -1843,6 +2065,8 @@ class ReportGenerationCoordinator:
             work_dir: 工作目录。
             chapter_concurrency: 章节生成并发上限（1..8）；1 为完全串行等价；
                 生产并发由 Service 解析层显式传入。
+            template: 报告模板（§6.25 解耦）；None 时使用年报默认模板
+                （annual_report，ch0-ch7，行为与解耦前完全一致）。
 
         异常:
             并发数不在 1..8 范围内时抛 ValueError。
@@ -1850,6 +2074,9 @@ class ReportGenerationCoordinator:
 
         if not 1 <= chapter_concurrency <= 8:
             raise ValueError(f"chapter_concurrency 必须在 1..8 范围内，收到 {chapter_concurrency}")
+        from fund_agent.service.report_template import ANNUAL_TEMPLATE, ANNUAL_TEMPLATE_ID
+        self._template = template if template is not None else ANNUAL_TEMPLATE
+        self._template_id = self._template.template_id
         self._llm_client = llm_client
         self._work_dir = work_dir
         self._artifact_store = ArtifactStore(work_dir)
@@ -1896,6 +2123,10 @@ class ReportGenerationCoordinator:
         signal_judgment: Any = None,
         fund_type: str = "",
         contract_effective_date: str = "",
+        snapshot_data: dict[str, object] | None = None,
+        snapshot_score: Any = None,
+        quarter: int | None = None,
+        period: str | None = None,
     ) -> tuple[dict[int, str], list[str]]:
         """生成报告。
 
@@ -1903,11 +2134,15 @@ class ReportGenerationCoordinator:
             fund_code: 基金代码。
             fund_name: 基金名称。
             report_year: 报告年份。
-            performance/holdings/allocation/fees: 多年度数据。
+            performance/holdings/allocation/fees: 多年度数据（annual）；快照模板忽略。
             fund_manager: 基金经理信息。
             scale_info: 规模信息。
             evidence: 证据来源汇总。
             contract_effective_date: 基金合同生效日（"YYYY-MM-DD"；未提取到时为空字符串）。
+            snapshot_data: 快照抽取上下文（§6.25；仅快照模板使用）。
+            snapshot_score: 快照简化评分（仅快照模板使用）。
+            quarter: 季报期次（1-4；快照模板使用，保证数据表格报告期正确）。
+            period: 半年报期次（H1；快照模板使用）。
 
         返回:
             (章节内容字典, 警告列表)。
@@ -1919,17 +2154,34 @@ class ReportGenerationCoordinator:
         # 0. 预生成所有章节数据表，收集全局允许数字集合（支持跨章节引用）
         from fund_agent.service.chapter_generator import generate_data_table
         from fund_agent.service.extraction import _compute_ch6_stress_test, infer_fund_type
+        from fund_agent.service.report_template import ANNUAL_TEMPLATE_ID
         fund_type, _ = infer_fund_type(fund_name) if fund_name else ("", False)
         global_numbers: set[str] = set()
-        for cid in range(1, 8):
+        for cid in self._template.chapter_ids:
+            # 解耦前 range(1, 8) 语义：annual Ch0 数据表不进全局允许数字集合
+            if cid == 0 and self._template_id == ANNUAL_TEMPLATE_ID:
+                continue
             st = _compute_ch6_stress_test(performance, report_year, scale_info, fund_name) if cid == 6 else None
-            dt = generate_data_table(
-                cid, fund_code, fund_name, report_year,
-                performance, holdings, allocation, fees,
-                fund_manager, scale_info, evidence,
-                stress_test=st, signal_judgment=signal_judgment,
+            dt = self._template.build_data_table(
+                chapter_id=cid,
+                fund_code=fund_code,
+                fund_name=fund_name,
+                report_year=report_year,
+                performance=performance,
+                holdings=holdings,
+                allocation=allocation,
+                fees=fees,
+                fund_manager=fund_manager,
+                scale_info=scale_info,
+                evidence=evidence,
+                stress_test=st,
+                signal_judgment=signal_judgment,
                 fund_type=fund_type,
                 contract_effective_date=contract_effective_date,
+                snapshot_data=snapshot_data,
+                snapshot_score=snapshot_score,
+                quarter=quarter,
+                period=period,
             )
             global_numbers.update(re.findall(r'\d+\.?\d*', dt.replace(',', '')))
 
@@ -1945,7 +2197,7 @@ class ReportGenerationCoordinator:
             max_workers=effective_concurrency,
             thread_name_prefix="report-chapter",
         ) as executor:
-            # 1. 阶段 B：并行生成 Ch1-6（每章完整 write→audit→rewrite 闭环）
+            # 1. 阶段 B：并行生成 front 章节（每章完整 write→audit→rewrite 闭环）
             b_futures = {
                 cid: executor.submit(
                     self._run_chapter_worker,
@@ -1966,51 +2218,50 @@ class ReportGenerationCoordinator:
                     global_allowed_numbers=global_numbers,
                     fund_type=fund_type,
                     contract_effective_date=contract_effective_date,
+                    snapshot_data=snapshot_data,
+                    snapshot_score=snapshot_score,
+                    quarter=quarter,
+                    period=period,
                 )
-                for cid in range(1, 7)
+                for cid in self._template.front_chapter_ids
             }
             wait(list(b_futures.values()), return_when=ALL_COMPLETED)
-            for cid in range(1, 7):
+            for cid in self._template.front_chapter_ids:
                 chapter_id, content, _state, chapter_warnings = b_futures[cid].result()
                 if content:
                     chapter_contents[chapter_id] = content
                 warnings.extend(chapter_warnings)
 
-            # 2. 阶段 C：检查 Ch1-6 是否全部通过（含数据不足时的降级通过）
+            # 2. 阶段 C：检查 front 章节是否全部通过（含数据不足时的降级通过）
             all_passed = all(
                 (self._get_state(cid) or ChapterProcessState(chapter_id=cid)).status
                 in ("passed", "passed_with_degradation")
-                for cid in range(1, 7)
+                for cid in self._template.front_chapter_ids
             )
 
             if not all_passed:
-                warnings.append("Ch1-6 未全部通过，Ch0+Ch7 使用模板生成")
-                # 使用模板生成 Ch0+Ch7
-                chapter_contents[0] = self._generate_template_chapter(
-                    chapter_id=0,
-                    fund_name=fund_name,
-                    report_year=report_year,
-                    performance=performance,
-                    evidence=evidence,
-                    fund_code=fund_code,
-                    fund_manager=fund_manager,
-                    scale_info=scale_info,
-                    signal_judgment=signal_judgment,
-                )
-                chapter_contents[7] = self._generate_template_chapter(
-                    chapter_id=7,
-                    fund_name=fund_name,
-                    report_year=report_year,
-                    performance=performance,
-                    evidence=evidence,
-                    fund_code=fund_code,
-                    fund_manager=fund_manager,
-                    scale_info=scale_info,
-                    signal_judgment=signal_judgment,
-                )
+                if self._template_id == ANNUAL_TEMPLATE_ID:
+                    warnings.append("Ch1-6 未全部通过，Ch0+Ch7 使用模板生成")
+                else:
+                    warnings.append("front 章节未全部通过，closing 章节使用模板生成")
+                # 使用模板生成 closing 章节
+                for closing_id in self._template.closing_chapter_ids:
+                    chapter_contents[closing_id] = self._generate_template_chapter(
+                        chapter_id=closing_id,
+                        fund_name=fund_name,
+                        report_year=report_year,
+                        performance=performance,
+                        evidence=evidence,
+                        fund_code=fund_code,
+                        fund_manager=fund_manager,
+                        scale_info=scale_info,
+                        signal_judgment=signal_judgment,
+                        snapshot_data=snapshot_data,
+                        snapshot_score=snapshot_score,
+                    )
                 return chapter_contents, warnings
 
-            # 3. 阶段 D：Ch1-6 全部通过，并行生成 Ch0+Ch7
+            # 3. 阶段 D：front 全部通过，并行生成 closing 章节
             d_futures = {
                 cid: executor.submit(
                     self._run_chapter_worker,
@@ -2032,12 +2283,16 @@ class ReportGenerationCoordinator:
                     fund_type=fund_type,
                     contract_effective_date=contract_effective_date,
                     use_chapter_summaries=True,
-                    chapter_summaries={cid: chapter_contents.get(cid, "") for cid in range(1, 7)},
+                    chapter_summaries={cid: chapter_contents.get(cid, "") for cid in self._template.front_chapter_ids},
+                    snapshot_data=snapshot_data,
+                    snapshot_score=snapshot_score,
+                    quarter=quarter,
+                    period=period,
                 )
-                for cid in (0, 7)
+                for cid in self._template.closing_chapter_ids
             }
             wait(list(d_futures.values()), return_when=ALL_COMPLETED)
-            for cid in (0, 7):
+            for cid in self._template.closing_chapter_ids:
                 chapter_id, content, _state, chapter_warnings = d_futures[cid].result()
                 if content:
                     chapter_contents[chapter_id] = content
@@ -2066,6 +2321,10 @@ class ReportGenerationCoordinator:
         contract_effective_date: str = "",
         use_chapter_summaries: bool = False,
         chapter_summaries: dict[int, str] | None = None,
+        snapshot_data: dict[str, object] | None = None,
+        snapshot_score: Any = None,
+        quarter: int | None = None,
+        period: str | None = None,
     ) -> tuple[int, str | None, ChapterProcessState, list[str]]:
         """单章 worker：运行完整 write→audit→rewrite 闭环。
 
@@ -2102,6 +2361,10 @@ class ReportGenerationCoordinator:
                 global_allowed_numbers=global_allowed_numbers,
                 fund_type=fund_type,
                 contract_effective_date=contract_effective_date,
+                snapshot_data=snapshot_data,
+                snapshot_score=snapshot_score,
+                quarter=quarter,
+                period=period,
                 llm_client=llm_client,
             )
             state = self._get_state(chapter_id) or ChapterProcessState(chapter_id=chapter_id)
@@ -2134,6 +2397,10 @@ class ReportGenerationCoordinator:
         global_allowed_numbers: set[str] | None = None,
         fund_type: str = "",
         contract_effective_date: str = "",
+        snapshot_data: dict[str, object] | None = None,
+        snapshot_score: Any = None,
+        quarter: int | None = None,
+        period: str | None = None,
         llm_client: Any | None = None,
     ) -> str | None:
         """生成并审计单个章节。
@@ -2163,6 +2430,10 @@ class ReportGenerationCoordinator:
                 global_allowed_numbers=global_allowed_numbers,
                 fund_type=fund_type,
                 contract_effective_date=contract_effective_date,
+                snapshot_data=snapshot_data,
+                snapshot_score=snapshot_score,
+                quarter=quarter,
+                period=period,
                 llm_client=llm_client,
             )
         except Exception:
@@ -2191,6 +2462,10 @@ class ReportGenerationCoordinator:
         signal_judgment: Any = None,
         fund_type: str = "",
         contract_effective_date: str = "",
+        snapshot_data: dict[str, object] | None = None,
+        snapshot_score: Any = None,
+        quarter: int | None = None,
+        period: str | None = None,
         llm_client: Any | None = None,
     ) -> str | None:
         """内部实现，由 _generate_and_audit_chapter 包装异常处理。"""
@@ -2200,24 +2475,35 @@ class ReportGenerationCoordinator:
         # 初始化过程状态
         state = ChapterProcessState(chapter_id=chapter_id)
         self._set_state(chapter_id, state)
-        contract = get_chapter_contract(chapter_id)
+        contract = self._template.load_contract(chapter_id)
 
         if not contract:
             return None
 
         # 生成数据表格
-        from fund_agent.service.chapter_generator import generate_data_table
         from fund_agent.service.extraction import _compute_ch6_stress_test, infer_fund_type
         fund_type, _ = infer_fund_type(fund_name) if fund_name else ("", False)
         stress_test = _compute_ch6_stress_test(performance, report_year, scale_info, fund_name) if chapter_id == 6 else None
-        data_table = generate_data_table(
-            chapter_id, fund_code, fund_name, report_year,
-            performance, holdings, allocation, fees,
-            fund_manager, scale_info, evidence,
+        data_table = self._template.build_data_table(
+            chapter_id=chapter_id,
+            fund_code=fund_code,
+            fund_name=fund_name,
+            report_year=report_year,
+            performance=performance,
+            holdings=holdings,
+            allocation=allocation,
+            fees=fees,
+            fund_manager=fund_manager,
+            scale_info=scale_info,
+            evidence=evidence,
             stress_test=stress_test,
             signal_judgment=signal_judgment,
             fund_type=fund_type,
             contract_effective_date=contract_effective_date,
+            snapshot_data=snapshot_data,
+            snapshot_score=snapshot_score,
+            quarter=quarter,
+            period=period,
         )
 
         # 生成章节内容（LLM 或模板）
@@ -2253,6 +2539,8 @@ class ReportGenerationCoordinator:
                 signal_judgment=signal_judgment,
                 risk_checklist=None,  # 审计管道中不传 risk_checklist
                 stress_test=stress_test,
+                snapshot_data=snapshot_data,
+                snapshot_score=snapshot_score,
             )
             if content:
                 # 模板降级成功，标记为 passed_with_degradation
@@ -2271,7 +2559,7 @@ class ReportGenerationCoordinator:
         audit_data_table = data_table
         if use_chapter_summaries and chapter_summaries:
             summary_parts = [data_table, "\n\n## 前序章节摘要\n"]
-            for cid in range(1, 7):
+            for cid in self._template.front_chapter_ids:
                 summary = chapter_summaries.get(cid, "")
                 if summary:
                     summary_parts.append(f"### Ch{cid}\n{summary[:1000]}\n")
@@ -2312,6 +2600,9 @@ class ReportGenerationCoordinator:
 
             final_score = prog_score * weight_prog + llm_score * weight_llm
             all_violations = prog_violations + llm_violations
+            has_critical = any(
+                v.severity == ViolationSeverity.CRITICAL for v in all_violations
+            )
 
             # 记录审计决定
             decision = AuditDecision(
@@ -2320,7 +2611,15 @@ class ReportGenerationCoordinator:
                 violations=all_violations,
                 programmatic_score=prog_score,
                 llm_score=llm_score,
-                recommendation="pass" if final_score >= score_pass else "patch" if final_score >= SCORE_PATCH else "regenerate",
+                recommendation=(
+                    "regenerate"
+                    if has_critical
+                    else "pass"
+                    if final_score >= score_pass
+                    else "patch"
+                    if final_score >= SCORE_PATCH
+                    else "regenerate"
+                ),
                 audit_time=datetime.now().isoformat(),
             )
             self._artifact_store.save_audit_decision(decision)
@@ -2338,15 +2637,15 @@ class ReportGenerationCoordinator:
                 "score_pass_threshold": score_pass,
             })
 
-            # 判断是否通过
-            if final_score >= score_pass:
+            # 判断是否通过（分数达门槛且无 CRITICAL；critical 不因高分放行）
+            if _passes_audit(final_score, score_pass, all_violations):
                 state.status = "passed_with_degradation" if not data_sufficient else "passed"
                 state.record_event(state.status, {"score": final_score, "data_sufficient": data_sufficient})
                 self._artifact_store.save_process_state(state)
                 return content
 
-            # 需要修复
-            if final_score >= SCORE_PATCH:
+            # 需要修复（critical 只能 regenerate，不能 patch：跳过 PATCH 直接走 REGENERATE）
+            if final_score >= SCORE_PATCH and not has_critical:
                 # PATCH 策略
                 if state.can_patch():
                     state.patch_attempts += 1
@@ -2420,6 +2719,8 @@ class ReportGenerationCoordinator:
                 fund_manager=fund_manager,
                 scale_info=scale_info,
                 signal_judgment=signal_judgment,
+                snapshot_data=snapshot_data,
+                snapshot_score=snapshot_score,
             )
             state.status = "passed_with_degradation"
             state.record_event("template_fallback", {
@@ -2460,9 +2761,7 @@ class ReportGenerationCoordinator:
 
         client = llm_client if llm_client is not None else self._llm_client
 
-        from fund_agent.service.chapter_generator import LLM_ANALYSIS_PROMPTS, LLM_CHAPTER_SYSTEM_PROMPT
-
-        analysis_prompt = LLM_ANALYSIS_PROMPTS.get(chapter_id)
+        analysis_prompt = self._template.load_analysis_prompt(chapter_id)
         if not analysis_prompt:
             return None
 
@@ -2481,7 +2780,7 @@ class ReportGenerationCoordinator:
         if use_chapter_summaries and chapter_summaries:
             user_prompt_parts.append("## 前序章节分析摘要")
             user_prompt_parts.append("")
-            for cid in range(1, 7):
+            for cid in self._template.front_chapter_ids:
                 summary = chapter_summaries.get(cid, "")
                 if summary:
                     # 只取前500字作为摘要
@@ -2499,7 +2798,7 @@ class ReportGenerationCoordinator:
 
         try:
             llm_analysis = client.generate_text(
-                system_prompt=LLM_CHAPTER_SYSTEM_PROMPT,
+                system_prompt=self._template.system_prompt,
                 user_prompt=user_prompt,
             )
 
@@ -2569,6 +2868,8 @@ class ReportGenerationCoordinator:
         signal_judgment: Any = None,
         risk_checklist: Any = None,
         stress_test: Any = None,
+        snapshot_data: dict[str, object] | None = None,
+        snapshot_score: Any = None,
     ) -> str:
         """生成模板章节（fallback）。
 
@@ -2584,107 +2885,28 @@ class ReportGenerationCoordinator:
             signal_judgment: 信号判断结果（可选）。
             risk_checklist: 风险清单（可选）。
             stress_test: 压力测试结果（可选）。
+            snapshot_data: 快照抽取上下文（可选；快照模板使用）。
 
         返回:
             模板生成的 Markdown 文本（含证据来源小节）。
         """
 
-        if chapter_id == 0:
-            latest = performance.get(report_year, {})
-            base_content = (
-                f"## 一眼看懂\n\n"
-                f"- **基金名称**：{fund_name}\n"
-                f"- **基金代码**：{fund_code}\n"
-                f"- **报告年份**：{report_year}\n"
-                f"- **最新净值增长率**：{latest.get('nav_growth_rate', 'N/A')}\n\n"
-                f"## 投资要点\n\n"
-                f"基于 {report_year} 年报数据分析，该基金业绩表现和持仓情况详见后续章节。\n"
-            )
-        elif chapter_id == 1:
-            lines = [
-                f"## 基金概况\n",
-                f"- 基金代码：{fund_code}",
-                f"- 基金名称：{fund_name}",
-                f"- 报告年份：{report_year}",
-            ]
-            if fund_manager:
-                lines.append(f"- 基金经理：{fund_manager.name}（从业{fund_manager.years_of_service}）")
-            base_content = "\n".join(lines) + "\n"
-        elif chapter_id == 2:
-            lines = ["## 业绩数据\n"]
-            if report_year in performance:
-                perf = performance[report_year]
-                lines.extend([
-                    "| 年份 | 净值增长率 | 基准收益率 | 超额收益 |",
-                    "|------|-----------|-----------|---------|",
-                    f"| {report_year} | {perf.get('nav_growth_rate', 'N/A')} | {perf.get('benchmark_return_rate', 'N/A')} | {perf.get('excess_return', 'N/A')} |",
-                ])
-            else:
-                lines.append("暂无业绩数据。")
-            base_content = "\n".join(lines) + "\n"
-        elif chapter_id == 3:
-            lines = ["## 基金经理信息"]
-            if fund_manager:
-                lines.extend([
-                    f"- 姓名：{fund_manager.name}",
-                    f"- 任职日期：{fund_manager.tenure_start}",
-                    f"- 从业年限：{fund_manager.years_of_service}",
-                    f"- 持有本基金：{fund_manager.holds_fund or '未披露'}",
-                ])
-            else:
-                lines.append("基金经理信息暂不可用。")
-            base_content = "\n".join(lines) + "\n"
-        elif chapter_id == 4:
-            base_content = "## 投资者获得感\n\n投资者实际收益数据暂不可用，详见原始年报。\n"
-        elif chapter_id == 5:
-            lines = ["## 当前阶段与关键变化"]
-            if scale_info:
-                lines.extend([
-                    f"- A类份额总数：{scale_info.total_shares_a}",
-                    f"- C类份额总数：{scale_info.total_shares_c}",
-                    f"- 管理人持有比例：{scale_info.management_holds}",
-                ])
-            else:
-                lines.append("规模信息暂不可用。")
-            base_content = "\n".join(lines) + "\n"
-        elif chapter_id == 6:
-            lines = ["## 核心风险与风险分级\n"]
-            # 压力测试（如果有）
-            if stress_test:
-                fund_type_labels = {"index_fund": "指数基金", "bond_fund": "债券基金", "active_fund": "主动基金"}
-                lines.extend([
-                    "### 压力测试\n",
-                    f"- 基金类型: {fund_type_labels.get(stress_test.fund_type, stress_test.fund_type)}",
-                ])
-                if stress_test.current_scale_billion is not None:
-                    lines.append(f"- 当前规模: {stress_test.current_scale_billion:.2f}亿元")
-                if stress_test.excess_return is not None:
-                    lines.append(f"- 超额收益: {stress_test.excess_return:.2%}")
-                lines.append("")
-            # 风险清单
-            lines.extend(["### 风险清单\n", "| 风险项 | 状态 | 说明 |", "|--------|------|------|"])
-            if risk_checklist:
-                for item in risk_checklist:
-                    lines.append(f"| {item.name} | {item.status} | {item.detail} |")
-            else:
-                lines.append("| （无数据） | 🟡 | 需要补充数据 |")
-            base_content = "\n".join(lines) + "\n"
-        elif chapter_id == 7:
-            latest = performance.get(report_year, {})
-            base_content = (
-                f"## 综合评估\n\n"
-                f"基于 {report_year} 年报数据，该基金最新净值增长率为 {latest.get('nav_growth_rate', 'N/A')}。"
-                f"详见前6章分析。\n"
-            )
-        else:
-            base_content = ""
-
-        # 追加证据来源小节
-        from fund_agent.service.chapter_generator import generate_evidence_section
-        evidence_section = generate_evidence_section(chapter_id, evidence)
-        if evidence_section:
-            return base_content + "\n" + evidence_section
-        return base_content
+        # §6.25 解耦：模板降级章节委托模板的 build_template_chapter（annual 走模块级函数）
+        return self._template.build_template_chapter(
+            chapter_id=chapter_id,
+            fund_name=fund_name,
+            report_year=report_year,
+            performance=performance,
+            evidence=evidence,
+            fund_code=fund_code,
+            fund_manager=fund_manager,
+            scale_info=scale_info,
+            signal_judgment=signal_judgment,
+            risk_checklist=risk_checklist,
+            stress_test=stress_test,
+            snapshot_data=snapshot_data,
+            snapshot_score=snapshot_score,
+        )
 
     def get_process_states(self) -> dict[int, ChapterProcessState]:
         """获取所有章节的过程状态。"""

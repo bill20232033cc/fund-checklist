@@ -1054,6 +1054,51 @@ class GenerateReportResult:
 
 
 @dataclass(frozen=True)
+class SnapshotReportRequest:
+    """季报/半年报快照报告生成请求（§6.25 裁决 10/11/16）。
+
+    参数:
+        fund_code: 基金代码。
+        fund_name: 基金名称。
+        report_year: 报告年份。
+        report_type: quarterly_report / semiannual_report。
+        quarter: 季报期次 1-4（quarterly 使用）。
+        work_dir: 受控工作目录。
+        output_format: 输出格式（json / markdown / pdf）。
+        chapter_concurrency: 章节生成并发上限（仅 --llm 模式生效）。
+
+    返回:
+        不可变请求 DTO。
+    """
+
+    fund_code: str
+    fund_name: str
+    report_year: int
+    report_type: str = "quarterly_report"
+    quarter: int | None = None
+    work_dir: Path = Path(".fund_checklist")
+    output_format: str = "json"
+    chapter_concurrency: int | None = None
+
+
+@dataclass(frozen=True)
+class SnapshotReportResult:
+    """季报/半年报快照报告生成结果。
+
+    参数:
+        report: 生成的报告。
+        output_path: 输出文件路径（Markdown/PDF 时非空）。
+        warnings: 警告信息列表。
+        failure: 失败分类；成功时为 None。
+    """
+
+    report: FundReport | None = None
+    output_path: str | None = None
+    warnings: tuple[str, ...] = ()
+    failure: ToolFailure | None = None
+
+
+@dataclass(frozen=True)
 class ThresholdEvent:
     """阈值事件（升级或降级）。
 

@@ -36,7 +36,7 @@ PDF
  -> 三层审计管道 (程序+LLM+复核，4 类 22 项)
 ```
 
-已实现的 CLI 入口：`read` / `multi-year` / `import` / `holdings` / `download` / `allocation` / `fees` / `audit` / `deep-audit` / `generate` / `ask` / `interactive` / `repair` / `regenerate` / `fix`。
+已实现的 CLI 入口：`read` / `multi-year` / `import` / `holdings` / `download` / `allocation` / `fees` / `audit` / `deep-audit` / `generate` / `ask` / `interactive` / `repair` / `regenerate` / `fix` / `snapshot-quarterly` / `snapshot-semiannual`（季报/半年报单期快照，2026-08-14，设计见 design.md §6.25）。
 
 `generate --format pdf` 的渲染走引擎 fallback 链：`xelatex` → Chrome headless（pandoc md→HTML + 内嵌打印 CSS → `--print-to-pdf`，A4 794×1123）→ 回退 Markdown + warning；pandoc/xelatex/Chrome 均 `shutil.which` 前置探测，打印 CSS 为原创资产（详见 design.md §6.9），不依赖 LaTeX 发行版。
 
@@ -134,7 +134,7 @@ Phase 7.5 已裁决（2026-08-05）：generate 报告生成章节级并发（设
 - `fingerprint_prefix` 使用 `content_fingerprint` 前 16 位 hex。
 - `local_import_id` 表示导入事件身份，仅用于审计 metadata，不作为 public tool 输入；重复导入相同 PDF 时复用 `document_id`。
 - `share_class` 为可选 metadata；当前不强制解析，不参与 `document_id`；无法明确 A/C 类时记录为 `null`，不得从文件名或标题猜测。
-- `report_type` 当前仅支持 `annual_report`；`semiannual_report` / `quarterly_report` 保留为未来扩展，不进入当前实现。
+- `report_type` 支持 `annual_report`（年报主链）；`semiannual_report` / `quarterly_report` 自 2026-08-14 起支持（季报/半年报单期快照，见 design.md §6.25；quarterly 的 document_id 带 `-Q[1-4]` 期次段）。快照文档不得进入 multi-year / generate annual 系列（catalog 过滤按 `report_type=annual_report` 防污染）。
 - PDF integrity 至少校验 Content-Type、PDF magic bytes、非空内容和原子写入。
 - 失败必须分类，禁止吞并为模糊异常：
   - `not_found`
@@ -163,7 +163,7 @@ MVP 阅读工具层已于 Slice 4 验收通过并 close。项目现已进入 **�
 - 三层审计管道 (14C: 程序+LLM+复核, 4 类 22 项)
 - Host 生命周期 (12A: timeout/event tracing)
 - 披露完整性审计 (12B/12C)
-- CLI 9 个子命令：`read` / `multi-year` / `import` / `holdings` / `allocation` / `fees` / `audit` / `deep-audit` / `generate`
+- CLI 子命令：`read` / `multi-year` / `import` / `holdings` / `allocation` / `fees` / `audit` / `deep-audit` / `generate` / `snapshot-quarterly` / `snapshot-semiannual`（+ `ask` / `interactive` / `repair` / `regenerate` / `fix`，见文首 CLI 入口）
 
 **Phase 3.5/3.6 已关闭（2026-07-21）**：报告质量稳定化 + 审计管道数据适配全部完成。三基金（512890/006597/012346）Ch1-6 审计得分全部 ≥75，端到端验证通过。**Phase 5 Gate 已解除**（持仓抽取 23/23 全部通过）。**Phase 5 已裁决并进入实施阶段（2026-07-24）**，Slice 19A-19F，详见 `docs/implementation-control.md` Phase 5 节和 `.sisyphus/plans/phase5-implementation.md`。
 
@@ -286,6 +286,9 @@ uv run pytest tests/fund/service/test_chat_service.py -k "compaction" -v --tb=sh
 - 禁止超出公开披露信息的因果推断。
 - 禁止基金经理动机猜测。
 - 禁止删除或覆盖未明确属于当前任务的修改。
+- 禁止在报告/快照管线硬编码章节编号（如 `range(1,7)` / `range(1,8)`）；章节迭代、摘要注入与审计上下文必须按模板 `front_chapter_ids` / `chapter_ids` 驱动。
+- 禁止高分放行 critical：审计通过判据 = 加权分数达门槛（80/75）且无 CRITICAL 违规；critical 一律走 REGENERATE（不 PATCH、不因高分标 pass），数据不足只降分数门槛不豁免 critical。
+- 报告装配必须经模板 manifest 校验（`verify_report_assembly`）：章节集合/顺序/标题与模板 `chapter_ids` / `chapter_titles` 一致，违反 fail-closed 返回 `schema_drift`（模板模式同样生效）；内容为空仅 warning。
 
 ## 代码规范
 

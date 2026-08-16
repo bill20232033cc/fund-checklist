@@ -297,3 +297,205 @@ def test_multi_year_005680_2022_covered() -> None:
     assert "table-0010" in cited_table_refs, row_2022
     for year in (2021, 2023, 2024, 2025):
         assert year in series["covered_years"], f"{year} 回退: {series}"
+
+
+@pytest.mark.parametrize(
+    ("work_dir", "fund_code", "year", "expected_table"),
+    [
+        (".fund_e2e_004393", "004393", "2025", "table-0009"),
+        (".fund_checklist_005680", "005680", "2022", "table-0010"),
+    ],
+)
+def test_performance_excess_return_query_anchor_smoke(
+    work_dir: str, fund_code: str, year: str, expected_table: str
+) -> None:
+    """真实 fixture smoke：超额收益 query 路由 performance_returns，既有 3.2.1 表锚点解析成功。"""
+
+    if not _has_e2e_data(work_dir):
+        pytest.skip(f"e2e 数据目录不存在: {work_dir}")
+
+    from fund_agent.fund.document_tools.service import FundDocumentToolService
+    from fund_agent.service.extraction import (
+        DISCLOSURE_LOCATOR_CONTRACT_REGISTRY,
+        _repository,
+        _resolve_anchor_table_ref,
+        _route_plan_for_query,
+    )
+
+    route_plan = _route_plan_for_query("超额收益是多少")
+    assert route_plan.profile_name == "performance_returns"
+
+    repo = _repository(Path(work_dir))
+    catalog = repo.list_reports()
+    doc_id = next(
+        str(r["document_id"])
+        for r in catalog
+        if r.get("fund_code") == fund_code and str(r.get("year")) == year
+    )
+    tool_service = FundDocumentToolService({doc_id: repo.load_store(doc_id)})
+    contract = next(
+        contract
+        for contract in DISCLOSURE_LOCATOR_CONTRACT_REGISTRY
+        if contract.profile_name == "performance_returns"
+    )
+
+    anchor = _resolve_anchor_table_ref(doc_id, contract, tool_service)
+    assert anchor == expected_table
+
+# ============================================================
+# 快照（季报/半年报）端到端 smoke（Slice D/E 验收，§6.25）
+# ============================================================
+
+SNAPSHOT_WORK_DIR = ".fund_checklist_005680_snapshot"
+
+
+def _snapshot_store(work_dir: str, doc_id: str):
+    """从快照 workdir catalog 加载 store。"""
+
+    from fund_agent.fund.document_tools.persistent_repository import FilesystemReportRepository
+    repo = FilesystemReportRepository(
+        catalog_path=Path(work_dir) / "completed_reports.json",
+        blob_root=Path(work_dir) / "pdf_blobs",
+        docling_json_root=Path(work_dir) / "docling_json",
+    )
+    return repo.load_store(doc_id)
+
+
+@pytest.mark.parametrize("report_type,quarter,period", [
+    ("quarterly_report", 1, None),
+    ("quarterly_report", 2, None),
+    ("semiannual_report", None, "H1"),
+])
+def test_e2e_snapshot_extraction_005680(report_type, quarter, period) -> None:
+    """端到端：005680 真实季报/半年报 PDF 快照抽取必须产出核心字段。"""
+    if not (Path(SNAPSHOT_WORK_DIR) / "completed_reports.json").exists():
+        pytest.skip(f"快照数据目录不存在: {SNAPSHOT_WORK_DIR}")
+
+    from fund_agent.fund.document_tools.persistent_repository import FilesystemReportRepository
+    from fund_agent.service.snapshot_extraction import extract_snapshot_data
+
+    repo = FilesystemReportRepository(
+        catalog_path=Path(SNAPSHOT_WORK_DIR) / "completed_reports.json",
+        blob_root=Path(SNAPSHOT_WORK_DIR) / "pdf_blobs",
+        docling_json_root=Path(SNAPSHOT_WORK_DIR) / "docling_json",
+    )
+    template_id = "quarterly_snapshot" if report_type == "quarterly_report" else "semiannual_snapshot"
+    year = 2026 if report_type == "quarterly_report" else 2025
+    matches = [
+        r for r in repo.list_reports()
+        if r.get("fund_code") == "005680" and r.get("report_type") == report_type
+    ]
+    if not matches:
+        pytest.skip(f"catalog 中无 {report_type} 005680")
+    doc_id = str(matches[0]["document_id"])
+    store = repo.load_store(doc_id)
+    data = extract_snapshot_data(
+        document_id=doc_id,
+        store=store,
+        fund_code="005680",
+        fund_name="财通资管价值成长混合",
+        report_year=year,
+        template_id=template_id,
+        quarter=quarter,
+        period=period,
+    )
+    # 业绩行必须非空（3.2.1 表命中）
+    assert data.performance_rows, "快照业绩行抽取为空"
+    for row in data.performance_rows:
+        assert row.stage and row.nav_growth_rate and row.benchmark_return_rate
+    # 概览最新业绩
+    assert data.latest_performance.get("nav_growth_rate")
+    # 基金经理不得误抽取指代词（Slice D review F1 修复）
+    assert data.fund_manager.get("name") not in ("上述", "现任", "历任", "缺失")
+    if template_id == "quarterly_snapshot":
+        # 季报缺失项 fail-closed 声明
+        assert data.missing_items
+        # 季报规模/份额应非全缺失（Slice D review F2 修复）
+        assert data.scale_info.get("shares") not in (None, "缺失")
+    else:
+        # 半年报有持有人结构或财务；规模/份额应非全缺失（Slice D review F2 修复）
+        assert data.holder_structure or data.financial_rows
+        assert data.scale_info.get("shares") not in (None, "缺失")
+        assert data.scale_info.get("aum") not in (None, "缺失")
+
+
+def test_e2e_snapshot_scoring_005680() -> None:
+    """端到端：005680 快照评分必须在 0-100 且可分级。"""
+    if not (Path(SNAPSHOT_WORK_DIR) / "completed_reports.json").exists():
+        pytest.skip(f"快照数据目录不存在: {SNAPSHOT_WORK_DIR}")
+
+    from fund_agent.fund.document_tools.persistent_repository import FilesystemReportRepository
+    from fund_agent.service.snapshot_extraction import extract_snapshot_data
+    from fund_agent.service.snapshot_scoring import compute_snapshot_score
+
+    repo = FilesystemReportRepository(
+        catalog_path=Path(SNAPSHOT_WORK_DIR) / "completed_reports.json",
+        blob_root=Path(SNAPSHOT_WORK_DIR) / "pdf_blobs",
+        docling_json_root=Path(SNAPSHOT_WORK_DIR) / "docling_json",
+    )
+    matches = [
+        r for r in repo.list_reports()
+        if r.get("fund_code") == "005680" and r.get("report_type") == "quarterly_report"
+    ]
+    if not matches:
+        pytest.skip("catalog 中无季报 005680")
+    doc_id = str(matches[0]["document_id"])
+    store = repo.load_store(doc_id)
+    data = extract_snapshot_data(
+        document_id=doc_id,
+        store=store,
+        fund_code="005680",
+        fund_name="财通资管价值成长混合",
+        report_year=2026,
+        template_id="quarterly_snapshot",
+        quarter=1,
+    )
+    score = compute_snapshot_score(data)
+    assert 0 <= score.total_score <= 100
+    assert score.grade in ("优秀", "良好", "关注")
+
+
+def test_e2e_multi_year_ignores_snapshot_documents() -> None:
+    """防污染（§6.25 裁决 17）：multi-year 必须只匹配 annual_report，忽略快照文档。"""
+    if not (Path(SNAPSHOT_WORK_DIR) / "completed_reports.json").exists():
+        pytest.skip(f"快照数据目录不存在: {SNAPSHOT_WORK_DIR}")
+
+    from fund_agent.cli.main import CLASSIFIED_FAILURE_EXIT_CODE, run_cli
+    import io
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    exit_code = run_cli([
+        "multi-year",
+        "--fund-code", "005680",
+        "--years", "2026",
+        "--work-dir", SNAPSHOT_WORK_DIR,
+    ], stdout=stdout, stderr=stderr)
+
+    # 2026 年只有 Q1/Q2 季报（无年报）→ 应 classified failure（不足 3 年 or not_found）
+    assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
+    assert "not_found" in stderr.getvalue()
+
+
+def test_e2e_generate_annual_ignores_snapshot_documents() -> None:
+    """防污染（§6.25 裁决 17）：generate annual 必须只匹配 annual_report。"""
+    if not (Path(SNAPSHOT_WORK_DIR) / "completed_reports.json").exists():
+        pytest.skip(f"快照数据目录不存在: {SNAPSHOT_WORK_DIR}")
+
+    from fund_agent.service.extraction import FundReadingService, GenerateReportRequest
+    from fund_agent.fund.document_tools.constants import FailureCode
+
+    service = FundReadingService()
+    result = service.generate_report(
+        request=GenerateReportRequest(
+            fund_code="005680",
+            fund_name="财通资管价值成长混合",
+            report_year=2026,
+            work_dir=SNAPSHOT_WORK_DIR,
+            output_format="json",
+        ),
+        llm_client=None,
+    )
+    # 快照 workdir 无年报 → NOT_FOUND，而不是把 2026 季报当年报
+    assert result.failure is not None
+    assert result.failure.code is FailureCode.NOT_FOUND

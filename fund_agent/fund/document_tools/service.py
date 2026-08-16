@@ -365,6 +365,8 @@ def _summary_from_identity(identity: ReportIdentity) -> ReportSummary:
         source_kind=identity.source_kind.value,
         source_summary=f"{identity.source_kind.value}:sha256:{identity.content_fingerprint[:16]}",
         content_fingerprint=identity.content_fingerprint,
+        quarter=identity.quarter,
+        period=identity.period,
         share_class=identity.share_class,
     )
 

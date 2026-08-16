@@ -925,6 +925,40 @@ def test_performance_returns_candidate_order_prefers_nav_growth_rate_query() -> 
     )
 
 
+def test_performance_family_excess_return_queries_route_to_performance_returns() -> None:
+    """2026-08-14 第4个任务：超额收益/净值表现 词面全部进入 performance_returns 受控路由。"""
+
+    for query in ("超额收益是多少", "超额收益率", "超额表现", "净值表现如何"):
+        route_plan = reading_service_module._route_plan_for_query(query)
+
+        assert route_plan.profile_name == "performance_returns", query
+
+
+def test_performance_family_extended_aliases_do_not_absorb_other_profiles() -> None:
+    """2026-08-14 第4个任务：aliases 扩展不误命中 performance_returns（规模/持仓/费率仍走各自路径）。"""
+
+    for query in ("基金规模", "持仓明细", "管理费", "前十大持仓"):
+        route_plan = reading_service_module._route_plan_for_query(query)
+
+        assert route_plan.profile_name != "performance_returns", query
+
+
+def test_performance_family_extended_aliases_keep_registry_valid() -> None:
+    """2026-08-14 第4个任务：aliases 扩展后 registry 校验通过，不抛 schema_drift。"""
+
+    contracts = reading_service_module._validated_locator_contracts()
+    performance_returns = next(
+        contract
+        for contract in contracts
+        if contract.profile_name == "performance_returns"
+    )
+
+    assert "超额收益" in performance_returns.aliases
+    assert "超额收益率" in performance_returns.aliases
+    assert "超额" in performance_returns.aliases
+    assert "净值表现" in performance_returns.aliases
+
+
 def test_disclosure_locator_registry_has_only_reading_contract_fields() -> None:
     """11B registry 只表达披露定位 contract，不开放抽取或 public DTO。"""
 
@@ -948,6 +982,8 @@ def test_disclosure_locator_registry_has_only_reading_contract_fields() -> None:
         "manager_holdings",
         "fee_rates",
         "performance_returns",
+        "quarterly_performance",
+        "semiannual_performance",
     )
     assert registry["holdings_top10"].aliases == ("前十大持仓", "重仓股", "持仓明细")
     assert registry["holdings_top10"].candidate_queries == ("股票投资明细", "前十名股票投资明细")
@@ -987,6 +1023,10 @@ def test_disclosure_locator_registry_has_only_reading_contract_fields() -> None:
         "基准收益率",
         "收益表现",
         "基金净值表现",
+        "超额收益",
+        "超额收益率",
+        "超额",
+        "净值表现",
     )
     assert registry["performance_returns"].candidate_queries == (
         "净值增长率",
@@ -1009,7 +1049,13 @@ def test_disclosure_locator_registry_has_only_reading_contract_fields() -> None:
         profile_name
         for profile_name, contract in registry.items()
         if contract.anchor_title_family
-    } == {"holdings_top10", "manager_holdings", "performance_returns"}
+    } == {
+        "holdings_top10",
+        "manager_holdings",
+        "performance_returns",
+        "quarterly_performance",
+        "semiannual_performance",
+    }
     assert all(
         contract.aggregate_all_matches is False
         for profile_name, contract in registry.items()

@@ -15,7 +15,7 @@ from typing import Sequence, TextIO
 from fund_agent.fund.document_tools.constants import FailureCode, ReportType
 from fund_agent.fund.document_tools.errors import DocumentToolError
 from fund_agent.fund.document_tools.models import ToolFailure
-from fund_agent.fund.document_tools.eid_downloader import EidDownloadError, download_annual_report
+from fund_agent.fund.document_tools.eid_downloader import EidDownloadError, download_report
 from fund_agent.fund.document_tools.persistent_repository import (
     CATALOG_FILENAME,
     FilesystemReportRepository,
@@ -110,6 +110,10 @@ def run_cli(
             return _run_deep_audit_command(args, stdout=stdout, stderr=stderr)
         if args.command == "generate":
             return _run_generate_command(args, stdout=stdout, stderr=stderr)
+        if args.command == "snapshot-quarterly":
+            return _run_snapshot_command(args, report_type="quarterly_report", stdout=stdout, stderr=stderr)
+        if args.command == "snapshot-semiannual":
+            return _run_snapshot_command(args, report_type="semiannual_report", stdout=stdout, stderr=stderr)
         if args.command == "ask":
             return _run_ask_command(args, stdout=stdout, stderr=stderr)
         if args.command == "interactive":
@@ -166,6 +170,10 @@ def build_parser() -> argparse.ArgumentParser:
     import_parser.add_argument("--fund-code", required=True)
     import_parser.add_argument("--fund-name", required=True)
     import_parser.add_argument("--year-range", default="2022-2024", help="年份范围（默认最近3年：2022-2024）")
+    import_parser.add_argument("--report-type", default="annual_report", choices=["annual_report", "quarterly_report", "semiannual_report"],
+                              help="报告类型（默认 annual_report；quarterly_report 需配合 --quarter）")
+    import_parser.add_argument("--quarter", type=int, choices=[1, 2, 3, 4], default=None,
+                              help="季报期次 1-4（仅 --report-type quarterly_report 必填）")
     import_parser.add_argument("--work-dir", default=Path(DEFAULT_WORK_DIR), type=Path)
 
     holdings_parser = subparsers.add_parser("holdings")
@@ -176,6 +184,9 @@ def build_parser() -> argparse.ArgumentParser:
     download_parser = subparsers.add_parser("download")
     download_parser.add_argument("--fund-code", required=True, help="基金代码")
     download_parser.add_argument("--year", required=True, type=int, help="报告年份")
+    download_parser.add_argument("--report-type", default="annual_report", choices=["annual_report", "quarterly_report", "semiannual_report"],
+                              help="报告类型（默认 annual_report；quarterly_report 需配合 --quarter）")
+    download_parser.add_argument("--quarter", type=int, choices=[1, 2, 3, 4], default=None, help="季报期次 1-4（仅 quarterly_report）")
     download_parser.add_argument("--output-dir", default=Path("基金年报"), type=Path, help="PDF 输出目录")
     download_parser.add_argument("--force", action="store_true", help="强制重新下载")
 
@@ -210,6 +221,26 @@ def build_parser() -> argparse.ArgumentParser:
     generate_parser.add_argument("--concurrency", type=int, default=None, help="章节生成并发数（1-8，默认 4；仅 --llm 模式生效）")
     generate_parser.add_argument("--holdings-source-fund", default="", help="关联持仓源基金代码（如 ETF 联接基金的标的 ETF 512890）")
     generate_parser.add_argument("--holdings-source-workdir", default=None, type=Path, help="关联持仓源工作目录（如 .fund_checklist_512890）")
+
+    snapshot_quarterly_parser = subparsers.add_parser("snapshot-quarterly")
+    snapshot_quarterly_parser.add_argument("--fund-code", required=True, help="基金代码")
+    snapshot_quarterly_parser.add_argument("--fund-name", required=True, help="基金名称")
+    snapshot_quarterly_parser.add_argument("--year", required=True, type=int, help="报告年份")
+    snapshot_quarterly_parser.add_argument("--quarter", required=True, type=int, choices=[1, 2, 3, 4], help="季报期次 1-4")
+    snapshot_quarterly_parser.add_argument("--format", dest="output_format", default="json", choices=["json", "markdown", "pdf"])
+    snapshot_quarterly_parser.add_argument("--llm", action="store_true", default=False, help="使用 LLM 生成分析文本")
+    snapshot_quarterly_parser.add_argument("--work-dir", default=Path(DEFAULT_WORK_DIR), type=Path)
+    snapshot_quarterly_parser.add_argument("--concurrency", type=int, default=None, help="章节生成并发数（1-8，默认 4；仅 --llm 模式生效）")
+
+    snapshot_semiannual_parser = subparsers.add_parser("snapshot-semiannual")
+    snapshot_semiannual_parser.add_argument("--fund-code", required=True, help="基金代码")
+    snapshot_semiannual_parser.add_argument("--fund-name", required=True, help="基金名称")
+    snapshot_semiannual_parser.add_argument("--year", required=True, type=int, help="报告年份")
+    snapshot_semiannual_parser.add_argument("--period", default="H1", choices=["H1"], help="半年报期次（当前仅 H1）")
+    snapshot_semiannual_parser.add_argument("--format", dest="output_format", default="json", choices=["json", "markdown", "pdf"])
+    snapshot_semiannual_parser.add_argument("--llm", action="store_true", default=False, help="使用 LLM 生成分析文本")
+    snapshot_semiannual_parser.add_argument("--work-dir", default=Path(DEFAULT_WORK_DIR), type=Path)
+    snapshot_semiannual_parser.add_argument("--concurrency", type=int, default=None, help="章节生成并发数（1-8，默认 4；仅 --llm 模式生效）")
 
     ask_parser = subparsers.add_parser("ask")
     ask_parser.add_argument("question", help="用户问题")
@@ -275,7 +306,12 @@ def _collect_matching_docs(
 
     seen_years: dict[int, str] = {}
     for report in catalog_reports:
-        if report.get("fund_code") == fund_code and report.get("year") in requested_years:
+        # 防污染（§6.25 裁决 17）：只匹配 annual_report，快照文档不进 multi-year 系列
+        if (
+            report.get("fund_code") == fund_code
+            and report.get("year") in requested_years
+            and report.get("report_type") == "annual_report"
+        ):
             year = int(report["year"])
             doc_id = str(report["document_id"])
             seen_years[year] = doc_id
@@ -556,6 +592,25 @@ def _extract_year_from_filename(filename: str) -> int | None:
     return None
 
 
+_QUARTER_PATTERN = re.compile(r"Q([1-4])")
+
+
+def _extract_quarter_from_filename(filename: str) -> int | None:
+    """从 PDF 文件名中提取季报期次（便利推断，非契约来源）。
+
+    参数:
+        filename: PDF 文件名，如 "005680_财通资管价值成长混合_2026_Q1_quarterly_report.pdf"。
+
+    返回:
+        提取到的期次 1-4；无法提取时返回 None。
+    """
+
+    match = _QUARTER_PATTERN.search(filename)
+    if match:
+        return int(match.group(1))
+    return None
+
+
 _FUND_NAME_STOP_WORDS = (
     "交易型开放式", "证券投资基金", "联接基金", "灵活配置",
     "混合型", "债券型", "股票型", "指数型", "发起式",
@@ -634,6 +689,21 @@ def _run_import_command(args: argparse.Namespace, *, stdout: TextIO, stderr: Tex
         _write_classified_failure(failure, stderr)
         return CLASSIFIED_FAILURE_EXIT_CODE
 
+    try:
+        report_type = ReportType(args.report_type)
+    except ValueError:
+        failure = ToolFailure(code=FailureCode.SCHEMA_DRIFT, message=f"--report-type 不合法: {args.report_type}")
+        _write_classified_failure(failure, stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+    if report_type is ReportType.QUARTERLY_REPORT and args.quarter is None:
+        failure = ToolFailure(code=FailureCode.SCHEMA_DRIFT, message="--report-type quarterly_report 必须指定 --quarter 1-4")
+        _write_classified_failure(failure, stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+    if report_type is not ReportType.QUARTERLY_REPORT and args.quarter is not None:
+        failure = ToolFailure(code=FailureCode.SCHEMA_DRIFT, message="--quarter 仅适用于 quarterly_report")
+        _write_classified_failure(failure, stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
     year_range = _parse_year_range(args.year_range)
     year_range_set = set(year_range)
 
@@ -652,13 +722,22 @@ def _run_import_command(args: argparse.Namespace, *, stdout: TextIO, stderr: Tex
         return CLASSIFIED_FAILURE_EXIT_CODE
     for pdf_path in pdf_files:
         year = _extract_year_from_filename(pdf_path.name)
-        if year is not None and year in year_range_set and _matches_fund_name(pdf_path.name, fund_name_keyword):
-            matching_files.append((pdf_path, year))
+        if year is None or year not in year_range_set:
+            continue
+        if not _matches_fund_name(pdf_path.name, fund_name_keyword):
+            continue
+        # 文件名推断仅便利（contract-first）：文件名显式携带 Q{n} 标记时要求与 --quarter 一致；
+        # 无标记的文件仍按显式 --report-type/--quarter 导入。
+        if report_type is ReportType.QUARTERLY_REPORT and args.quarter is not None:
+            filename_quarter = _extract_quarter_from_filename(pdf_path.name)
+            if filename_quarter is not None and filename_quarter != args.quarter:
+                continue
+        matching_files.append((pdf_path, year))
 
     if not matching_files:
         failure = ToolFailure(
             code=FailureCode.NOT_FOUND,
-            message=f"目录中未找到年份在 {year_range[0]}-{year_range[-1]} 范围内的 PDF 文件",
+            message=f"目录中未找到年份在 {year_range[0]}-{year_range[-1]} 范围内、类型 {report_type.value} 的 PDF 文件",
         )
         _write_classified_failure(failure, stderr)
         return CLASSIFIED_FAILURE_EXIT_CODE
@@ -680,7 +759,8 @@ def _run_import_command(args: argparse.Namespace, *, stdout: TextIO, stderr: Tex
                     fund_name=args.fund_name,
                     year=year,
                     work_dir=work_dir,
-                    report_type=ReportType.ANNUAL_REPORT,
+                    report_type=report_type,
+                    quarter=args.quarter,
                 )
             )
             imported += 1
@@ -732,7 +812,12 @@ def _run_multi_year_command(args: argparse.Namespace, *, stdout: TextIO, stderr:
     matching_docs: list[AnnualReportDocument] = []
     seen_years: dict[int, str] = {}
     for report in catalog_reports:
-        if report.get("fund_code") == args.fund_code and report.get("year") in requested_years:
+        # 防污染（§6.25 裁决 17）：只匹配 annual_report，快照文档不进 multi-year 系列
+        if (
+            report.get("fund_code") == args.fund_code
+            and report.get("year") in requested_years
+            and report.get("report_type") == "annual_report"
+        ):
             year = int(report["year"])
             doc_id = str(report["document_id"])
             # last-wins：同一年有多条 catalog 记录时保留最后一条（catalog 按 document_id 字典序排列）
@@ -791,10 +876,13 @@ def _run_download_command(args: argparse.Namespace, *, stdout: TextIO, stderr: T
         成功返回 0；失败返回 2。
     """
     try:
-        result = download_annual_report(
+        from fund_agent.fund.document_tools.eid_downloader import download_report
+        result = download_report(
             fund_code=args.fund_code,
             year=args.year,
             output_dir=Path(args.output_dir),
+            report_type=args.report_type,
+            quarter=args.quarter,
             force=args.force,
         )
         output = {
@@ -1079,6 +1167,74 @@ def _run_generate_command(args: argparse.Namespace, *, stdout: TextIO, stderr: T
                 "title": c.title,
                 "content": c.content,
                 "data_sources": list(c.data_sources),
+            }
+            for c in result.report.chapters
+        ],
+        "metadata": result.report.metadata,
+        "output_path": result.output_path,
+        "warnings": list(result.warnings),
+    }
+    print(json.dumps(output, ensure_ascii=False, indent=2), file=stdout)
+    return SUCCESS_EXIT_CODE
+
+
+
+def _run_snapshot_command(
+    args: argparse.Namespace,
+    *,
+    report_type: str,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> int:
+    """生成季报/半年报单期快照报告。
+
+    参数:
+        args: argparse 解析出的 snapshot 参数。
+        report_type: quarterly_report / semiannual_report。
+        stdout: 成功输出流（JSON）。
+        stderr: 失败输出流。
+
+    返回:
+        成功返回 0；not_found 返回 2。
+    """
+
+    from fund_agent.service import SnapshotReportRequest
+
+    service = FundReadingService()
+    llm_client = None
+    if getattr(args, "llm", False):
+        llm_client = DeepSeekLlmClient()
+    elif args.output_format != "json":
+        stderr.write("⚠ 快照以模板模式生成（无 LLM 分析），使用 --llm 启用 AI 分析\n")
+
+    result = service.generate_snapshot_report(
+        SnapshotReportRequest(
+            fund_code=args.fund_code,
+            fund_name=args.fund_name,
+            report_year=args.year,
+            report_type=report_type,
+            quarter=args.quarter if report_type == "quarterly_report" else None,
+            work_dir=Path(args.work_dir),
+            output_format=args.output_format,
+            chapter_concurrency=args.concurrency if getattr(args, "llm", False) else None,
+        ),
+        llm_client=llm_client,
+    )
+    if result.failure is not None:
+        _write_classified_failure(result.failure, stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+    output = {
+        "fund_code": result.report.fund_code,
+        "fund_name": result.report.fund_name,
+        "report_year": result.report.report_year,
+        "report_type": report_type,
+        "quarter": result.report.metadata.get("quarter") if result.report.metadata else None,
+        "chapters": [
+            {
+                "chapter_id": c.chapter_id,
+                "title": c.title,
+                "content": c.content,
             }
             for c in result.report.chapters
         ],

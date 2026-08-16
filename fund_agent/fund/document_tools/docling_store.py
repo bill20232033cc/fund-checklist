@@ -992,15 +992,62 @@ def _bounded(text: str, max_chars: int) -> tuple[str, bool]:
     return text[:max_chars], True
 
 
+_NUMBER_STRING_CHARS = frozenset("0123456789,，.")
+
+
+def _align_start_no_number_cut(text: str, start: int) -> int:
+    """把窗口左边界对齐到数字串起点，避免截断数字串。
+
+    参数:
+        text: 原文。
+        start: 窗口左边界下标。
+
+    返回:
+        对齐后的左边界；仅当截断点前一字符与当前字符均属数字串字符集
+        （`0123456789,，.`）时向前回退至数字串起点，其余情况原样返回。
+    """
+
+    if not 0 < start < len(text):
+        return start
+    if text[start - 1] not in _NUMBER_STRING_CHARS or text[start] not in _NUMBER_STRING_CHARS:
+        return start
+    while start > 0 and text[start - 1] in _NUMBER_STRING_CHARS:
+        start -= 1
+    return start
+
+
+def _align_end_no_number_cut(text: str, end: int) -> int:
+    """把窗口右边界对齐到数字串结束，避免截断数字串。
+
+    参数:
+        text: 原文。
+        end: 窗口右边界下标。
+
+    返回:
+        对齐后的右边界；仅当截断点前一字符与当前字符均属数字串字符集
+        （`0123456789,，.`）时向后扩展至数字串结束，其余情况原样返回。
+    """
+
+    if not 0 < end < len(text):
+        return end
+    if text[end - 1] not in _NUMBER_STRING_CHARS or text[end] not in _NUMBER_STRING_CHARS:
+        return end
+    while end < len(text) and text[end] in _NUMBER_STRING_CHARS:
+        end += 1
+    return end
+
+
 def _excerpt(text: str, query: str, max_chars: int) -> str:
-    """围绕首次命中构造有界摘录。"""
+    """围绕首次命中构造有界摘录，窗口边缘对齐数字串边界。"""
 
     index = text.find(query)
     if index < 0:
-        return _bounded(text, max_chars)[0]
+        return text[: _align_end_no_number_cut(text, max_chars)]
     half_window = max(max_chars // 2, len(query))
     start = max(index - half_window, 0)
     end = min(start + max_chars, len(text))
+    start = _align_start_no_number_cut(text, start)
+    end = _align_end_no_number_cut(text, end)
     return text[start:end]
 
 
@@ -1032,7 +1079,7 @@ def _map_normalized_index(original: str, normalized_index: int) -> int:
 
 
 def _search_excerpt(text: str, query: str, max_chars: int) -> str:
-    """构造搜索命中摘录：优先字面定位，其次按空白归一化定位原文。"""
+    """构造搜索命中摘录：优先字面定位，其次按空白归一化定位原文；窗口边缘对齐数字串边界。"""
 
     if text.find(query) >= 0:
         return _excerpt(text, query, max_chars)
@@ -1040,9 +1087,12 @@ def _search_excerpt(text: str, query: str, max_chars: int) -> str:
     normalized_query = _whitespace_stripped(query)
     index = normalized_text.find(normalized_query)
     if index < 0:
-        return _bounded(text, max_chars)[0]
+        return text[: _align_end_no_number_cut(text, max_chars)]
     start = _map_normalized_index(text, index)
     end = _map_normalized_index(text, index + len(normalized_query))
     half_window = max(max_chars // 2, end - start)
     begin = max(start - half_window, 0)
-    return text[begin : min(begin + max_chars, len(text))]
+    window_end = min(begin + max_chars, len(text))
+    begin = _align_start_no_number_cut(text, begin)
+    window_end = _align_end_no_number_cut(text, window_end)
+    return text[begin:window_end]

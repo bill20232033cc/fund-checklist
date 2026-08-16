@@ -879,6 +879,29 @@ class TestInteractiveAnchorInjection:
         assert "请先 list_tables 确认该表号在列，再 read_table 该表" in contributions["retrieval"]
         assert "勿自行猜测表号" in contributions["retrieval"]
 
+    def test_performance_excess_return_query_injects_anchor(
+        self, session_store: SessionStore, prompt_composer: PromptComposer
+    ) -> None:
+        """2026-08-14 第4个任务：超额收益 query 命中 performance_returns 并复用 3.2.1 表锚点注入。"""
+
+        service = self._service(session_store, prompt_composer, self._performance_tool_service())
+        session = self._session(
+            session_store,
+            document_id=self._PERF_ANCHOR_FIXTURE_DOC_ID,
+            fund_code="004393",
+        )
+
+        contributions = service._build_contributions(
+            session,
+            document_id=self._PERF_ANCHOR_FIXTURE_DOC_ID,
+            user_query="超额收益是多少",
+        )
+
+        assert "已识别披露主题: performance_returns" in contributions["retrieval"]
+        assert "候选表锚点: table-0009（阶段、份额净值增长率、业绩比较基准收益率）" in contributions["retrieval"]
+        assert "请先 list_tables 确认该表号在列，再 read_table 该表" in contributions["retrieval"]
+        assert "勿自行猜测表号" in contributions["retrieval"]
+
     def test_other_profile_no_anchor(
         self, session_store: SessionStore, prompt_composer: PromptComposer
     ) -> None:
