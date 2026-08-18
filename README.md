@@ -52,26 +52,34 @@ export MIMO_BASE_URL=https://api.xiaomimimo.com/v1
 export MIMO_MODEL=mimo-v2.5-pro
 ```
 
-## 2. 下载年报
+## 2. 下载报告
 
-`download` 从公开信息披露平台（EID）下载年报 PDF，一次一年，默认输出到 `基金年报/`：
+`download` 从公开信息披露平台（EID）下载基金报告 PDF，支持单年单期与批量下载，默认输出到 `基金年报/`：
 
 ```bash
+# 单年下载
 uv run fund-checklist download --fund-code 005680 --year 2025
+
+# 批量下载年报：年份范围矩阵
+uv run fund-checklist download --fund-code 005680 --year-range 2021-2025
+
+# 批量下载季报：--quarters 1,2,3,4（缺省全部期次 1-4，也可写 1-4）
+uv run fund-checklist download --fund-code 005680 --year-range 2025-2025 --report-type quarterly_report --quarters 1,2,3,4
+
+# 下载后自动导入 catalog（--import 复用 import 命令的分类语义）
+uv run fund-checklist download --fund-code 005680 --year-range 2021-2025 --import --work-dir .fund_checklist_005680
 ```
 
-循环下载 5 年年报：
-
-```bash
-for y in 2021 2022 2023 2024 2025; do
-  uv run fund-checklist download --fund-code 005680 --year $y
-done
-```
+批量模式下 stdout 输出 JSON 数组（每条目 `fund_code`/`year`/`quarter`/`report_type`/`status`/`file_path`/`source_url`，失败条目为 `failure{code,message}`），stderr 输出逐条进度与失败汇总；退出码与 `import` 一致（全部成功 → 0、全部条目失败 → 2、部分失败 → 0）。
 
 常用参数：
 
+- `--year` / `--year-range`：单年或年份范围（`2021-2024` 或 `2021,2023`），二者互斥、必选其一。
+- `--report-type`：`annual_report`（默认）/ `semiannual_report` / `quarterly_report`。
+- `--quarter` / `--quarters`：季报期次单值 1-4 或集合（`1-4` / `1,2,3`），仅 `quarterly_report`，二者互斥；批量季报缺省全部期次。
 - `--output-dir`：PDF 输出目录（默认 `基金年报/`）。
 - `--force`：已存在时强制重新下载（默认跳过）。
+- `--import`：下载/缓存成功后自动导入 catalog（配合 `--work-dir`，默认 `.fund_checklist`）。
 
 ## 3. 导入年报
 

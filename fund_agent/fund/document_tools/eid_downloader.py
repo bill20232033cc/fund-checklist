@@ -37,9 +37,11 @@ ANNUAL_REPORT_SPEC = {
     "report_desp": "年度报告",
 }
 
-# 2026-08-14 EID 实证（docs/research/quarterly-semiannual-data-source-research-20260814.md）：
+# 2026-08-14 EID 实证（docs/research/quarterly-semiannual-data-source-research-20260814.md；
+# 2026-08-17 直连 EID 实测修正季报 reportDesp 为中文数字）：
 # 半年报 reportType=FB020 / reportCode=FB020010 / reportDesp=中期报告；
-# 季报 reportType=FB030 / reportCode=FB0300X / reportDesp=第N季度报告（N=1..4）。
+# 季报 reportType=FB030 / reportCode=FB0300X / reportDesp=中文数字季度报告
+# （"第一季度报告"…"第四季度报告"，N=1..4）。
 SEMIANNUAL_REPORT_SPEC = {
     "report_type": "FB020",
     "report_code": "FB020010",
@@ -52,10 +54,10 @@ QUARTERLY_REPORT_CODE_BY_QUARTER = {
     4: "FB030040",
 }
 QUARTERLY_REPORT_DESP_BY_QUARTER = {
-    1: "第1季度报告",
-    2: "第2季度报告",
-    3: "第3季度报告",
-    4: "第4季度报告",
+    1: "第一季度报告",
+    2: "第二季度报告",
+    3: "第三季度报告",
+    4: "第四季度报告",
 }
 REPORT_SPECS = {
     "annual_report": ANNUAL_REPORT_SPEC,
@@ -252,6 +254,25 @@ def _validate_fund(fund_code: str) -> str:
     return str(fund_id)
 
 
+def _report_display_label(spec: dict[str, str]) -> str:
+    """返回报告类型的展示标签（not_found 消息用）。
+
+    年报 → 年报；半年报 → 中期报告；季报 → 第N季度报告（期次由
+    report_code 反查 QUARTERLY_REPORT_CODE_BY_QUARTER，2026-08-17 EID 实测修正）。
+    """
+    report_code = spec["report_code"]
+    if report_code in QUARTERLY_REPORT_CODE_BY_QUARTER.values():
+        quarter = next(
+            q
+            for q, code in QUARTERLY_REPORT_CODE_BY_QUARTER.items()
+            if code == report_code
+        )
+        return f"第{quarter}季度报告"
+    if report_code == SEMIANNUAL_REPORT_SPEC["report_code"]:
+        return "中期报告"
+    return "年报"
+
+
 def _search_report(
     *,
     fund_code: str,
@@ -259,7 +280,7 @@ def _search_report(
     year: int,
     spec: dict[str, str],
 ) -> tuple[dict[str, Any], str]:
-    """搜索年报，返回 (candidate_dict, fund_short_name)。
+    """搜索指定报告类型（年报/半年报/季报），返回 (candidate_dict, fund_short_name)。
 
     EID advanced_search_report.do 接口：
     - GET params: aoData=[{name, value}, ...]（JSON 数组）
@@ -319,7 +340,7 @@ def _search_report(
             return row, str(row.get("fundShortName", fund_code))
 
     raise EidDownloadError(
-        f"未找到 {fund_code} 的 {year} 年年报",
+        f"未找到 {fund_code} 的 {year} 年{_report_display_label(spec)}",
         code="not_found",
     )
 

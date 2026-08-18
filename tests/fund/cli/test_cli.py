@@ -4120,3 +4120,377 @@ def test_multi_year_collect_ignores_snapshot_in_mixed_workdir(tmp_path: Path) ->
     # 只含 annual 年份；2026 季报被过滤
     assert years == [2023, 2024, 2025]
     assert 2026 not in years
+
+
+def test_download_single_mode_keeps_single_object_json(monkeypatch, tmp_path: Path) -> None:
+    """download 单模式（无 --year-range/--quarters）必须保持既有单对象 JSON 输出，字段不变。"""
+
+    from fund_agent.fund.document_tools.eid_downloader import DownloadResult
+
+    def _fake_download_report(**kwargs):
+        return DownloadResult(
+            fund_code=kwargs["fund_code"],
+            fund_name="测试基金",
+            year=int(kwargs["year"]),
+            file_path=tmp_path / "out" / "test.pdf",
+            source_url="http://eid.example/test",
+            status="downloaded",
+        )
+
+    monkeypatch.setattr(cli_module, "download_report", _fake_download_report)
+
+    exit_code, stdout, stderr = _run([
+        "download",
+        "--fund-code", "005680",
+        "--year", "2025",
+        "--output-dir", str(tmp_path / "out"),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE
+    payload = json.loads(stdout)
+    assert isinstance(payload, dict)
+    assert set(payload) == {"fund_code", "fund_name", "year", "status", "file_path", "source_url"}
+    assert payload["fund_code"] == "005680"
+    assert payload["year"] == 2025
+    assert payload["status"] == "downloaded"
+
+
+def test_download_year_and_year_range_mutually_exclusive() -> None:
+    """--year 与 --year-range 必须互斥（argparse 冲突退出码 2）。"""
+
+    exit_code, stdout, stderr = _run([
+        "download",
+        "--fund-code", "005680",
+        "--year", "2025",
+        "--year-range", "2024-2025",
+    ])
+
+    # argparse 冲突消息写入 sys.stderr，run_cli 只透传退出码
+    assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
+
+
+def test_download_quarter_and_quarters_mutually_exclusive() -> None:
+    """--quarter 与 --quarters 必须互斥（argparse 冲突退出码 2）。"""
+
+    exit_code, stdout, stderr = _run([
+        "download",
+        "--fund-code", "005680",
+        "--year", "2025",
+        "--report-type", "quarterly_report",
+        "--quarter", "1",
+        "--quarters", "1,2",
+    ])
+
+    # argparse 冲突消息写入 sys.stderr，run_cli 只透传退出码
+    assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
+
+
+def test_download_requires_year_or_year_range() -> None:
+    """--year 与 --year-range 皆缺省时必须 schema_drift（退出码 2）。"""
+
+    exit_code, stdout, stderr = _run([
+        "download",
+        "--fund-code", "005680",
+    ])
+
+    assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
+    assert "failure_code=schema_drift" in stderr
+
+
+def test_download_quarters_only_applies_to_quarterly() -> None:
+    """--quarters 在 annual/semiannual 下给出必须 schema_drift。"""
+
+    exit_code, stdout, stderr = _run([
+        "download",
+        "--fund-code", "005680",
+        "--year", "2025",
+        "--quarters", "1,2",
+    ])
+
+    assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
+    assert "failure_code=schema_drift" in stderr
+    assert "仅适用于 quarterly_report" in stderr
+
+
+def test_download_quarters_out_of_range_schema_drift() -> None:
+    """--quarters 越界（非 1-4）必须 schema_drift。"""
+
+    exit_code, stdout, stderr = _run([
+        "download",
+        "--fund-code", "005680",
+        "--year", "2025",
+        "--report-type", "quarterly_report",
+        "--quarters", "5",
+    ])
+
+    assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
+    assert "failure_code=schema_drift" in stderr
+
+
+def test_download_batch_quarterly_defaults_all_quarters(monkeypatch, tmp_path: Path) -> None:
+    """批量 quarterly 缺省期次必须为 1-4；2 年 × 4 季 = 8 条目矩阵，stdout 为 JSON 数组。"""
+
+    from fund_agent.fund.document_tools.eid_downloader import DownloadResult
+
+    calls: list[dict[str, object]] = []
+
+    def _fake_download_report(**kwargs):
+        calls.append(kwargs)
+        return DownloadResult(
+            fund_code=kwargs["fund_code"],
+            fund_name="测试基金",
+            year=int(kwargs["year"]),
+            file_path=tmp_path / "out" / f"{kwargs['year']}_Q{kwargs['quarter']}.pdf",
+            source_url="http://eid.example/test",
+            status="cached",
+        )
+
+    monkeypatch.setattr(cli_module, "download_report", _fake_download_report)
+
+    exit_code, stdout, stderr = _run([
+        "download",
+        "--fund-code", "005680",
+        "--year-range", "2024-2025",
+        "--report-type", "quarterly_report",
+        "--output-dir", str(tmp_path / "out"),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE
+    assert len(calls) == 8
+    assert sorted({int(call["quarter"]) for call in calls}) == [1, 2, 3, 4]
+    payload = json.loads(stdout)
+    assert isinstance(payload, list)
+    assert len(payload) == 8
+    for item in payload:
+        assert set(item) == {"fund_code", "year", "quarter", "report_type", "status", "file_path", "source_url"}
+    assert "Download summary: 8 succeeded, 0 failed" in stderr
+
+
+def test_download_batch_explicit_quarters_mixed_status(monkeypatch, tmp_path: Path) -> None:
+    """--quarters 1,3 生成 2 年 × 2 季 = 4 条目；cached/downloaded 混合全部成功退出码 0。"""
+
+    from fund_agent.fund.document_tools.eid_downloader import DownloadResult
+
+    calls: list[dict[str, object]] = []
+
+    def _fake_download_report(**kwargs):
+        calls.append(kwargs)
+        status = "downloaded" if int(kwargs["quarter"]) == 1 else "cached"
+        return DownloadResult(
+            fund_code=kwargs["fund_code"],
+            fund_name="测试基金",
+            year=int(kwargs["year"]),
+            file_path=tmp_path / "out" / "test.pdf",
+            source_url="http://eid.example/test",
+            status=status,
+        )
+
+    monkeypatch.setattr(cli_module, "download_report", _fake_download_report)
+
+    exit_code, stdout, stderr = _run([
+        "download",
+        "--fund-code", "005680",
+        "--year-range", "2024-2025",
+        "--report-type", "quarterly_report",
+        "--quarters", "1,3",
+        "--output-dir", str(tmp_path / "out"),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE
+    assert len(calls) == 4
+    assert sorted({int(call["quarter"]) for call in calls}) == [1, 3]
+    payload = json.loads(stdout)
+    assert len(payload) == 4
+    assert {item["status"] for item in payload} == {"downloaded", "cached"}
+
+
+def test_download_batch_partial_failure_exit_zero(monkeypatch, tmp_path: Path) -> None:
+    """批量下载单条目失败不得中断；失败清单含 code/message，部分失败退出码为 0。"""
+
+    from fund_agent.fund.document_tools.eid_downloader import DownloadResult, EidDownloadError
+
+    def _fake_download_report(**kwargs):
+        if int(kwargs["year"]) == 2024:
+            raise EidDownloadError("报告未找到", code="not_found")
+        return DownloadResult(
+            fund_code=kwargs["fund_code"],
+            fund_name="测试基金",
+            year=int(kwargs["year"]),
+            file_path=tmp_path / "out" / "test.pdf",
+            source_url="http://eid.example/test",
+            status="downloaded",
+        )
+
+    monkeypatch.setattr(cli_module, "download_report", _fake_download_report)
+
+    exit_code, stdout, stderr = _run([
+        "download",
+        "--fund-code", "005680",
+        "--year-range", "2024-2025",
+        "--output-dir", str(tmp_path / "out"),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE
+    payload = json.loads(stdout)
+    assert len(payload) == 2
+    failure_items = [item for item in payload if "failure" in item]
+    assert len(failure_items) == 1
+    assert failure_items[0]["failure"]["code"] == "not_found"
+    assert "message" in failure_items[0]["failure"]
+    assert "Download summary: 1 succeeded, 1 failed" in stderr
+
+
+def test_download_batch_all_failed_exit_two(monkeypatch, tmp_path: Path) -> None:
+    """批量下载全部条目失败退出码为 2（与 _run_import_command 语义一致）。"""
+
+    from fund_agent.fund.document_tools.eid_downloader import EidDownloadError
+
+    def _fake_download_report(**kwargs):
+        raise EidDownloadError("网络不可用", code="unavailable")
+
+    monkeypatch.setattr(cli_module, "download_report", _fake_download_report)
+
+    exit_code, stdout, stderr = _run([
+        "download",
+        "--fund-code", "005680",
+        "--year-range", "2024-2025",
+        "--output-dir", str(tmp_path / "out"),
+    ])
+
+    assert exit_code == CLASSIFIED_FAILURE_EXIT_CODE
+    payload = json.loads(stdout)
+    assert len(payload) == 2
+    assert all("failure" in item for item in payload)
+    assert all(item["failure"]["code"] == "unavailable" for item in payload)
+
+
+def test_download_batch_import_pipeline(monkeypatch, tmp_path: Path) -> None:
+    """download --import 必须对成功条目逐个导入；integrity 失败 skipped、其它失败 failed、导入失败不中断。"""
+
+    from fund_agent.fund.document_tools.eid_downloader import DownloadResult
+    from fund_agent.fund.document_tools.models import ReportSummary
+    from fund_agent.service import ImportLocalReportResult
+
+    download_calls: list[dict[str, object]] = []
+    import_calls: list[dict[str, object]] = []
+
+    def _fake_download_report(**kwargs):
+        download_calls.append(kwargs)
+        return DownloadResult(
+            fund_code=kwargs["fund_code"],
+            fund_name="测试基金",
+            year=int(kwargs["year"]),
+            file_path=tmp_path / "pdfs" / f"{kwargs['year']}.pdf",
+            source_url="http://eid.example/test",
+            status="downloaded",
+        )
+
+    class _FakeService:
+        def import_local_report(self, request):
+            import_calls.append({
+                "fund_code": request.fund_code,
+                "fund_name": request.fund_name,
+                "year": request.year,
+                "quarter": request.quarter,
+                "report_type": request.report_type,
+                "pdf_path": str(request.pdf_path),
+                "work_dir": str(request.work_dir),
+            })
+            if request.year == 2024:
+                raise DocumentToolError(FailureCode.INTEGRITY_ERROR, "内容不是 PDF")
+            if request.year == 2025:
+                raise DocumentToolError(FailureCode.DOCLING_CONVERT_FAILED, "转换失败")
+            return ImportLocalReportResult(
+                document_id=f"{request.fund_code}-{request.year}-annual_report-fake",
+                report=ReportSummary(
+                    document_id=f"{request.fund_code}-{request.year}-annual_report-fake",
+                    fund_code=request.fund_code,
+                    fund_name=request.fund_name,
+                    year=request.year,
+                    report_type="annual_report",
+                    source_kind="local_pdf",
+                    source_summary="fake",
+                    content_fingerprint="fake",
+                ),
+            )
+
+    monkeypatch.setattr(cli_module, "download_report", _fake_download_report)
+    monkeypatch.setattr(cli_module, "FundReadingService", _FakeService)
+
+    exit_code, stdout, stderr = _run([
+        "download",
+        "--fund-code", "005680",
+        "--year-range", "2024-2026",
+        "--import",
+        "--output-dir", str(tmp_path / "pdfs"),
+        "--work-dir", str(tmp_path / "work"),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE
+    assert len(download_calls) == 3
+    assert len(import_calls) == 3
+    assert all(item["fund_code"] == "005680" for item in import_calls)
+    assert all(item["fund_name"] == "测试基金" for item in import_calls)
+    assert all(item["work_dir"] == str(tmp_path / "work") for item in import_calls)
+    assert {item["year"] for item in import_calls} == {2024, 2025, 2026}
+    payload = json.loads(stdout)
+    assert len(payload) == 3
+    assert all("failure" not in item for item in payload)
+    assert "Import summary: 1 imported, 1 skipped, 1 failed" in stderr
+
+
+def test_download_batch_import_skips_failed_downloads(monkeypatch, tmp_path: Path) -> None:
+    """下载失败条目不得进入 --import 流水线；部分失败退出码为 0。"""
+
+    from fund_agent.fund.document_tools.eid_downloader import DownloadResult, EidDownloadError
+    from fund_agent.fund.document_tools.models import ReportSummary
+    from fund_agent.service import ImportLocalReportResult
+
+    import_calls: list[int] = []
+
+    def _fake_download_report(**kwargs):
+        if int(kwargs["year"]) == 2024:
+            raise EidDownloadError("报告未找到", code="not_found")
+        return DownloadResult(
+            fund_code=kwargs["fund_code"],
+            fund_name="测试基金",
+            year=int(kwargs["year"]),
+            file_path=tmp_path / "pdfs" / f"{kwargs['year']}.pdf",
+            source_url="http://eid.example/test",
+            status="downloaded",
+        )
+
+    class _FakeService:
+        def import_local_report(self, request):
+            import_calls.append(request.year)
+            return ImportLocalReportResult(
+                document_id=f"{request.fund_code}-{request.year}-annual_report-fake",
+                report=ReportSummary(
+                    document_id=f"{request.fund_code}-{request.year}-annual_report-fake",
+                    fund_code=request.fund_code,
+                    fund_name=request.fund_name,
+                    year=request.year,
+                    report_type="annual_report",
+                    source_kind="local_pdf",
+                    source_summary="fake",
+                    content_fingerprint="fake",
+                ),
+            )
+
+    monkeypatch.setattr(cli_module, "download_report", _fake_download_report)
+    monkeypatch.setattr(cli_module, "FundReadingService", _FakeService)
+
+    exit_code, stdout, stderr = _run([
+        "download",
+        "--fund-code", "005680",
+        "--year-range", "2024-2025",
+        "--import",
+        "--output-dir", str(tmp_path / "pdfs"),
+        "--work-dir", str(tmp_path / "work"),
+    ])
+
+    assert exit_code == SUCCESS_EXIT_CODE
+    assert import_calls == [2025]
+    payload = json.loads(stdout)
+    assert payload[0]["failure"]["code"] == "not_found"
+    assert payload[1]["status"] == "downloaded"

@@ -455,6 +455,42 @@ def test_e2e_snapshot_scoring_005680() -> None:
     assert score.grade in ("优秀", "良好", "关注")
 
 
+def test_e2e_snapshot_report_005680_score_block() -> None:
+    """端到端：005680 快照报告（模板模式）必须落盘并含「快照评分」块，且与 metadata 一致。"""
+    if not (Path(SNAPSHOT_WORK_DIR) / "completed_reports.json").exists():
+        pytest.skip(f"快照数据目录不存在: {SNAPSHOT_WORK_DIR}")
+
+    from fund_agent.service.extraction import FundReadingService, SnapshotReportRequest
+
+    service = FundReadingService()
+    result = service.generate_snapshot_report(
+        request=SnapshotReportRequest(
+            fund_code="005680",
+            fund_name="财通资管价值成长混合",
+            report_year=2026,
+            report_type="quarterly_report",
+            quarter=1,
+            work_dir=Path(SNAPSHOT_WORK_DIR),
+            output_format="markdown",
+        ),
+        llm_client=None,
+    )
+    assert result.failure is None, f"快照报告生成失败: {result.failure}"
+    assert result.report is not None
+    assert result.output_path is not None
+    output_path = Path(result.output_path)
+    assert output_path.exists(), f"输出未落盘: {output_path}"
+
+    markdown = output_path.read_text(encoding="utf-8")
+    metadata_score = result.report.metadata["snapshot_score"]
+    assert "## 快照评分" in markdown
+    assert f"总分：{metadata_score['total_score']}/100" in markdown
+    assert f"综合等级：{metadata_score['grade']}" in markdown
+    assert f"超额收益得分：{metadata_score['excess_score']}/40" in markdown
+    assert f"仓位得分：{metadata_score['position_score']}/30" in markdown
+    assert f"集中度得分：{metadata_score['concentration_score']}/30" in markdown
+
+
 def test_e2e_multi_year_ignores_snapshot_documents() -> None:
     """防污染（§6.25 裁决 17）：multi-year 必须只匹配 annual_report，忽略快照文档。"""
     if not (Path(SNAPSHOT_WORK_DIR) / "completed_reports.json").exists():

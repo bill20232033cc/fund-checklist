@@ -163,6 +163,38 @@ def _render_missing_items(snapshot_data: dict[str, object]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _render_snapshot_score(snapshot_score: object) -> str:
+    """渲染快照评分块（总分/等级 + 三维明细）。
+
+    参数:
+        snapshot_score: SnapshotScore 实例（excess_score / position_score /
+            concentration_score / total_score / grade）；None 时声明评分未计算。
+
+    返回:
+        快照评分 Markdown 文本。
+    """
+
+    if snapshot_score is None:
+        return "## 快照评分\n\n- 评分未计算（数据不足）\n"
+    total = getattr(snapshot_score, "total_score", None)
+    grade = getattr(snapshot_score, "grade", None)
+    excess = getattr(snapshot_score, "excess_score", None)
+    position = getattr(snapshot_score, "position_score", None)
+    concentration = getattr(snapshot_score, "concentration_score", None)
+
+    def _fmt(value: object, max_score: int) -> str:
+        return "缺失" if value is None else f"{value}/{max_score}"
+
+    return (
+        "## 快照评分\n\n"
+        f"- 总分：{_fmt(total, 100)}\n"
+        f"- 综合等级：{grade if grade is not None else '缺失'}\n"
+        f"- 超额收益得分：{_fmt(excess, 40)}\n"
+        f"- 仓位得分：{_fmt(position, 30)}\n"
+        f"- 集中度得分：{_fmt(concentration, 30)}\n"
+    )
+
+
 def generate_snapshot_data_table(*, template_id: str, **kwargs: object) -> str:
     """生成快照章节数据表格。
 
@@ -182,6 +214,7 @@ def generate_snapshot_data_table(*, template_id: str, **kwargs: object) -> str:
     quarter = kwargs.get("quarter")
     period = kwargs.get("period")
     snapshot_data = kwargs.get("snapshot_data")
+    snapshot_score = kwargs.get("snapshot_score")
     if not isinstance(snapshot_data, dict):
         snapshot_data = {}
 
@@ -195,7 +228,7 @@ def generate_snapshot_data_table(*, template_id: str, **kwargs: object) -> str:
     )]
 
     if chapter_id == 0:
-        # 概览：期末规模/份额 + 当期净值表现 + 综合结论
+        # 概览：期末规模/份额 + 当期净值表现 + 快照评分
         scale = snapshot_data.get("scale_info")
         latest = snapshot_data.get("latest_performance")
         parts.append("## 期末规模与份额\n")
@@ -212,6 +245,7 @@ def generate_snapshot_data_table(*, template_id: str, **kwargs: object) -> str:
             )
         else:
             parts.append("- 当期净值表现：缺失\n")
+        parts.append(_render_snapshot_score(snapshot_score))
     elif chapter_id == 1:
         parts.append("## 当期业绩与超额（滚动窗口 ≠ 日历年度）\n")
         parts.append(_render_performance_table(snapshot_data))

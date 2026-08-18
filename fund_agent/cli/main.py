@@ -183,12 +183,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     download_parser = subparsers.add_parser("download")
     download_parser.add_argument("--fund-code", required=True, help="基金代码")
-    download_parser.add_argument("--year", required=True, type=int, help="报告年份")
+    download_year_group = download_parser.add_mutually_exclusive_group()
+    download_year_group.add_argument("--year", type=int, default=None, help="报告年份（与 --year-range 互斥）")
+    download_year_group.add_argument("--year-range", default=None, help="年份范围（如 2021-2024 或 2021,2023；与 --year 互斥）")
     download_parser.add_argument("--report-type", default="annual_report", choices=["annual_report", "quarterly_report", "semiannual_report"],
                               help="报告类型（默认 annual_report；quarterly_report 需配合 --quarter）")
-    download_parser.add_argument("--quarter", type=int, choices=[1, 2, 3, 4], default=None, help="季报期次 1-4（仅 quarterly_report）")
+    download_quarter_group = download_parser.add_mutually_exclusive_group()
+    download_quarter_group.add_argument("--quarter", type=int, choices=[1, 2, 3, 4], default=None,
+                                        help="季报期次 1-4（仅 quarterly_report；与 --quarters 互斥）")
+    download_quarter_group.add_argument("--quarters", default=None,
+                                        help="季报期次集合（如 1-4 或 1,2,3；仅 quarterly_report；与 --quarter 互斥）")
     download_parser.add_argument("--output-dir", default=Path("基金年报"), type=Path, help="PDF 输出目录")
     download_parser.add_argument("--force", action="store_true", help="强制重新下载")
+    download_parser.add_argument("--import", dest="do_import", action="store_true",
+                                 help="下载/缓存成功后自动导入 catalog（复用 import 分类语义）")
+    download_parser.add_argument("--work-dir", default=Path(DEFAULT_WORK_DIR), type=Path)
 
     allocation_parser = subparsers.add_parser("allocation")
     allocation_parser.add_argument("--fund-code", required=True)
@@ -573,6 +582,25 @@ def _parse_year_range(range_str: str) -> tuple[int, ...]:
     return _parse_years(range_str)
 
 
+def _parse_quarters(quarters_str: str) -> tuple[int, ...]:
+    """解析季报期次集合字符串为升序元组。
+
+    参数:
+        quarters_str: 期次集合字符串，支持 "1-4" 或 "1,2,3" 逗号列表。
+
+    返回:
+        升序排列的期次元组。
+
+    异常:
+        ValueError: 期次不合法或越界（非 1-4）时抛出。
+    """
+
+    quarters = _parse_year_range(quarters_str)
+    if not quarters or any(q not in (1, 2, 3, 4) for q in quarters):
+        raise ValueError(f"季报期次必须为 1-4: {quarters_str}")
+    return quarters
+
+
 _YEAR_PATTERN = re.compile(r"(20\d{2})")
 
 
@@ -865,7 +893,7 @@ def _fund_name_from_catalog(work_dir: Path, fund_code: str) -> str:
 
 
 def _run_download_command(args: argparse.Namespace, *, stdout: TextIO, stderr: TextIO) -> int:
-    """从 EID 下载基金年报 PDF。
+    """从 EID 下载基金报告 PDF，支持批量（--year-range × --quarters）与可选 --import 流水线。
 
     参数:
         args: argparse 解析出的 download 参数。
@@ -873,18 +901,50 @@ def _run_download_command(args: argparse.Namespace, *, stdout: TextIO, stderr: T
         stderr: 失败输出流。
 
     返回:
-        成功返回 0；失败返回 2。
+        成功返回 0（含全部 cached、部分失败）；全部条目失败返回 2。
     """
+
     try:
-        from fund_agent.fund.document_tools.eid_downloader import download_report
-        result = download_report(
-            fund_code=args.fund_code,
-            year=args.year,
-            output_dir=Path(args.output_dir),
-            report_type=args.report_type,
-            quarter=args.quarter,
-            force=args.force,
-        )
+        report_type = ReportType(args.report_type)
+    except ValueError:
+        failure = ToolFailure(code=FailureCode.SCHEMA_DRIFT, message=f"--report-type 不合法: {args.report_type}")
+        _write_classified_failure(failure, stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+    if args.year is None and args.year_range is None:
+        failure = ToolFailure(code=FailureCode.SCHEMA_DRIFT, message="--year 与 --year-range 至少指定一个")
+        _write_classified_failure(failure, stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+    if args.quarters is not None and report_type is not ReportType.QUARTERLY_REPORT:
+        failure = ToolFailure(code=FailureCode.SCHEMA_DRIFT, message="--quarters 仅适用于 quarterly_report")
+        _write_classified_failure(failure, stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+    if args.quarter is not None and report_type is not ReportType.QUARTERLY_REPORT:
+        failure = ToolFailure(code=FailureCode.SCHEMA_DRIFT, message="--quarter 仅适用于 quarterly_report")
+        _write_classified_failure(failure, stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+    batch_mode = args.year_range is not None or args.quarters is not None
+    if not batch_mode:
+        # 单模式：保持既有单对象 JSON 输出契约（字段不变，不新增 report_type/quarter）
+        try:
+            result = download_report(
+                fund_code=args.fund_code,
+                year=args.year,
+                output_dir=Path(args.output_dir),
+                report_type=args.report_type,
+                quarter=args.quarter,
+                force=args.force,
+            )
+        except EidDownloadError as exc:
+            # 将 EidDownloadError.code 映射到 FailureCode 枚举
+            try:
+                error_code = FailureCode(exc.code)
+            except ValueError:
+                error_code = FailureCode.UNAVAILABLE
+            failure = ToolFailure(code=error_code, message=str(exc))
+            _write_classified_failure(failure, stderr)
+            return CLASSIFIED_FAILURE_EXIT_CODE
         output = {
             "fund_code": result.fund_code,
             "fund_name": result.fund_name,
@@ -895,15 +955,151 @@ def _run_download_command(args: argparse.Namespace, *, stdout: TextIO, stderr: T
         }
         print(json.dumps(output, ensure_ascii=False, indent=2), file=stdout)
         return SUCCESS_EXIT_CODE
-    except EidDownloadError as exc:
-        # 将 EidDownloadError.code 映射到 FailureCode 枚举
+
+    # 批量模式：--year-range × --quarters 矩阵；stdout JSON 数组，stderr 逐条进度与汇总
+    if args.year_range is not None:
         try:
-            error_code = FailureCode(exc.code)
-        except ValueError:
-            error_code = FailureCode.UNAVAILABLE
-        failure = ToolFailure(code=error_code, message=str(exc))
-        _write_classified_failure(failure, stderr)
+            years = _parse_year_range(args.year_range)
+        except ValueError as exc:
+            failure = ToolFailure(code=FailureCode.SCHEMA_DRIFT, message=str(exc))
+            _write_classified_failure(failure, stderr)
+            return CLASSIFIED_FAILURE_EXIT_CODE
+    else:
+        years = (args.year,)
+    if report_type is ReportType.QUARTERLY_REPORT:
+        if args.quarters is not None:
+            try:
+                quarters = _parse_quarters(args.quarters)
+            except ValueError as exc:
+                failure = ToolFailure(code=FailureCode.SCHEMA_DRIFT, message=str(exc))
+                _write_classified_failure(failure, stderr)
+                return CLASSIFIED_FAILURE_EXIT_CODE
+        else:
+            quarters = (1, 2, 3, 4)
+    else:
+        quarters = (None,)
+
+    return _run_download_batch(
+        args=args,
+        report_type=report_type,
+        years=years,
+        quarters=quarters,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
+def _run_download_batch(
+    args: argparse.Namespace,
+    *,
+    report_type: ReportType,
+    years: tuple[int, ...],
+    quarters: tuple[int | None, ...],
+    stdout: TextIO,
+    stderr: TextIO,
+) -> int:
+    """批量下载（--year-range × --quarters 矩阵）并可选执行 --import 流水线。
+
+    参数:
+        args: argparse 解析出的 download 参数。
+        report_type: 解析后的报告类型。
+        years: 年份元组。
+        quarters: 期次元组（非季报为 (None,)）。
+        stdout: JSON 数组输出流。
+        stderr: 逐条进度与汇总输出流。
+
+    返回:
+        全部条目失败返回 2；否则返回 0。
+
+    异常:
+        本函数捕获 EidDownloadError 与导入异常，不向调用方抛出。
+    """
+
+    entries = [(year, quarter) for year in years for quarter in quarters]
+    total = len(entries)
+    items: list[dict[str, object]] = []
+    download_failed = 0
+    download_succeeded = 0
+
+    service = FundReadingService() if args.do_import else None
+    work_dir = Path(args.work_dir)
+    imported = 0
+    skipped = 0
+    import_failed = 0
+
+    for idx, (year, quarter) in enumerate(entries, 1):
+        label = f"[{idx}/{total}] {args.fund_code} {year}" + (f" Q{quarter}" if quarter is not None else "")
+        try:
+            result = download_report(
+                fund_code=args.fund_code,
+                year=year,
+                output_dir=Path(args.output_dir),
+                report_type=report_type.value,
+                quarter=quarter,
+                force=args.force,
+            )
+        except EidDownloadError as exc:
+            download_failed += 1
+            try:
+                error_code = FailureCode(exc.code)
+            except ValueError:
+                error_code = FailureCode.UNAVAILABLE
+            items.append({
+                "fund_code": args.fund_code,
+                "year": year,
+                "quarter": quarter,
+                "report_type": report_type.value,
+                "failure": {"code": error_code.value, "message": str(exc)},
+            })
+            print(f"{label} -> failed ({error_code.value}: {exc})", file=stderr)
+            continue
+
+        download_succeeded += 1
+        items.append({
+            "fund_code": result.fund_code,
+            "year": result.year,
+            "quarter": quarter,
+            "report_type": report_type.value,
+            "status": result.status,
+            "file_path": str(result.file_path) if result.file_path else None,
+            "source_url": result.source_url,
+        })
+        print(f"{label} -> {result.status}", file=stderr)
+
+        # 仅对成功条目（downloaded/cached 且 file_path 非空）执行 import 流水线
+        if service is not None and result.status in ("downloaded", "cached") and result.file_path is not None:
+            try:
+                service.import_local_report(
+                    ImportLocalReportRequest(
+                        pdf_path=result.file_path,
+                        fund_code=result.fund_code,
+                        fund_name=result.fund_name,
+                        year=result.year,
+                        work_dir=work_dir,
+                        report_type=report_type,
+                        quarter=quarter,
+                    )
+                )
+                imported += 1
+                print(f"{label} -> imported", file=stderr)
+            except DocumentToolError as exc:
+                if exc.code is FailureCode.INTEGRITY_ERROR:
+                    skipped += 1
+                    print(f"{label} -> import skipped ({exc.message})", file=stderr)
+                else:
+                    import_failed += 1
+                    print(f"{label} -> import failed ({exc.code.value}: {exc.message})", file=stderr)
+            except Exception:
+                import_failed += 1
+                print(f"{label} -> import failed (unexpected error)", file=stderr)
+
+    print(json.dumps(items, ensure_ascii=False, indent=2), file=stdout)
+    print(f"Download summary: {download_succeeded} succeeded, {download_failed} failed", file=stderr)
+    if args.do_import:
+        print(f"Import summary: {imported} imported, {skipped} skipped, {import_failed} failed", file=stderr)
+    if total > 0 and download_failed == total:
         return CLASSIFIED_FAILURE_EXIT_CODE
+    return SUCCESS_EXIT_CODE
 
 
 def _run_holdings_command(args: argparse.Namespace, *, stdout: TextIO, stderr: TextIO) -> int:

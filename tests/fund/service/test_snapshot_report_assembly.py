@@ -156,6 +156,80 @@ def test_generate_snapshot_data_table_period_passthrough() -> None:
     assert "2025 年上半年" not in text
 
 
+def test_generate_snapshot_data_table_ch0_includes_score_block() -> None:
+    """季报/半年报 ch0 数据表必须渲染「快照评分」块（总分/等级 + 三维明细）。"""
+
+    from fund_agent.service.snapshot_scoring import SnapshotScore
+
+    score = SnapshotScore(
+        excess_score=40,
+        position_score=30,
+        concentration_score=20,
+        total_score=90,
+        grade="优秀",
+    )
+    for template_id in (QUARTERLY_SNAPSHOT_TEMPLATE_ID, SEMIANNUAL_SNAPSHOT_TEMPLATE_ID):
+        text = generate_snapshot_data_table(
+            template_id=template_id,
+            chapter_id=0,
+            fund_code="005680",
+            fund_name="财通资管价值成长混合",
+            report_year=2026,
+            quarter=2,
+            snapshot_data={},
+            snapshot_score=score,
+        )
+        assert "## 快照评分" in text
+        assert "总分：90/100" in text
+        assert "综合等级：优秀" in text
+        assert "超额收益得分：40/40" in text
+        assert "仓位得分：30/30" in text
+        assert "集中度得分：20/30" in text
+
+
+def test_generate_snapshot_data_table_ch0_score_missing_declares() -> None:
+    """快照评分缺失（None）时 ch0 必须 fail-closed 声明，不输出占位分数。"""
+
+    text = generate_snapshot_data_table(
+        template_id=QUARTERLY_SNAPSHOT_TEMPLATE_ID,
+        chapter_id=0,
+        fund_code="005680",
+        fund_name="财通资管价值成长混合",
+        report_year=2026,
+        quarter=2,
+        snapshot_data={},
+    )
+    assert "快照评分" in text
+    assert "未计算" in text
+    assert "/100" not in text
+
+
+def test_generate_snapshot_data_table_non_ch0_no_score_block() -> None:
+    """评分块只属于 ch0（概览）；非概览章节不得出现（范围守界）。"""
+
+    from fund_agent.service.snapshot_scoring import SnapshotScore
+
+    score = SnapshotScore(
+        excess_score=40,
+        position_score=30,
+        concentration_score=20,
+        total_score=90,
+        grade="优秀",
+    )
+    for chapter_id in (1, 2, 3, 4):
+        text = generate_snapshot_data_table(
+            template_id=QUARTERLY_SNAPSHOT_TEMPLATE_ID,
+            chapter_id=chapter_id,
+            fund_code="005680",
+            fund_name="财通资管价值成长混合",
+            report_year=2026,
+            quarter=2,
+            snapshot_data={},
+            snapshot_score=score,
+        )
+        assert "快照评分" not in text
+
+
 def test_looks_like_stage_accepts_contract_effective_rows() -> None:
     """「自基金合同生效起至今」必须识别为阶段行（此前漏识别导致半年报自成立行丢失）。"""
 
