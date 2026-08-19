@@ -91,11 +91,11 @@ Tool Trace 只读分析器（operator 层，Slice tool-trace-operator-20260813�
 
 Post-MVP Slice 8C 当前实现：
 
-- 新增 `tests/fund/agent/test_deepseek_live_smoke.py`，作为 opt-in live DeepSeek smoke。
+- 新增 `tests/fund/agent/test_deepseek_live_smoke.py`，作为 opt-in live provider smoke。
 - live smoke 验证真实 provider 能返回一次合法 `ToolCall` 或 `FinalAnswer`，并最终进入 8A `LlmToolLoopRunner`。
 - 默认 pytest no-network；只有 `FUND_CHECKLIST_RUN_LIVE_DEEPSEEK=1` 时启用 live smoke。
-- `DEEPSEEK_API_KEY` 缺失时 skip，不失败。
-- `DEEPSEEK_BASE_URL` 默认 `https://api.deepseek.com`，`DEEPSEEK_MODEL` 默认 `deepseek-v4-flash`。
+- skip 判定与 env 组装按 `FUND_CHECKLIST_LLM_PROVIDER`（`deepseek` 默认 / `mimo`）解析：缺当前 provider 的 API key（`DEEPSEEK_API_KEY` / `MIMO_API_KEY`）时 skip，不失败；未知 provider 值 fail-fast 抛 `ValueError`。
+- base URL / model 及其默认值来自 provider 配置表：deepseek 用 `DEEPSEEK_BASE_URL`（默认 `https://api.deepseek.com`）/ `DEEPSEEK_MODEL`（默认 `deepseek-v4-flash`）；mimo 用 `MIMO_BASE_URL`（默认 `https://api.xiaomimimo.com/v1`）/ `MIMO_MODEL`（默认 `mimo-v2.5-pro`）。
 - live smoke 使用 fake/in-memory tool service 或现有测试 fixture，不跑真实 PDF、CLI、Docling conversion 或 repository-backed loader。
 - live smoke 最多 1 个 run、timeout 300 秒、最多 1 次 retry。
 - 默认测试用 fake transport 验证 skip 语义、默认 base/model、timeout、最多 1 次 retry、malformed response fail-closed 和 secret 不泄漏。

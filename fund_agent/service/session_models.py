@@ -19,6 +19,10 @@ class PinnedState:
         available_document_ids: 该基金所有可用年报的 document_id。
         active_document_id: 当前选中的 document_id。
         active_year: 当前选中的年份。
+        report_type: 报告类型（annual_report / quarterly_report /
+            semiannual_report），默认 annual_report 保证旧 session 兼容。
+        quarter: 季报期次 1-4；非季报为 None。
+        period: 半年报期次（当前仅 H1）；非半年报为 None。
         user_constraints: 用户设定的约束（如 max_tokens）。
     """
 
@@ -26,6 +30,9 @@ class PinnedState:
     available_document_ids: tuple[str, ...] = ()
     active_document_id: str | None = None
     active_year: int | None = None
+    report_type: str = "annual_report"
+    quarter: int | None = None
+    period: str | None = None
     user_constraints: dict[str, object] = field(default_factory=dict)
 
 

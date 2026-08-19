@@ -42,6 +42,13 @@ from .prompt_contributions import build_memory_contribution
 from .session_models import EpisodeSummary, PinnedState, Session, ToolCallSummary, Turn
 from fund_agent.host.session_store import SessionStore
 
+_QUARTER_CN_LABELS: dict[int, str] = {
+    1: "一季度",
+    2: "二季度",
+    3: "三季度",
+    4: "四季度",
+}
+
 RunnerFactory = Callable[
     [LlmClientProtocol, FundDocumentToolService],
     LlmToolLoopRunner,
@@ -748,6 +755,19 @@ class ChatService:
         active_document_id = document_id or ps.active_document_id
         if active_document_id:
             runtime_parts.append(f"- 当前文档 document_id: {active_document_id}")
+        if ps.report_type in ("quarterly_report", "semiannual_report"):
+            report_type_label = "季报" if ps.report_type == "quarterly_report" else "半年报"
+            runtime_parts.append(f"- 报告类型: {report_type_label}（{ps.report_type}）")
+            if ps.quarter is not None:
+                quarter_cn = _QUARTER_CN_LABELS.get(ps.quarter, f"Q{ps.quarter}")
+                runtime_parts.append(
+                    f"- 报告期: {ps.active_year} 年{quarter_cn}（Q{ps.quarter}）"
+                )
+            elif ps.period:
+                runtime_parts.append(f"- 报告期: {ps.active_year} 年 {ps.period} 半年报")
+            runtime_parts.append(
+                "- 注意：当前文档为单期快照，非年度报告；数据仅覆盖当期，禁止与年度/多年数据混用，禁止做多年趋势判断。"
+            )
         contributions["runtime"] = "\n".join(runtime_parts)
 
         # fund_context contribution

@@ -187,6 +187,70 @@ class TestInteractiveCommandExecution:
         assert "1999" in stderr.getvalue()
         assert "不在可用年份内" in stderr.getvalue()
 
+    def test_interactive_mixed_catalog_annual_only(self, tmp_path: Path):
+        """mixed catalog（同基金同年年报+季报）下 annual 解析只含 annual doc id。"""
+        catalog_path = tmp_path / "completed_reports.json"
+        reports: dict[str, dict[str, object]] = {}
+        for year in (2024, 2025):
+            document_id = f"doc-011649-{year}"
+            reports[document_id] = {
+                "schema_version": 1,
+                "document_id": document_id,
+                "identity": {
+                    "fund_code": "011649",
+                    "fund_name": "测试基金",
+                    "year": year,
+                    "report_type": "annual_report",
+                    "source_kind": "local_pdf",
+                    "content_fingerprint": "abc123",
+                    "document_id": document_id,
+                    "share_class": "A",
+                },
+                "stored_blob_ref": f"local_pdf::{document_id}",
+                "docling_json_ref": f"docling_json::{document_id}",
+                "parser_health": {"status": "ok"},
+            }
+        # 同年/跨年季报（后导入，若不过滤会覆盖 annual 的 year key）
+        for year, quarter in ((2025, 1), (2026, 1)):
+            document_id = f"doc-011649-{year}-Q{quarter}"
+            reports[document_id] = {
+                "schema_version": 1,
+                "document_id": document_id,
+                "identity": {
+                    "fund_code": "011649",
+                    "fund_name": "测试基金",
+                    "year": year,
+                    "report_type": "quarterly_report",
+                    "source_kind": "local_pdf",
+                    "content_fingerprint": "abc123",
+                    "document_id": document_id,
+                    "quarter": quarter,
+                    "share_class": "A",
+                },
+                "stored_blob_ref": f"local_pdf::{document_id}",
+                "docling_json_ref": f"docling_json::{document_id}",
+                "parser_health": {"status": "ok"},
+            }
+        catalog_path.parent.mkdir(parents=True, exist_ok=True)
+        catalog_path.write_text(
+            json.dumps({"schema_version": 1, "reports": reports}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch("sys.stdin", io.StringIO("exit\n")):
+            exit_code = run_cli(
+                ["interactive", "--fund-code", "011649", "--work-dir", str(tmp_path)],
+                stdout=stdout,
+                stderr=stderr,
+            )
+        output = stdout.getvalue()
+        assert exit_code == 0
+        assert "可用年份: 2024, 2025" in output
+        assert "已选择 2025 年年报" in output
+        assert "2026" not in output  # 2026 只有季报，不得进入 annual 可用年份
+
     def test_interactive_blocked_answer_displays_original_and_terms(self, tmp_path: Path):
         """被拦截回答：CLI 展示拦截提示、被拦截原文与触发词。"""
         self._write_fake_catalog(tmp_path)

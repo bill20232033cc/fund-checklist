@@ -36,6 +36,8 @@ from fund_agent.agent.deepseek_llm import (
     DeepSeekTransportUnavailable,
     ExecutionOptions,
     LlmClientFailure,
+    provider_api_key_env_name,
+    provider_base_url_env_name,
     provider_model_env_name,
     resolve_provider,
     resolve_provider_model,
@@ -176,6 +178,24 @@ def test_provider_model_env_name() -> None:
     assert provider_model_env_name("mimo") == MIMO_MODEL_ENV
     with pytest.raises(ValueError):
         provider_model_env_name("unknown")
+
+
+def test_provider_api_key_env_name() -> None:
+    """provider_api_key_env_name 返回对应 API key 环境变量名。"""
+
+    assert provider_api_key_env_name("deepseek") == DEEPSEEK_API_KEY_ENV
+    assert provider_api_key_env_name("mimo") == MIMO_API_KEY_ENV
+    with pytest.raises(ValueError):
+        provider_api_key_env_name("unknown")
+
+
+def test_provider_base_url_env_name() -> None:
+    """provider_base_url_env_name 返回对应 base URL 环境变量名。"""
+
+    assert provider_base_url_env_name("deepseek") == DEEPSEEK_BASE_URL_ENV
+    assert provider_base_url_env_name("mimo") == MIMO_BASE_URL_ENV
+    with pytest.raises(ValueError):
+        provider_base_url_env_name("unknown")
 
 
 # ── 模型名翻译 ───────────────────────────────────────────────────

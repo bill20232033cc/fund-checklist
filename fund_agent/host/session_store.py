@@ -176,6 +176,9 @@ class SessionStore:
                 "available_document_ids": list(session.pinned_state.available_document_ids),
                 "active_document_id": session.pinned_state.active_document_id,
                 "active_year": session.pinned_state.active_year,
+                "report_type": session.pinned_state.report_type,
+                "quarter": session.pinned_state.quarter,
+                "period": session.pinned_state.period,
                 "user_constraints": session.pinned_state.user_constraints,
             },
             "turns": [
@@ -225,6 +228,9 @@ class SessionStore:
             available_document_ids=tuple(ps_raw.get("available_document_ids", [])),
             active_document_id=ps_raw.get("active_document_id"),
             active_year=ps_raw.get("active_year"),
+            report_type=ps_raw.get("report_type", "annual_report"),
+            quarter=ps_raw.get("quarter"),
+            period=ps_raw.get("period"),
             user_constraints=ps_raw.get("user_constraints", {}),
         )
         turns = tuple(

@@ -58,6 +58,8 @@ from .models import (
     AnnualPerformanceFieldCitation,
     AnnualReportDocument,
     FundCodeResolution,
+    SnapshotReportDocument,
+    SnapshotResolution,
     AssetAllocationItem,
     ChapterEvidence,
     DeepAuditItem,
@@ -4570,12 +4572,15 @@ class FundReadingService:
         self,
         fund_code: str,
         work_dir: Path,
+        report_type: str = "annual_report",
     ) -> FundCodeResolution | None:
-        """按基金代码查找 catalog 中所有可用年报文档。
+        """按基金代码 + 报告类型查找 catalog 中所有可用文档。
 
         参数:
             fund_code: 基金代码。
             work_dir: 工作目录（含 completed_reports.json）。
+            report_type: 报告类型过滤（默认 annual_report，与 multi-year/generate
+                的防污染口径一致，见 §6.25 裁决 17）。
 
         返回:
             FundCodeResolution；无匹配时返回 None。
@@ -4590,7 +4595,10 @@ class FundReadingService:
         seen_years: dict[int, str] = {}
         fund_name = ""
         for report in catalog_reports:
-            if report.get("fund_code") == fund_code:
+            if (
+                report.get("fund_code") == fund_code
+                and report.get("report_type") == report_type
+            ):
                 year_val = report.get("year")
                 if isinstance(year_val, int):
                     seen_years[year_val] = str(report.get("document_id", ""))
@@ -4606,6 +4614,81 @@ class FundReadingService:
             for y in years_sorted
         )
         return FundCodeResolution(
+            fund_code=fund_code,
+            fund_name=fund_name,
+            documents=documents,
+            available_years=years_sorted,
+        )
+
+    def resolve_snapshot_reports(
+        self,
+        fund_code: str,
+        work_dir: Path,
+        report_type: str,
+    ) -> SnapshotResolution | None:
+        """按基金代码 + 快照报告类型查找 catalog 中所有已导入快照文档。
+
+        参数:
+            fund_code: 基金代码。
+            work_dir: 工作目录（含 completed_reports.json）。
+            report_type: 快照报告类型（quarterly_report / semiannual_report）。
+
+        返回:
+            SnapshotResolution；无匹配时返回 None。季度多期同一年全部保留
+            （不做 year last-wins 去重）。
+
+        异常:
+            catalog 不可读或 schema 不兼容时由 repository 抛出稳定失败分类。
+        """
+        catalog_path = work_dir / CATALOG_FILENAME
+        if not catalog_path.exists():
+            return None
+
+        repository = _repository(work_dir)
+        catalog_reports = repository.list_reports()
+
+        by_year: dict[int, list[SnapshotReportDocument]] = {}
+        fund_name = ""
+        for report in catalog_reports:
+            if (
+                report.get("fund_code") != fund_code
+                or report.get("report_type") != report_type
+            ):
+                continue
+            year_val = report.get("year")
+            if not isinstance(year_val, int):
+                continue
+            document_id = str(report.get("document_id", ""))
+            if not document_id:
+                continue
+            quarter_val = report.get("quarter")
+            quarter = quarter_val if isinstance(quarter_val, int) else None
+            period_val = report.get("period")
+            period = str(period_val) if isinstance(period_val, str) and period_val else None
+            by_year.setdefault(year_val, []).append(
+                SnapshotReportDocument(
+                    year=year_val,
+                    quarter=quarter,
+                    period=period,
+                    document_id=document_id,
+                )
+            )
+            if not fund_name:
+                fund_name = str(report.get("fund_name", ""))
+
+        if not by_year:
+            return None
+
+        years_sorted = tuple(sorted(by_year.keys()))
+        documents = tuple(
+            doc
+            for year in years_sorted
+            for doc in sorted(
+                by_year[year],
+                key=lambda d: (d.quarter if d.quarter is not None else 0, d.period or ""),
+            )
+        )
+        return SnapshotResolution(
             fund_code=fund_code,
             fund_name=fund_name,
             documents=documents,

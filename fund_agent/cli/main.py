@@ -266,6 +266,25 @@ def build_parser() -> argparse.ArgumentParser:
     interactive_parser.add_argument("--enable-tool-trace", action="store_true", default=False, help="显示工具调用详情")
     interactive_parser.add_argument("--plain", action="store_true", default=False, help="保留原始 Markdown 文本，禁用 Rich 格式化")
     interactive_parser.add_argument("--year", type=int, default=None, help="指定年报年份（默认取可用年份中最新；非交互输入自动默认）")
+    interactive_parser.add_argument(
+        "--report-type",
+        default="annual_report",
+        choices=["annual_report", "quarterly_report", "semiannual_report"],
+        help="报告类型（默认 annual_report；quarterly_report 需配合 --quarter，缺省取所选年份内最新季度）",
+    )
+    interactive_parser.add_argument(
+        "--quarter",
+        type=int,
+        choices=[1, 2, 3, 4],
+        default=None,
+        help="季报期次 1-4（仅 quarterly_report；缺省取所选年份内最新季度）",
+    )
+    interactive_parser.add_argument(
+        "--period",
+        default=None,
+        choices=["H1"],
+        help="半年报期次（当前仅 H1；仅 semiannual_report）",
+    )
 
     fix_parser = subparsers.add_parser("fix")
     fix_parser.add_argument("--fund-code", required=True, help="基金代码")
@@ -1492,14 +1511,35 @@ def _run_interactive_command(
     work_dir = Path(args.work_dir)
     fund_code = args.fund_code
 
-    # 1. 解析基金代码 → 可用年份
-    print(f"正在查找基金 {fund_code} 的年报…", file=stdout)
-    service = FundReadingService()
-    resolution = service.resolve_by_fund_code(fund_code, work_dir)
+    report_type = getattr(args, "report_type", "annual_report")
+    quarter_arg = getattr(args, "quarter", None)
+    period_arg = getattr(args, "period", None)
+    is_snapshot = report_type in ("quarterly_report", "semiannual_report")
+    report_label = "季报" if report_type == "quarterly_report" else ("半年报" if is_snapshot else "年报")
 
-    if resolution is None:
-        print(f"未找到基金 {fund_code} 的已导入年报。请先导入年报。", file=stderr)
+    if report_type == "annual_report" and (quarter_arg is not None or period_arg is not None):
+        print("annual_report 模式不支持 --quarter/--period 参数。", file=stderr)
         return CLASSIFIED_FAILURE_EXIT_CODE
+    if report_type == "quarterly_report" and period_arg is not None:
+        print("quarterly_report 模式不支持 --period 参数，请使用 --quarter。", file=stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+    if report_type == "semiannual_report" and quarter_arg is not None:
+        print("semiannual_report 模式不支持 --quarter 参数。", file=stderr)
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+    # 1. 解析基金代码 → 可用年份
+    print(f"正在查找基金 {fund_code} 的{report_label}…", file=stdout)
+    service = FundReadingService()
+    if is_snapshot:
+        resolution = service.resolve_snapshot_reports(fund_code, work_dir, report_type)
+        if resolution is None:
+            print(f"未找到基金 {fund_code} 的已导入{report_label}。请先导入{report_label}。", file=stderr)
+            return CLASSIFIED_FAILURE_EXIT_CODE
+    else:
+        resolution = service.resolve_by_fund_code(fund_code, work_dir)
+        if resolution is None:
+            print(f"未找到基金 {fund_code} 的已导入年报。请先导入年报。", file=stderr)
+            return CLASSIFIED_FAILURE_EXIT_CODE
 
     print(f"基金: {resolution.fund_name} ({fund_code})", file=stdout)
     print(f"可用年份: {', '.join(str(y) for y in resolution.available_years)}", file=stdout)
@@ -1523,10 +1563,38 @@ def _run_interactive_command(
         year_str = input(f"请选择年份 [{default_year}]: ").strip()
         selected_year = int(year_str) if year_str.isdigit() else default_year
 
-    selected_doc = next((d for d in resolution.documents if d.year == selected_year), None)
-    if selected_doc is None:
-        print(f"年份 {selected_year} 无对应年报。", file=stderr)
-        return CLASSIFIED_FAILURE_EXIT_CODE
+    if is_snapshot:
+        year_docs = [d for d in resolution.documents if d.year == selected_year]
+        if not year_docs:
+            print(f"年份 {selected_year} 无对应{report_label}。", file=stderr)
+            return CLASSIFIED_FAILURE_EXIT_CODE
+        if report_type == "quarterly_report":
+            if quarter_arg is not None:
+                q_matches = [d for d in year_docs if d.quarter == quarter_arg]
+                if not q_matches:
+                    available_q = sorted({d.quarter for d in year_docs if d.quarter is not None})
+                    available_q_text = ", ".join(f"Q{q}" for q in available_q) or "无"
+                    print(f"年份 {selected_year} 无 Q{quarter_arg} 季报（可用期次: {available_q_text}）。", file=stderr)
+                    return CLASSIFIED_FAILURE_EXIT_CODE
+                selected_doc = q_matches[0]
+            else:
+                selected_doc = max(year_docs, key=lambda d: d.quarter or 0)
+                if not sys.stdin.isatty():
+                    print(f"非交互输入，默认选择 {selected_year} 年 Q{selected_doc.quarter} 季报", file=stdout)
+        else:
+            period_choice = period_arg or "H1"
+            p_matches = [d for d in year_docs if d.period == period_choice]
+            if not p_matches:
+                available_p = sorted({d.period for d in year_docs if d.period})
+                available_p_text = ", ".join(available_p) or "无"
+                print(f"年份 {selected_year} 无 {period_choice} 半年报（可用期次: {available_p_text}）。", file=stderr)
+                return CLASSIFIED_FAILURE_EXIT_CODE
+            selected_doc = p_matches[0]
+    else:
+        selected_doc = next((d for d in resolution.documents if d.year == selected_year), None)
+        if selected_doc is None:
+            print(f"年份 {selected_year} 无对应年报。", file=stderr)
+            return CLASSIFIED_FAILURE_EXIT_CODE
 
     # 3. 创建/恢复 session（通过 MinimalHost 管理生命周期）
     from fund_agent.host.minimal_host import MinimalHost
@@ -1554,6 +1622,9 @@ def _run_interactive_command(
         available_document_ids=tuple(d.document_id for d in resolution.documents),
         active_document_id=selected_doc.document_id,
         active_year=selected_year,
+        report_type=report_type,
+        quarter=selected_doc.quarter if is_snapshot else None,
+        period=selected_doc.period if is_snapshot else None,
     )
     session = session.with_pinned_state(ps)
     session_store.save(session)
@@ -1588,10 +1659,16 @@ def _run_interactive_command(
         prompt_composer=prompt_composer,
         scene_config=INTERACTIVE_SCENE_CONFIG,
         tool_service=_tool_svc,
-        aggregate_handler=_build_aggregate_handler(work_dir),
+        aggregate_handler=None if is_snapshot else _build_aggregate_handler(work_dir),
     )
 
-    print(f"\n已选择 {selected_year} 年年报。输入问题开始对话，/help 查看命令，exit 退出。", file=stdout)
+    if is_snapshot:
+        if report_type == "quarterly_report":
+            print(f"\n已选择 {selected_year} 年 Q{selected_doc.quarter} 季报。输入问题开始对话，/help 查看命令，exit 退出。", file=stdout)
+        else:
+            print(f"\n已选择 {selected_year} 年 {selected_doc.period or 'H1'} 半年报。输入问题开始对话，/help 查看命令，exit 退出。", file=stdout)
+    else:
+        print(f"\n已选择 {selected_year} 年年报。输入问题开始对话，/help 查看命令，exit 退出。", file=stdout)
     print("提示：支持多轮对话，可以追问上一个问题的细节。输入 /help 查看命令。", file=stdout)
 
     verbose = getattr(args, "enable_tool_trace", False)
@@ -1683,11 +1760,27 @@ def _run_interactive_command(
                     print(f"未知文档ID: {new_doc}", file=stdout)
                     print(f"可用文档: {', '.join(available) if available else '无'}", file=stdout)
                     continue
+                ps_report_type = session.pinned_state.report_type
+                if ps_report_type in ("quarterly_report", "semiannual_report"):
+                    # 快照模式：期次从目标 document 的 catalog 解析结果重新解析
+                    # （非透传旧值，支持在期次间切换）。
+                    target = next(
+                        (d for d in resolution.documents if d.document_id == new_doc),
+                        None,
+                    )
+                    target_quarter = target.quarter if target is not None else None
+                    target_period = target.period if target is not None else None
+                else:
+                    target_quarter = None
+                    target_period = None
                 ps = PinnedState(
                     fund_code=session.pinned_state.fund_code,
                     available_document_ids=session.pinned_state.available_document_ids,
                     active_document_id=new_doc,
                     active_year=session.pinned_state.active_year,
+                    report_type=ps_report_type,
+                    quarter=target_quarter,
+                    period=target_period,
                 )
                 session = session.with_pinned_state(ps)
                 session_store.save(session)

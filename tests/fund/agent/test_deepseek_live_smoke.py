@@ -1,4 +1,4 @@
-"""Post-MVP Slice 8C opt-in live DeepSeek smoke 测试。"""
+"""Post-MVP Slice 8C opt-in live provider smoke 测试（provider 由 FUND_CHECKLIST_LLM_PROVIDER 决定）。"""
 
 from __future__ import annotations
 
@@ -17,6 +17,25 @@ from fund_agent.agent import (
     DeepSeekTransportUnavailable,
     LlmToolLoopRunner,
 )
+from fund_agent.agent.deepseek_llm import (
+    DEEPSEEK_API_KEY_ENV,
+    DEEPSEEK_BASE_URL_ENV,
+    DEEPSEEK_MODEL_ENV,
+    DEFAULT_DEEPSEEK_BASE_URL,
+    DEFAULT_DEEPSEEK_MODEL,
+    DEFAULT_MIMO_BASE_URL,
+    DEFAULT_MIMO_MODEL,
+    LLM_PROVIDER_DEEPSEEK,
+    LLM_PROVIDER_ENV,
+    LLM_PROVIDER_MIMO,
+    MIMO_API_KEY_ENV,
+    MIMO_BASE_URL_ENV,
+    MIMO_MODEL_ENV,
+    provider_api_key_env_name,
+    provider_base_url_env_name,
+    provider_model_env_name,
+    resolve_provider,
+)
 from fund_agent.fund.document_tools.constants import FailureCode, LocatorKind, ToolName
 from fund_agent.fund.document_tools.models import (
     Citation,
@@ -30,13 +49,12 @@ from fund_agent.fund.document_tools.models import (
 )
 
 _LIVE_OPT_IN_ENV = "FUND_CHECKLIST_RUN_LIVE_DEEPSEEK"
-_DEEPSEEK_API_KEY_ENV = "DEEPSEEK_API_KEY"
-_DEEPSEEK_BASE_URL_ENV = "DEEPSEEK_BASE_URL"
-_DEEPSEEK_MODEL_ENV = "DEEPSEEK_MODEL"
-_DEFAULT_LIVE_BASE_URL = "https://api.deepseek.com"
-_DEFAULT_LIVE_MODEL = "deepseek-v4-flash"
 _LIVE_TIMEOUT_SECONDS = 300
 _LIVE_MAX_RETRIES = 1
+_PROVIDER_DISPLAY_NAMES = {
+    LLM_PROVIDER_DEEPSEEK: "DeepSeek",
+    LLM_PROVIDER_MIMO: "Mimo",
+}
 _DOCUMENT_ID = "004393-2024-annual_report-live8c0000000000"
 _SECTION_REF = "section-live-0001"
 _TABLE_REF = "table-live-0001"
@@ -237,12 +255,27 @@ def test_live_smoke_skips_when_opted_in_without_api_key() -> None:
     assert reason == "缺少 DEEPSEEK_API_KEY，跳过 live DeepSeek smoke"
 
 
+def test_live_smoke_skips_when_mimo_opted_in_without_api_key() -> None:
+    """mimo opt-in 但缺 MIMO_API_KEY 时必须 skip，不失败。"""
+
+    reason = _live_skip_reason({_LIVE_OPT_IN_ENV: "1", LLM_PROVIDER_ENV: LLM_PROVIDER_MIMO})
+
+    assert reason == "缺少 MIMO_API_KEY，跳过 live Mimo smoke"
+
+
+def test_live_smoke_unknown_provider_fails_fast() -> None:
+    """未知 FUND_CHECKLIST_LLM_PROVIDER 必须 fail-fast 抛 ValueError，不静默回退。"""
+
+    with pytest.raises(ValueError, match="deepseek.*mimo"):
+        _live_skip_reason({_LIVE_OPT_IN_ENV: "1", LLM_PROVIDER_ENV: "ollama"})
+
+
 def test_live_smoke_uses_slice_8c_defaults_timeout_and_8a_runner() -> None:
     """8C live helper 必须使用裁决默认值、300 秒 timeout，并进入 8A runner。"""
 
     transport = SearchThenFinalTransport()
     result, attempts = _run_live_smoke(
-        env={_LIVE_OPT_IN_ENV: "1", _DEEPSEEK_API_KEY_ENV: "unit-test-key"},
+        env={_LIVE_OPT_IN_ENV: "1", DEEPSEEK_API_KEY_ENV: "unit-test-key"},
         transport=transport,
     )
 
@@ -251,9 +284,30 @@ def test_live_smoke_uses_slice_8c_defaults_timeout_and_8a_runner() -> None:
     assert attempts == 1
     assert len(transport.requests) == 2
     first_request = transport.requests[0]
-    assert first_request.url == "https://api.deepseek.com/chat/completions"
-    assert first_request.payload["model"] == _DEFAULT_LIVE_MODEL
+    assert first_request.url == f"{DEFAULT_DEEPSEEK_BASE_URL}/chat/completions"
+    assert first_request.payload["model"] == DEFAULT_DEEPSEEK_MODEL
     assert first_request.timeout_seconds == _LIVE_TIMEOUT_SECONDS
+    assert tuple(entry.tool_name for entry in result.tool_trace) == (ToolName.SEARCH_DOCUMENT,)
+
+
+def test_live_smoke_mimo_opt_in_assembles_mimo_config() -> None:
+    """mimo opt-in 且 MIMO_API_KEY 存在时必须按 mimo 配置组装请求。"""
+
+    transport = SearchThenFinalTransport()
+    env = {
+        _LIVE_OPT_IN_ENV: "1",
+        LLM_PROVIDER_ENV: LLM_PROVIDER_MIMO,
+        MIMO_API_KEY_ENV: "unit-test-key",
+    }
+    result, attempts = _run_live_smoke(env=env, transport=transport)
+
+    assert _live_skip_reason(env) is None
+    assert result.failure is None
+    assert attempts == 1
+    assert len(transport.requests) == 2
+    first_request = transport.requests[0]
+    assert first_request.url == f"{DEFAULT_MIMO_BASE_URL}/chat/completions"
+    assert first_request.payload["model"] == DEFAULT_MIMO_MODEL
     assert tuple(entry.tool_name for entry in result.tool_trace) == (ToolName.SEARCH_DOCUMENT,)
 
 
@@ -264,9 +318,9 @@ def test_live_smoke_allows_base_url_and_model_override() -> None:
     result, _ = _run_live_smoke(
         env={
             _LIVE_OPT_IN_ENV: "1",
-            _DEEPSEEK_API_KEY_ENV: "unit-test-key",
-            _DEEPSEEK_BASE_URL_ENV: "https://api.deepseek.com/v1",
-            _DEEPSEEK_MODEL_ENV: "unit-test-model",
+            DEEPSEEK_API_KEY_ENV: "unit-test-key",
+            DEEPSEEK_BASE_URL_ENV: "https://api.deepseek.com/v1",
+            DEEPSEEK_MODEL_ENV: "unit-test-model",
         },
         transport=transport,
     )
@@ -290,7 +344,7 @@ def test_live_smoke_retries_at_most_once_and_fails_closed() -> None:
         ]
     )
     result, attempts = _run_live_smoke(
-        env={_LIVE_OPT_IN_ENV: "1", _DEEPSEEK_API_KEY_ENV: "unit-test-key"},
+        env={_LIVE_OPT_IN_ENV: "1", DEEPSEEK_API_KEY_ENV: "unit-test-key"},
         transport=transport,
     )
 
@@ -307,7 +361,7 @@ def test_live_smoke_malformed_provider_response_fails_after_bounded_retry() -> N
     malformed = DeepSeekChatResponse(status_code=200, body="{not-json")
     transport = QueueTransport([malformed, malformed])
     result, attempts = _run_live_smoke(
-        env={_LIVE_OPT_IN_ENV: "1", _DEEPSEEK_API_KEY_ENV: "unit-test-key"},
+        env={_LIVE_OPT_IN_ENV: "1", DEEPSEEK_API_KEY_ENV: "unit-test-key"},
         transport=transport,
     )
 
@@ -325,7 +379,7 @@ def test_live_smoke_does_not_leak_api_key_or_write_raw_response_artifact() -> No
     secret = "unit-secret-must-not-leak"
     transport = SearchThenFinalTransport()
     result, _ = _run_live_smoke(
-        env={_LIVE_OPT_IN_ENV: "1", _DEEPSEEK_API_KEY_ENV: secret},
+        env={_LIVE_OPT_IN_ENV: "1", DEEPSEEK_API_KEY_ENV: secret},
         transport=transport,
     )
     rendered_result = json.dumps(asdict(result), ensure_ascii=False, default=str)
@@ -339,21 +393,22 @@ def test_live_smoke_does_not_leak_api_key_or_write_raw_response_artifact() -> No
 
 
 def test_opt_in_live_deepseek_returns_controlled_step_and_enters_8a_runner() -> None:
-    """真实 DeepSeek opt-in smoke；默认 pytest 必须 skip 且不联网。"""
+    """真实 LLM provider opt-in smoke；默认 pytest 必须 skip 且不联网。"""
 
     reason = _live_skip_reason(os.environ)
     if reason is not None:
         pytest.skip(reason)
 
-    api_key = os.environ.get(_DEEPSEEK_API_KEY_ENV, "")
+    provider = resolve_provider(os.environ)
+    api_key = os.environ.get(provider_api_key_env_name(provider), "")
     result, attempts = _run_live_smoke(env=os.environ)
     rendered_result = json.dumps(asdict(result), ensure_ascii=False, default=str)
     if api_key and api_key in rendered_result:
-        pytest.fail("live DeepSeek smoke 泄漏 API key")
+        pytest.fail(f"live {_PROVIDER_DISPLAY_NAMES[provider]} smoke 泄漏 API key")
 
     assert attempts <= _LIVE_MAX_RETRIES + 1
     assert result.failure is None, _safe_failure_message(result.failure)
-    assert result.tool_trace, "live DeepSeek smoke 未产生受控 tool trace"
+    assert result.tool_trace, "live provider smoke 未产生受控 tool trace"
     assert all(entry.result_kind == "success" for entry in result.tool_trace)
 
 
@@ -384,11 +439,11 @@ def _run_live_smoke_once(
     env: Mapping[str, str],
     transport: Any | None,
 ) -> Any:
-    """执行一次 DeepSeek adapter + 8A runner smoke。"""
+    """执行一次当前 provider adapter + 8A runner smoke。"""
 
     client = DeepSeekLlmClient(
         transport=transport,
-        env=_deepseek_env(env),
+        env=_live_env(env),
         timeout_seconds=_LIVE_TIMEOUT_SECONDS,
     )
     runner = LlmToolLoopRunner(
@@ -402,22 +457,35 @@ def _run_live_smoke_once(
 
 
 def _live_skip_reason(env: Mapping[str, str]) -> str | None:
-    """返回 live smoke skip reason；可运行时返回 None。"""
+    """返回 live smoke skip reason；可运行时返回 None。
+
+    未知 FUND_CHECKLIST_LLM_PROVIDER 由 resolve_provider fail-fast 抛 ValueError。
+    """
 
     if env.get(_LIVE_OPT_IN_ENV) != "1":
         return "未设置 FUND_CHECKLIST_RUN_LIVE_DEEPSEEK=1，跳过 live DeepSeek smoke"
-    if not env.get(_DEEPSEEK_API_KEY_ENV, "").strip():
-        return "缺少 DEEPSEEK_API_KEY，跳过 live DeepSeek smoke"
+    provider = resolve_provider(env)
+    api_key_env = provider_api_key_env_name(provider)
+    if not env.get(api_key_env, "").strip():
+        return f"缺少 {api_key_env}，跳过 live {_PROVIDER_DISPLAY_NAMES[provider]} smoke"
     return None
 
 
-def _deepseek_env(env: Mapping[str, str]) -> dict[str, str]:
-    """构造 Slice 8C 裁决后的 DeepSeek env，不读取其它真实环境变量。"""
+def _live_env(env: Mapping[str, str]) -> dict[str, str]:
+    """构造当前 provider 的 live env，不读取其它真实环境变量。
 
+    base URL / model 为空时由 DeepSeekLlmClient 按 provider 默认值补齐。
+    """
+
+    provider = resolve_provider(env)
+    api_key_env = provider_api_key_env_name(provider)
+    base_url_env = provider_base_url_env_name(provider)
+    model_env = provider_model_env_name(provider)
     return {
-        _DEEPSEEK_API_KEY_ENV: env.get(_DEEPSEEK_API_KEY_ENV, ""),
-        _DEEPSEEK_BASE_URL_ENV: env.get(_DEEPSEEK_BASE_URL_ENV, _DEFAULT_LIVE_BASE_URL),
-        _DEEPSEEK_MODEL_ENV: env.get(_DEEPSEEK_MODEL_ENV, _DEFAULT_LIVE_MODEL),
+        LLM_PROVIDER_ENV: provider,
+        api_key_env: env.get(api_key_env, ""),
+        base_url_env: env.get(base_url_env, ""),
+        model_env: env.get(model_env, ""),
     }
 
 

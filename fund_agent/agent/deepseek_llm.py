@@ -145,6 +145,40 @@ def provider_model_env_name(provider: str) -> str:
     return _PROVIDER_CONFIGS[provider].model_env
 
 
+def provider_api_key_env_name(provider: str) -> str:
+    """返回 provider 对应的 API key 环境变量名。
+
+    参数:
+        provider: "deepseek" 或 "mimo"。
+
+    返回:
+        "DEEPSEEK_API_KEY" 或 "MIMO_API_KEY"。
+
+    异常:
+        ValueError: provider 取值不合法。
+    """
+
+    resolve_provider({LLM_PROVIDER_ENV: provider})
+    return _PROVIDER_CONFIGS[provider].api_key_env
+
+
+def provider_base_url_env_name(provider: str) -> str:
+    """返回 provider 对应的 base URL 环境变量名。
+
+    参数:
+        provider: "deepseek" 或 "mimo"。
+
+    返回:
+        "DEEPSEEK_BASE_URL" 或 "MIMO_BASE_URL"。
+
+    异常:
+        ValueError: provider 取值不合法。
+    """
+
+    resolve_provider({LLM_PROVIDER_ENV: provider})
+    return _PROVIDER_CONFIGS[provider].base_url_env
+
+
 def translate_model_for_provider(model_name: str, provider: str) -> str:
     """把 scene/contract 模型名按 provider 翻译；未知模型名原样透传。
 

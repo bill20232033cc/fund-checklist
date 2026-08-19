@@ -321,6 +321,52 @@ class FundCodeResolution:
 
 
 @dataclass(frozen=True)
+class SnapshotReportDocument:
+    """快照（季报/半年报）单期文档的解析结果条目。
+
+    参数:
+        year: 报告自然年度，不从 document_id 字符串推断。
+        quarter: 季报期次 1-4；非季报为 None。
+        period: 半年报期次（当前仅 H1）；非半年报为 None。
+        document_id: 已导入 snapshot report 的 public document_id。
+
+    返回:
+        不可变输入 DTO。
+
+    异常:
+        本模型不执行 I/O，不抛出业务异常。
+    """
+
+    year: int
+    quarter: int | None = None
+    period: str | None = None
+    document_id: str = ""
+
+
+@dataclass(frozen=True)
+class SnapshotResolution:
+    """resolve_snapshot_reports() 的解析结果。
+
+    参数:
+        fund_code: 基金代码。
+        fund_name: 基金名称。
+        documents: 该基金所有可用快照文档（同一年多条 quarter 全部保留）。
+        available_years: 可用年份列表（升序）。
+
+    返回:
+        不可变解析结果。
+
+    异常:
+        本模型不执行 I/O，不抛出业务异常。
+    """
+
+    fund_code: str
+    fund_name: str
+    documents: tuple[SnapshotReportDocument, ...]
+    available_years: tuple[int, ...]
+
+
+@dataclass(frozen=True)
 class AnnualPerformanceFieldCitation:
     """多年度年度业绩 row 中单字段 citation 绑定。
 
