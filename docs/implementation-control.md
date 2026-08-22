@@ -3073,4 +3073,13 @@ opt-in live（需用户显式授权）：004393 / 007466 interactive 四问复�
 - 真实导出 smoke（2026-08-22 controller 直跑）：
   - P4：`docs/note-export-20260811/思考记录-20260811.html`（邮件「我的思考记录」）导入 `.fund_checklist/preferences/preferences.db` → imported records=65（analysis 20 / roundtable 20 / incubator 5 / structure 20），二次 cached 幂等；thought_records 与 memos 同库（memos 331 + thought_records 65 + questionnaire_results 0 + imports 1 + note_imports 1）。
   - 季度快照能力：`preference-snapshot --quarter 2026Q1`（真实库）→ 生成成功，baseline=None（尚未答问卷），behavior_summary 2 条（2026-02-28「加仓/减仓」、2026-03-19「收益」），四问 reflection 空模板 + 固定免责声明逐字一致。
-- 待办：① 用户答问卷：`uv run fund-checklist preference-questionnaire`（TTY 逐题交互，落 questionnaire_results）；② 答完复跑 `preference-snapshot --quarter 2026Q1/2026Q3` 验证 baseline 注入与行为对照；③ 收口 commit（P1-P4 + 裁决落盘）待用户指示；④ 下一 slice P5 行为证据对照（第二切片，原 P4，抽取范围将扩到 memos + thought_records）待设计；⑤ 远期候选（2026-08-22 新增，设计见 design.md §6.26.11）：6 个月定时问卷任务（风险偏好变化追踪）、有知有行知识库（投资者学习与成长），进入实施前逐个设计；⑥ 未 commit / 未 push（约束未解除）。
+- 待办：① 用户答问卷：`uv run fund-checklist preference-questionnaire`（TTY 逐题交互，落 questionnaire_results）；② 答完复跑 `preference-snapshot --quarter 2026Q1/2026Q3` 验证 baseline 注入与行为对照；③ 收口 commit + push ✅（2026-08-23，c6b25c5）；④ P5 行为证据对照设计初稿 ✅（2026-08-23，design.md §6.26.12），待用户确认 3 个决策点后派发实施；⑤ 远期候选（2026-08-22 新增，设计见 design.md §6.26.11）：6 个月定时问卷任务（风险偏好变化追踪）、有知有行知识库（投资者学习与成长），进入实施前逐个设计。
+
+### P5 行为证据对照（2026-08-23 设计初稿，待实施）
+
+- 设计真源：`docs/design.md` §6.26.12（新增 §6.26.12，§6.26.8 的 P5 描述已指向该节）。
+- 范围：memos + thought_records 行为文本 vs 问卷声明确定性对照（不接 LLM）；输出逐条对照明细 + 聚合一致性得分；持仓变动对照拆 P5b（依赖持仓导入）。
+- 新增代码面（实施时 allowed write set 草案）：`fund_agent/preferences/behavior.py`（行为抽取 + R1-R7 规则表）+ store 新表 `behavior_consistency` + `preference_snapshots` 加列（ALTER TABLE 兼容既有库）+ `snapshot.py` 对照节渲染 + 测试 `tests/fund/preferences/test_behavior.py`（+ 快照集成用例）。
+- 决策点（实施前需用户确认，不阻塞设计）：① 持仓对照拆 P5b（推荐）vs 并入 P5 空接口；② 对照并入快照（推荐）vs 独立 CLI；③ R3 追涨判定仅「上涨/新高/追高」命中（推荐）。
+- stop conditions：行为抽取与 R1-R7 各规则正反例测试通过；快照集成（含无基线/无行为/无对照边界）通过；最小验证命令 `uv run pytest tests/fund/preferences/ tests/fund/cli/test_cli_preference_snapshot.py -q --tb=short` 全绿；真实库 smoke（2026Q1：memos 2 条行为 + 问卷基线）输出对照明细。
+- 禁止事项：不接 LLM；不输出调仓/配置建议；不把真实私人行为文本写入 git 或测试 fixture；不提前实现 holdings 对照（P5b）。
