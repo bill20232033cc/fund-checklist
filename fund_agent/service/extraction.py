@@ -228,7 +228,7 @@ _ANCHOR_PERFORMANCE_RETURNS_SECTION_QUERIES = (
 DISCLOSURE_LOCATOR_CONTRACT_REGISTRY = (
     _DisclosureLocatorContract(
         profile_name="holdings_top10",
-        aliases=("前十大持仓", "重仓股", "持仓明细"),
+        aliases=("前十大持仓", "重仓股", "持仓明细", "前十大持"),
         candidate_queries=("股票投资明细", "前十名股票投资明细"),
         acceptable_title_family=("股票投资明细", "前十名股票投资明细"),
         requires_table_citation=True,

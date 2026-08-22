@@ -49,6 +49,13 @@ REPO_AUDIT_REPORT.md
 .fund_checklist_e2e_*/
 基金年报/*.pdf
 
+# Flomo 私人笔记导出（本地只读，不进 git）
+docs/flomo@*.zip
+docs/flomo-export-*/
+
+# 智慧笔记数据导出（本地只读，不进 git）
+docs/note-export-*/
+
 # 工作笔记和 checkpoint
 .checkpoint-*.md
 .mimocode/

@@ -746,6 +746,11 @@ class TestInteractiveAnchorInjection:
         ".fund_e2e_004393/docling_json/004393-2025-annual_report-dc38aae8770e0071"
         "/004393-2025-annual_report-dc38aae8770e0071.docling.json"
     )
+    _QUARTERLY_FIXTURE_DOC_ID = "005680-2026-Q2-quarterly_report-c04170add3a3cf98"
+    _QUARTERLY_FIXTURE_JSON = Path(
+        ".fund_checklist_005680_snapshot/docling_json/005680-2026-Q2-quarterly_report-c04170add3a3cf98"
+        "/005680-2026-Q2-quarterly_report-c04170add3a3cf98.docling.json"
+    )
 
     @pytest.fixture
     def session_store(self, tmp_path: Path) -> SessionStore:
@@ -796,6 +801,27 @@ class TestInteractiveAnchorInjection:
             json_path=self._PERF_ANCHOR_FIXTURE_JSON,
         )
         return FundDocumentToolService({self._PERF_ANCHOR_FIXTURE_DOC_ID: store})
+
+    def _quarterly_tool_service(self) -> FundDocumentToolService:
+        """构造 005680 Q2 2026 季报真实 docling JSON fixture 对应的 tool service。"""
+        from fund_agent.fund.document_tools.docling_store import DoclingDocumentStore
+        from fund_agent.fund.document_tools.models import ReportIdentity, ReportType, SourceKind
+
+        assert self._QUARTERLY_FIXTURE_JSON.is_file(), "005680 Q2 现成 docling JSON fixture 缺失"
+        store = DoclingDocumentStore(
+            identity=ReportIdentity(
+                fund_code="005680",
+                fund_name="财通资管价值成长混合",
+                year=2026,
+                report_type=ReportType.QUARTERLY_REPORT,
+                source_kind=SourceKind.LOCAL_PDF,
+                local_import_id="fixture",
+                content_fingerprint="fixture",
+                document_id=self._QUARTERLY_FIXTURE_DOC_ID,
+            ),
+            json_path=self._QUARTERLY_FIXTURE_JSON,
+        )
+        return FundDocumentToolService({self._QUARTERLY_FIXTURE_DOC_ID: store})
 
     def _service(
         self,
@@ -970,6 +996,28 @@ class TestInteractiveAnchorInjection:
 
         assert "manager_holdings" in contributions["retrieval"]
         assert "候选表锚点" not in contributions["retrieval"]
+
+    def test_holdings_top10_injects_quarterly_anchor(
+        self, session_store: SessionStore, prompt_composer: PromptComposer
+    ) -> None:
+        """005680 Q2 季报：前十大持哪些 命中 holdings_top10 并注入 table-0010 锚点。"""
+
+        service = self._service(session_store, prompt_composer, self._quarterly_tool_service())
+        session = self._session(
+            session_store,
+            document_id=self._QUARTERLY_FIXTURE_DOC_ID,
+            fund_code="005680",
+        )
+
+        contributions = service._build_contributions(
+            session,
+            document_id=self._QUARTERLY_FIXTURE_DOC_ID,
+            user_query="前十大持哪些",
+        )
+
+        assert "已识别披露主题: holdings_top10" in contributions["retrieval"]
+        assert "候选表锚点: table-0010（序号、股票名称、公允价值）" in contributions["retrieval"]
+        assert "请先 list_tables 确认该表号在列，再 read_table 该表" in contributions["retrieval"]
 
 
 class TestBuildHistoryContribution:

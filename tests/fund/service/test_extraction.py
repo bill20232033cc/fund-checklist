@@ -905,6 +905,27 @@ def test_controlled_query_profiles_generate_bounded_candidates(query: str, expec
     assert len(candidates) <= reading_service_module._MAX_QUERY_CANDIDATES
 
 
+def test_holdings_top10_alias_covers_abbreviated_surface_forms() -> None:
+    """2026-08-19：前十大持哪些 等缩略面必须命中 holdings_top10 并注入受控候选。"""
+
+    route_plan = reading_service_module._route_plan_for_query("前十大持哪些")
+
+    assert route_plan.profile_name == "holdings_top10"
+    assert route_plan.candidate_queries == (
+        "前十大持哪些",
+        "股票投资明细",
+        "前十名股票投资明细",
+    )
+
+
+def test_holdings_top10_alias_boundary_absorbs_holders_queries() -> None:
+    """2026-08-19 边界：前十大持有人 也会命中 holdings_top10（已知歧义，无持有人 profile）。"""
+
+    route_plan = reading_service_module._route_plan_for_query("前十大持有人是谁")
+
+    assert route_plan.profile_name == "holdings_top10"
+
+
 def test_manager_holdings_profile_routes_hold_fund_query() -> None:
     """L1：基金经理持有本产品 必须命中 manager_holdings 且候选含 持有本基金。"""
 
@@ -985,7 +1006,7 @@ def test_disclosure_locator_registry_has_only_reading_contract_fields() -> None:
         "quarterly_performance",
         "semiannual_performance",
     )
-    assert registry["holdings_top10"].aliases == ("前十大持仓", "重仓股", "持仓明细")
+    assert registry["holdings_top10"].aliases == ("前十大持仓", "重仓股", "持仓明细", "前十大持")
     assert registry["holdings_top10"].candidate_queries == ("股票投资明细", "前十名股票投资明细")
     assert registry["holdings_top10"].acceptable_title_family == ("股票投资明细", "前十名股票投资明细")
     assert registry["holdings_top10"].requires_table_citation is True
@@ -6035,7 +6056,7 @@ _QDII_ALLOCATION_YEAR_DOCLING_JSON = {
 
 
 def _wrong_bound_allocation_citation(*, year: int) -> Citation:
-    """构造错绑 citation：table-0059 caption 含「8.1 期末基金资产组合情况」但非资产配置表。"""
+    """构造错绑 citation：table-0059 为公允价值层级表（非资产配置表）。"""
     return _citation(
         f"519696-{year}-annual_report-fixture",
         LocatorKind.TABLE,
@@ -6046,7 +6067,7 @@ def _wrong_bound_allocation_citation(*, year: int) -> Citation:
 
 
 def test_asset_allocation_fallback_real_fixture_519696_2023() -> None:
-    """519696-2023 真实 fixture：错绑 caption 后 asset_allocation 全表扫描 fallback 非空。"""
+    """519696-2023 真实 fixture：错绑非资产配置表后 asset_allocation 全表扫描 fallback 非空。"""
     from fund_agent.service.extraction import (
         _extract_allocation_from_agent_result,
         _is_asset_allocation_table,
@@ -6057,7 +6078,8 @@ def test_asset_allocation_fallback_real_fixture_519696_2023() -> None:
     assert json_path.is_file(), f"{year} 现成 QDII docling JSON fixture 缺失"
     store = _qdii_fixture_store(year=year, json_path=json_path)
     wrong_cited = store.read_table("table-0059", max_rows=30)
-    assert "期末基金资产组合情况" in (wrong_cited.caption or "")
+    # 2026-08-19 归属修正后 table-0059 已正确归属 7.4.14.2.3.2（公允价值层级表），
+    # 不再错绑 8.1 期末基金资产组合情况；fallback 场景仍以「非资产配置表」驱动。
     assert not _is_asset_allocation_table(wrong_cited.rows)
 
     result = AgentRunResult(
@@ -6224,7 +6246,7 @@ def test_extract_manager_holds_fund_real_2025_fixture() -> None:
         json_path=_FUND_MANAGER_2025_DOCLING_JSON,
     )
     table = store.read_table("table-0090", max_rows=20)
-    assert table.section_ref == "section-0663"
+    assert table.section_ref == "section-0659"
     holds_fund = _extract_manager_holds_fund(table.rows)
     assert holds_fund
     assert ">100" in holds_fund
@@ -6352,7 +6374,7 @@ def test_extract_manager_holds_overall_real_519696_2025_fixture() -> None:
         json_path=_FUND_MANAGER_519696_2025_DOCLING_JSON,
     )
     table = store.read_table("table-0080", max_rows=20)
-    assert table.section_ref == "section-0679"
+    assert table.section_ref == "section-0670"
     holds_fund = _extract_manager_holds_overall(table.rows)
     assert holds_fund
     assert "基金经理区间未披露" in holds_fund

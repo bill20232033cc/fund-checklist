@@ -20,6 +20,15 @@ from fund_agent.fund.document_tools.persistent_repository import (
     CATALOG_FILENAME,
     FilesystemReportRepository,
 )
+from fund_agent.preferences.flomo_parser import FlomoParseError, parse_flomo_export
+from fund_agent.preferences.note_parser import NoteParseError, parse_note_export
+from fund_agent.preferences.questionnaire import QuestionBank, score_questionnaire
+from fund_agent.preferences.snapshot import QUARTER_REGEX, generate_snapshot, write_snapshot_files
+from fund_agent.preferences.store import (
+    PreferencesStoreError,
+    open_preferences_store,
+    save_questionnaire_result,
+)
 from fund_agent.agent.deepseek_llm import DeepSeekLlmClient, resolve_provider_model
 from fund_agent.agent.log_levels import configure_logging
 from fund_agent.agent.stream_events import StreamEventType
@@ -45,6 +54,9 @@ CLASSIFIED_FAILURE_EXIT_CODE = 2
 DEFAULT_QUERY = "基金经理"
 DEFAULT_WORK_DIR = ".fund_checklist"
 UNEXPECTED_FAILURE_MESSAGE = "unexpected_error: CLI 执行失败"
+_DEFAULT_QUESTIONNAIRE_BANK = (
+    Path(__file__).resolve().parent.parent / "preferences" / "questionnaire" / "baseline-v1.json"
+)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -118,6 +130,14 @@ def run_cli(
             return _run_ask_command(args, stdout=stdout, stderr=stderr)
         if args.command == "interactive":
             return _run_interactive_command(args, stdout=stdout, stderr=stderr)
+        if args.command == "flomo-import":
+            return _run_flomo_import_command(args, stdout=stdout, stderr=stderr)
+        if args.command == "note-import":
+            return _run_note_import_command(args, stdout=stdout, stderr=stderr)
+        if args.command == "preference-questionnaire":
+            return _run_preference_questionnaire_command(args, stdout=stdout, stderr=stderr)
+        if args.command == "preference-snapshot":
+            return _run_preference_snapshot_command(args, stdout=stdout, stderr=stderr)
         if args.command == "fix":
             return _run_fix_command(args, stdout=stdout, stderr=stderr)
         if args.command == "repair":
@@ -175,6 +195,34 @@ def build_parser() -> argparse.ArgumentParser:
     import_parser.add_argument("--quarter", type=int, choices=[1, 2, 3, 4], default=None,
                               help="季报期次 1-4（仅 --report-type quarterly_report 必填）")
     import_parser.add_argument("--work-dir", default=Path(DEFAULT_WORK_DIR), type=Path)
+
+    flomo_import_parser = subparsers.add_parser("flomo-import")
+    flomo_import_parser.add_argument("--html", required=True, type=Path, help="Flomo 导出 HTML 文件路径")
+    flomo_import_parser.add_argument("--work-dir", default=Path(DEFAULT_WORK_DIR), type=Path,
+                                     help="工作目录（默认 .fund_checklist，数据库写入其下 preferences/）")
+    flomo_import_parser.add_argument("--images-dir", type=Path,
+                                     help="图片校验目录（可选）；引用的图片文件缺失仅 warning 不阻断")
+
+    note_import_parser = subparsers.add_parser("note-import")
+    note_import_parser.add_argument("--html", required=True, type=Path, help="智慧笔记导出 HTML 文件路径")
+    note_import_parser.add_argument("--work-dir", default=Path(DEFAULT_WORK_DIR), type=Path,
+                                    help="工作目录（默认 .fund_checklist，数据库写入其下 preferences/）")
+
+    questionnaire_parser = subparsers.add_parser("preference-questionnaire")
+    questionnaire_parser.add_argument("--work-dir", default=Path(DEFAULT_WORK_DIR), type=Path,
+                                      help="工作目录（默认 .fund_checklist，数据库写入其下 preferences/）")
+    questionnaire_parser.add_argument("--answers", type=Path, default=None,
+                                      help="答案 JSON 文件路径（形如 {q01: 0, ...}；非 TTY 环境必填）")
+    questionnaire_parser.add_argument("--bank", type=Path, default=None,
+                                      help="题库 JSON 路径（默认使用包内 baseline-v1.json）")
+
+    snapshot_parser = subparsers.add_parser("preference-snapshot")
+    snapshot_parser.add_argument("--work-dir", default=Path(DEFAULT_WORK_DIR), type=Path,
+                                 help="工作目录（默认 .fund_checklist，数据库写入其下 preferences/）")
+    snapshot_parser.add_argument("--quarter", required=True,
+                                 help="季度标识（YYYYQn，如 2026Q3）")
+    snapshot_parser.add_argument("--bank", type=Path, default=None,
+                                 help="题库 JSON 路径（默认使用包内 baseline-v1.json）")
 
     holdings_parser = subparsers.add_parser("holdings")
     holdings_parser.add_argument("--fund-code", required=True)
@@ -828,6 +876,436 @@ def _run_import_command(args: argparse.Namespace, *, stdout: TextIO, stderr: Tex
 
     if imported == 0 and failed > 0:
         return CLASSIFIED_FAILURE_EXIT_CODE
+    return SUCCESS_EXIT_CODE
+
+
+def _run_flomo_import_command(args: argparse.Namespace, *, stdout: TextIO, stderr: TextIO) -> int:
+    """执行 flomo-import：解析 Flomo HTML 导出并幂等写入偏好数据库。
+
+    参数:
+        args: argparse 解析出的 flomo-import 参数。
+        stdout: 成功输出流。
+        stderr: 失败与 warning 输出流。
+
+    返回:
+        成功返回 0；not_found / schema_drift / unavailable 均返回 2。
+
+    异常:
+        本函数不抛出业务异常，已分类失败转为退出码 2。
+    """
+
+    html_path = Path(args.html)
+    if not html_path.is_file():
+        _write_classified_failure(
+            ToolFailure(code=FailureCode.NOT_FOUND, message=f"HTML 文件不存在: {html_path.name}"),
+            stderr,
+        )
+        return CLASSIFIED_FAILURE_EXIT_CODE
+    try:
+        html_text = html_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        _write_classified_failure(
+            ToolFailure(code=FailureCode.NOT_FOUND, message=f"HTML 文件不可读: {html_path.name}"),
+            stderr,
+        )
+        return CLASSIFIED_FAILURE_EXIT_CODE
+    try:
+        parse_result = parse_flomo_export(html_text, source_path=str(html_path))
+    except FlomoParseError as exc:
+        _write_classified_failure(
+            ToolFailure(code=FailureCode.SCHEMA_DRIFT, message=exc.message), stderr
+        )
+        return CLASSIFIED_FAILURE_EXIT_CODE
+    if parse_result.exported_at is None:
+        _write_classified_failure(
+            ToolFailure(
+                code=FailureCode.SCHEMA_DRIFT,
+                message="未找到 header .date 导出日期，HTML 结构与 Flomo 导出不符",
+            ),
+            stderr,
+        )
+        return CLASSIFIED_FAILURE_EXIT_CODE
+    try:
+        store = open_preferences_store(Path(args.work_dir))
+    except PreferencesStoreError as exc:
+        _write_classified_failure(
+            ToolFailure(code=FailureCode.UNAVAILABLE, message=exc.message), stderr
+        )
+        return CLASSIFIED_FAILURE_EXIT_CODE
+    try:
+        import_result = store.import_memos(
+            parse_result.memos,
+            source_path=str(html_path),
+            exported_at=parse_result.exported_at,
+        )
+        db_path = store.db_path
+    except PreferencesStoreError as exc:
+        _write_classified_failure(
+            ToolFailure(code=FailureCode.UNAVAILABLE, message=exc.message), stderr
+        )
+        return CLASSIFIED_FAILURE_EXIT_CODE
+    finally:
+        store.close()
+
+    image_count = sum(len(memo.images) for memo in parse_result.memos)
+    if args.images_dir is not None:
+        images_dir = Path(args.images_dir)
+        missing_images = [
+            image
+            for memo in parse_result.memos
+            for image in memo.images
+            if not (images_dir / image).is_file()
+        ]
+        for image in missing_images:
+            print(f"warning: 图片文件不存在: {image}", file=stderr)
+
+    if import_result.imported:
+        print(
+            f"flomo-import: imported (memos={import_result.memo_count}, "
+            f"images={image_count}, db={db_path})",
+            file=stdout,
+        )
+    else:
+        print(
+            f"flomo-import: cached (首次导入于 {import_result.imported_at}, "
+            f"memos={import_result.memo_count}, images={image_count}, db={db_path})",
+            file=stdout,
+        )
+    return SUCCESS_EXIT_CODE
+
+
+def _note_export_date_from_id(note_id: str) -> str:
+    """从记录 id（note-YYYYMMDD-...）还原导出日期（YYYY-MM-DD）。"""
+
+    date_part = note_id.split("-")[1]
+    return f"{date_part[:4]}-{date_part[4:6]}-{date_part[6:8]}"
+
+
+def _run_note_import_command(args: argparse.Namespace, *, stdout: TextIO, stderr: TextIO) -> int:
+    """执行 note-import：解析智慧笔记 HTML 导出并幂等写入偏好数据库。
+
+    参数:
+        args: argparse 解析出的 note-import 参数。
+        stdout: 成功输出流。
+        stderr: 失败输出流。
+
+    返回:
+        成功返回 0；not_found / schema_drift / unavailable 均返回 2。
+
+    异常:
+        本函数不抛出业务异常，已分类失败转为退出码 2。
+    """
+
+    html_path = Path(args.html)
+    if not html_path.is_file():
+        _write_classified_failure(
+            ToolFailure(code=FailureCode.NOT_FOUND, message=f"HTML 文件不存在: {html_path.name}"),
+            stderr,
+        )
+        return CLASSIFIED_FAILURE_EXIT_CODE
+    try:
+        html_text = html_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        _write_classified_failure(
+            ToolFailure(code=FailureCode.NOT_FOUND, message=f"HTML 文件不可读: {html_path.name}"),
+            stderr,
+        )
+        return CLASSIFIED_FAILURE_EXIT_CODE
+    try:
+        notes = parse_note_export(html_text, source_path=str(html_path))
+    except NoteParseError as exc:
+        _write_classified_failure(
+            ToolFailure(code=FailureCode.SCHEMA_DRIFT, message=exc.message), stderr
+        )
+        return CLASSIFIED_FAILURE_EXIT_CODE
+    exported_at = _note_export_date_from_id(notes[0].id)
+    try:
+        store = open_preferences_store(Path(args.work_dir))
+    except PreferencesStoreError as exc:
+        _write_classified_failure(
+            ToolFailure(code=FailureCode.UNAVAILABLE, message=exc.message), stderr
+        )
+        return CLASSIFIED_FAILURE_EXIT_CODE
+    try:
+        import_result = store.import_notes(
+            notes,
+            source_path=str(html_path),
+            exported_at=exported_at,
+        )
+        db_path = store.db_path
+    except PreferencesStoreError as exc:
+        _write_classified_failure(
+            ToolFailure(code=FailureCode.UNAVAILABLE, message=exc.message), stderr
+        )
+        return CLASSIFIED_FAILURE_EXIT_CODE
+    finally:
+        store.close()
+
+    if import_result.imported:
+        print(
+            f"note-import: imported (records={import_result.record_count}, db={db_path})",
+            file=stdout,
+        )
+    else:
+        print(
+            f"note-import: cached (首次导入于 {import_result.imported_at}, "
+            f"records={import_result.record_count}, db={db_path})",
+            file=stdout,
+        )
+    return SUCCESS_EXIT_CODE
+
+
+def _questionnaire_result_to_dict(result) -> dict:
+    """把评分结果转为可持久化的 JSON 字典。"""
+
+    return {
+        "version": result.version,
+        "answered_at": result.answered_at,
+        "total_score": result.total_score,
+        "dimension_scores": result.dimension_scores,
+        "risk_level": result.risk_level,
+        "answers": result.answers,
+        "correct": result.correct,
+        "disclaimer": result.disclaimer,
+    }
+
+
+def _questionnaire_results_json_path(results_dir: Path, answered_at: str) -> Path:
+    """生成结果 JSON 路径（YYYY-MM-DD.json，同日已存在时追加 -N 序号）。"""
+
+    date_part = answered_at[:10]
+    candidate = results_dir / f"{date_part}.json"
+    seq = 2
+    while candidate.exists():
+        candidate = results_dir / f"{date_part}-{seq}.json"
+        seq += 1
+    return candidate
+
+
+def _collect_questionnaire_answers_interactively(
+    bank, *, stdout: TextIO,
+) -> dict[str, int] | None:
+    """TTY 交互逐题出题/收答案；取消（q/quit/EOF）时返回 None。"""
+
+    answers: dict[str, int] = {}
+    for question in bank.questions:
+        while True:
+            print(
+                f"{question.id}. [{question.board}] {question.question}",
+                file=stdout,
+            )
+            print(
+                "  ".join(f"{i}) {opt}" for i, opt in enumerate(question.options)),
+                file=stdout,
+            )
+            try:
+                line = input("请输入选项索引 0-3（q 退出）: ").strip()
+            except EOFError:
+                return None
+            if line in ("q", "quit", "exit"):
+                return None
+            if line.isdigit() and 0 <= int(line) <= 3:
+                answers[question.id] = int(line)
+                break
+            print("输入无效，请输入 0-3 的选项索引（q 退出）", file=stdout)
+    return answers
+
+
+def _run_preference_questionnaire_command(
+    args: argparse.Namespace, *, stdout: TextIO, stderr: TextIO,
+) -> int:
+    """执行 preference-questionnaire：题库校验、评分并持久化结果。
+
+    参数:
+        args: argparse 解析出的 preference-questionnaire 参数。
+        stdout: 成功输出流。
+        stderr: 失败输出流。
+
+    返回:
+        成功返回 0；not_found / schema_drift / unavailable 均返回 2。
+
+    异常:
+        本函数不抛出业务异常，已分类失败转为退出码 2。
+    """
+
+    bank_path = Path(args.bank) if args.bank is not None else _DEFAULT_QUESTIONNAIRE_BANK
+    if not bank_path.is_file():
+        _write_classified_failure(
+            ToolFailure(code=FailureCode.NOT_FOUND, message=f"题库文件不存在: {bank_path.name}"),
+            stderr,
+        )
+        return CLASSIFIED_FAILURE_EXIT_CODE
+    try:
+        bank = QuestionBank.load(bank_path)
+    except ValueError as exc:
+        _write_classified_failure(
+            ToolFailure(code=FailureCode.SCHEMA_DRIFT, message=str(exc)), stderr
+        )
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+    answers: dict[str, int] = {}
+    if args.answers is not None:
+        answers_path = Path(args.answers)
+        if not answers_path.is_file():
+            _write_classified_failure(
+                ToolFailure(code=FailureCode.NOT_FOUND, message=f"答案文件不存在: {answers_path.name}"),
+                stderr,
+            )
+            return CLASSIFIED_FAILURE_EXIT_CODE
+        try:
+            raw = answers_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            _write_classified_failure(
+                ToolFailure(code=FailureCode.NOT_FOUND, message=f"答案文件不可读: {answers_path.name}"),
+                stderr,
+            )
+            return CLASSIFIED_FAILURE_EXIT_CODE
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            _write_classified_failure(
+                ToolFailure(code=FailureCode.SCHEMA_DRIFT, message=f"答案文件解析失败: {exc}"),
+                stderr,
+            )
+            return CLASSIFIED_FAILURE_EXIT_CODE
+        if not isinstance(data, dict) or not all(
+            isinstance(key, str) and type(value) is int for key, value in data.items()
+        ):
+            _write_classified_failure(
+                ToolFailure(code=FailureCode.SCHEMA_DRIFT, message="答案文件结构非法：必须是 {题号: 选项索引} 对象"),
+                stderr,
+            )
+            return CLASSIFIED_FAILURE_EXIT_CODE
+        answers = data
+    elif not sys.stdin.isatty():
+        _write_classified_failure(
+            ToolFailure(
+                code=FailureCode.NOT_FOUND,
+                message="非 TTY 环境必须提供 --answers JSON 文件（{q01: 0, ...}）",
+            ),
+            stderr,
+        )
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+    try:
+        if args.answers is not None:
+            result = score_questionnaire(bank, answers)
+        else:
+            collected = _collect_questionnaire_answers_interactively(bank, stdout=stdout)
+            if collected is None:
+                print("preference-questionnaire: 已取消，未保存", file=stdout)
+                return SUCCESS_EXIT_CODE
+            result = score_questionnaire(bank, collected)
+    except ValueError as exc:
+        _write_classified_failure(
+            ToolFailure(code=FailureCode.SCHEMA_DRIFT, message=str(exc)), stderr
+        )
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+    db_path: Path | None = None
+    try:
+        store = open_preferences_store(Path(args.work_dir))
+        db_path = store.db_path
+        try:
+            save_questionnaire_result(store, result)
+        finally:
+            store.close()
+    except PreferencesStoreError as exc:
+        _write_classified_failure(
+            ToolFailure(code=FailureCode.UNAVAILABLE, message=exc.message), stderr
+        )
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+    try:
+        results_dir = Path(args.work_dir) / "preferences" / "questionnaire" / "results"
+        results_dir.mkdir(parents=True, exist_ok=True)
+        results_path = _questionnaire_results_json_path(results_dir, result.answered_at)
+        results_path.write_text(
+            json.dumps(_questionnaire_result_to_dict(result), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        _write_classified_failure(
+            ToolFailure(code=FailureCode.UNAVAILABLE, message=f"问卷结果写入失败: {exc}"), stderr
+        )
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+    dims = ", ".join(
+        f"{board}={result.dimension_scores[board]:.1f}" for board in bank.boards
+    )
+    print(f"preference-questionnaire: 总分={result.total_score:.1f}", file=stdout)
+    print(f"preference-questionnaire: 五维子分: {dims}", file=stdout)
+    print(f"preference-questionnaire: C1-C5={result.risk_level}", file=stdout)
+    print(f"preference-questionnaire: 结果已写入 {results_path}", file=stdout)
+    print(f"preference-questionnaire: 已写入偏好数据库 {db_path}", file=stdout)
+    return SUCCESS_EXIT_CODE
+
+
+def _run_preference_snapshot_command(
+    args: argparse.Namespace, *, stdout: TextIO, stderr: TextIO,
+) -> int:
+    """执行 preference-snapshot：生成并落盘季度偏好快照。
+
+    参数:
+        args: argparse 解析出的 preference-snapshot 参数。
+        stdout: 成功输出流。
+        stderr: 失败输出流。
+
+    返回:
+        成功返回 0；quarter 非法 / 题库不可用 / 存储不可用均返回 2。
+
+    异常:
+        本函数不抛出业务异常，已分类失败转为退出码 2。
+    """
+
+    quarter = str(args.quarter)
+    if QUARTER_REGEX.fullmatch(quarter) is None:
+        _write_classified_failure(
+            ToolFailure(
+                code=FailureCode.SCHEMA_DRIFT,
+                message=f"季度格式非法: {quarter}，应为 YYYYQ[1-4] 如 2026Q3",
+            ),
+            stderr,
+        )
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+    bank_path = Path(args.bank) if args.bank is not None else _DEFAULT_QUESTIONNAIRE_BANK
+    if not bank_path.is_file():
+        _write_classified_failure(
+            ToolFailure(code=FailureCode.NOT_FOUND, message=f"题库文件不存在: {bank_path.name}"),
+            stderr,
+        )
+        return CLASSIFIED_FAILURE_EXIT_CODE
+    try:
+        bank = QuestionBank.load(bank_path)
+    except ValueError as exc:
+        _write_classified_failure(
+            ToolFailure(code=FailureCode.SCHEMA_DRIFT, message=str(exc)), stderr
+        )
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+    try:
+        store = open_preferences_store(Path(args.work_dir))
+        try:
+            snapshot = generate_snapshot(store, quarter, bank=bank)
+            json_path, md_path = write_snapshot_files(store, snapshot)
+        finally:
+            store.close()
+    except PreferencesStoreError as exc:
+        _write_classified_failure(
+            ToolFailure(code=FailureCode.UNAVAILABLE, message=exc.message), stderr
+        )
+        return CLASSIFIED_FAILURE_EXIT_CODE
+    except ValueError as exc:
+        _write_classified_failure(
+            ToolFailure(code=FailureCode.SCHEMA_DRIFT, message=str(exc)), stderr
+        )
+        return CLASSIFIED_FAILURE_EXIT_CODE
+
+    print(f"preference-snapshot: 快照已生成 {quarter}", file=stdout)
+    print(f"preference-snapshot: json {json_path}", file=stdout)
+    print(f"preference-snapshot: markdown {md_path}", file=stdout)
+    print(f"preference-snapshot: {snapshot.disclaimer}", file=stdout)
     return SUCCESS_EXIT_CODE
 
 

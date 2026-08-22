@@ -1,8 +1,8 @@
 # fund-checklist 设计真源
 
-更新时间：2026-08-15（季报/半年报快照：design.md §6.25 + implementation-control.md「快照大任务」节，2026-08-14 启动，2026-08-15 收口）
+更新时间：2026-08-22（投资者偏好分析 §6.26 新增 §6.26.10 智慧笔记数据导出导入（Slice P4 note-import），邮件「我的思考记录」2026-08-11 收件，65 条记录 = 分析记录 20 / 多维度分析 20 / 孵化报告 5 / 结构分析 20；原 §6.26.8 行为证据对照顺延为 Slice P5；2026-08-21 已完成存储格式 / 图片 / 题库口径 / C1-C5 去留 / 五维权重裁决，见 §6.26.6 / §6.26.9）
 文档状态：设计真源，覆盖基金分析助手完整链路；不得作为实现完成证据。
-适用范围：基金分析助手，覆盖年报导入 → 结构化抽取 → 多年度追踪 → 信号评分 → 报告生成 → 审计管道。
+适用范围：基金分析助手（年报导入 → 结构化抽取 → 多年度追踪 → 信号评分 → 报告生成 → 审计管道）+ 投资者偏好分析（Flomo 导入 → 问卷基线 → 季度偏好快照）。
 关联文档：AGENTS.md（执行规则）、docs/implementation-control.md（当前执行面板）
 
 ## 0. 证据口径
@@ -814,6 +814,175 @@ R3（Mimo review ACCEPTED 计划）实施结论：
 - 接线点：ask 流式路径成功分支（`cli/main.py` `result = service.ask_question(...)` 后、`return SUCCESS_EXIT_CODE` 前），`--enable-tool-trace` 开启且 trace 非空时追加 `[工具分析: 共 N 次 / 成功 S / 失败 F]` + findings 行；`--no-stream` JSON 输出不含分析字段；TOOL_EVENT 实时显示不变。
 - 依据：`docs/research/dayu-agent-r-research-20260810.md` §2.2.7 / §5 建议 3；dayu `service/tool_trace_analysis.py` + `host/tool_trace_analysis.py` 仅作边界参考（Analyzer 只读消费派生 trace，不成为 durable truth）。
 - 实现与测试：见 `.sisyphus/plans/tool-trace-operator-slice-20260813.md`；CIC-lite：MiMo plan review `NEEDS_FIX`（2026-08-13，3 项最小修复——failure_code 用 `.value`、by_tool 首现顺序显式断言、large_arguments `==` 阈值边界——已按 review 原文修正），DS 实施待执行。
+
+### 6.26 投资者偏好分析（Flomo 导入 + 问卷基线 + 季度偏好快照）（2026-08-20 讨论稿）
+
+- 定位：面向投资者本人的**自我认知工具**，与基金文档分析主链并列的第二个产品模块。输入 = 私人笔记（Flomo 导出）+ 自报问卷 + （远期）真实持仓；输出 = 偏好画像（C1-C5）+ 季度偏好快照（声明 vs 行为对照 + 四问反思）。确定性优先，MVP 不接 LLM。
+- 产品形态（2026-08-20 用户裁决 C）：问卷基线（自我声明）+ 行为证据对照（Flomo + 真实持仓收益），季度输出对照与反思。
+- 依据：AMAC 投资者风险承受能力调查问卷相关指引文章（2019-12-22，amac.org.cn/fwdt/wyb/jgdjhcpbeian/zcglcpba/xgzc/201912/t20191222_19879.html）；有知有行材料页 / 基金 CT（youzhiyouxing.cn/x/ct）/ 数据页（youzhiyouxing.cn/data）/ 《和你聊聊「知行温度计」幕后的事》（youzhiyouxing.cn/n/materials/172，2026-08-20 补充）；`docs/research/fund-assistant-expansion-and-behavior-20260815.md`（持仓估值、市场温度计、投资者行为矫正研究）。
+
+#### 6.26.1 已裁决项（2026-08-20，用户 7 项决策）
+
+1. **产品形态 C**：问卷基线 + 行为证据对照 + 季度输出。
+2. **将增加基金持仓导入**：设计 xlsx 持仓表格读取与解析（契约草案见 6.26.5）。
+3. **flomo import 子命令**：解析 HTML → 结构化 memo（时间/内容/图片引用）；存储格式 = SQLite（2026-08-21 裁决 B，见 6.26.4）；图片首版仅引用不解析（2026-08-21 确认，见 6.26.4）；zip 与解压目录走 gitignore（见 6.26.3）。
+4. **画像模型**：第一轮 AMAC 100 分制五类（C1-C5）；第二轮丰富维度采用有知有行答题模式（情境/行为题），分值表自建并标注非官方。（2026-08-21 更新：第一轮基线版题库已裁决改为融入有知有行五大板块结构、自建 80 题，见 §6.26.6；C1-C5 已裁决保留为辅助输出，见 §6.26.6）
+5. **季度更新**：复用 `snapshot-quarterly` 的季度节奏，产出"偏好快照报告"；反思四问模板。
+6. **合规边界**：偏好画像 + 反思允许输出，须带免责声明；资产大类比例建议放行（方案 A，适用于所有 LLM 通道，免责声明文案已确认），AGENTS.md 已按此修改（2026-08-20 裁决，见 6.26.7）。
+7. **MVP 范围**：Slice P1 Flomo 导入 + Slice P2 问卷基线 + Slice P3 季度偏好快照模板（确定性，不接 LLM）；行为证据对照为第二切片（Slice P4）；后续 slice 逐个设计。
+
+#### 6.26.2 外部参考事实与边界
+
+- **AMAC 指引（2019-12-22 文章）**：五维框架 = 基本信息（年龄/学历/职业）、财务状况（收入/可投资资产比例）、投资知识经验、投资目标（期限/目的）、风险偏好（态度/最大可承受损失）；100 分制；**分值表与评级映射由机构自定**，指引只给框架；输出 C1-C5（保守/稳健/平衡/成长/进取）。私募合格投资者门槛（金融资产 ≥300 万 或 三年年均收入 ≥50 万）与本工具无关，不采用。
+- **适当性管理规则**：2017 年《证券期货投资者适当性管理办法》配套指引要求测评至少每两年更新；2026-06 中基协公募适当性新规：测评有效期 ≤12 个月、单日评估 ≤2 次、12 个月累计 ≤8 次、风险等级改变须重新评估。本工具为自我认知用途，仍按"季度可重测、结果带时间戳"设计，不与机构合规义务混同。
+- **有知有行「合格基金持有人测评」**（2024-05 上线，一手来源：知行周报 materials/1682 + E144 播客文字稿，2026-08-21 补充）：
+  - 定位：**不是风险等级测评（C1-C5），而是一场"合格持有人"考试**——评估基金投资的"最小知识集"，理念 = "做 80 分投资者就可以了，更多的努力 ≠ 更多的收益"，季凯帆（《解读基金》作者）参与考纲搭建。
+  - 规模：80 道题、平均 40 分钟完成；初版出到 150 道，精简至 80；考试大纲迭代两次；公司内部两场模拟考。
+  - 五大板块：基金常识 / 投前准备 / 系统投资 / 投资心态 / 实战经验（3 认知篇 = 基金常识 / 投前准备 / 系统投资，2 行动篇 = 投资心态 / 实战经验）。
+  - 考纲哲学：不考价值投资定义/市场走势分析/财务报表，只考"好资产、好价格、长期持有"、A 股美股基本认知、如何规划好每一笔钱。
+  - 产品设计：题目分三个部分、难度依次递进；限时考场（每周三 20:00-22:00）；完成发徽章「知识的缝隙」。
+  - 公开样题（播客披露）："十年十倍需年化约 26%"；"10000 元买入下跌 30% 回本需涨 43%（直觉 30% 是错的）"；"资金进出决定投资者收益（基金收益 ≠ 基民收益）"；"别人推荐基金时如何判断可信"；"中概股高点 -50% 买入、再跌 80% 时亏损 -60%（非直觉相加的 -130%）"；"A 股长期年化约 9.61%（过去 19 年）"。
+  - 输出形态：**总分 100 + 五维子分**（用户实测 90 分 = 基金常识 79 / 投前准备 85 / 系统投资·投资心态·实战经验 满分，E144 评论区实证）；复习包 = 投资第一课 / 投资ABC / 中国大类资产 2023 年报 / 海外投资白皮书 / 有理有据。
+  - 打分：公开层面只有理念（80 分线是隐喻，非披露分数线），**具体分值表与合格线未公开**。
+  - 结论：第二轮只能借鉴出题形态（板块划分、情境题/行为题、难度递进），题库与分值表必须自建并标注"非官方、自行设计"。
+- **基金 CT（youzhiyouxing.cn/x/ct）**：投资者年化收益率 vs 基金收益差距、持仓言行一致（vs 业绩基准）、完整成本（含换手率交易成本）、基金经理员工跟投——作为第二切片"组合体检"的概念基准。
+- **市场温度计**：一手来源《和你聊聊「知行温度计」幕后的事》（youzhiyouxing.cn/n/materials/172）：样本 = A 股所有上市公司；指标 = 综合 PE 与 PB；加权 = **等权**（非市值加权）；考察周期 = **覆盖两轮完整牛熊周期**；温带 = 官方三档 低估 0-30° / 中估 30-70° / 高估 70-100°；应用语义 = 大周期择时（低估买入、高估兑现），短期温度小幅变化无效，高估温带买入持有 5 年平均累计收益为负，历史统计不承诺未来；**精确算法未公开**（官方明示"出于保密的要求"）。
+  - 数据页一手事实（youzhiyouxing.cn/data，2026-08-20）：当前 49° 中估；官方温带概率表 = 低估 40% 发生概率（买入持有 5 年盈利概率 >95%）、中估 38%（>90%）、高估 22%（>35%）；**不提供历史温度序列导出与 API**；官方对数据不完整的指数（中国互联网指数、中证2000）明确"暂不提供内在收益率"——与 fail-closed 口径一致。
+  - 自制路径（`docs/research/fund-assistant-expansion-and-behavior-20260815.md` §1.3，修正对齐官方口径）：akshare 中证全指 000985 日频 PE/PB → 等权分位合成（`0.5·PE分位+0.5·PB分位`）×100，考察窗口以覆盖两轮完整牛熊为准（约 5-8 年，须含 2018 熊市与 2021 牛市）→ 档位对齐官方三档（如需可加 ≥90 极度高估为自制扩展）→ 连续函数映射股债现金比例；必须标注"有知有行风格自制，非官方公式"。
+
+#### 6.26.3 数据源与隐私边界（Flomo）
+
+- 事实：`docs/flomo@多多爸爸-20260819.zip`（用户私人笔记导出）已解压至 `docs/flomo-export-20260819/`，主体 `多多爸爸的笔记.html`（331 条 memo，2023-01-16 ~ 2026-04-14）+ `file/` 28 张图片。
+- 硬约束：私人笔记**只本地处理，不进 git**。`.gitignore` 新增：
+  ```
+  # Flomo 私人笔记导出（本地只读，不进 git）
+  docs/flomo@*.zip
+  docs/flomo-export-*/
+  ```
+- 导入产物写入 `--work-dir`（默认 `.fund_checklist`）下 `preferences/` 子目录，同样受 `.fund_checklist*/` ignore 覆盖；**不允许**把 memo 内容写入任何被 git 跟踪的目录。
+
+#### 6.26.4 Flomo 导入设计（Slice P1）
+
+- 命令：`flomo-import --html <path> --work-dir <dir> [--images-dir <path>]`。
+- 解析契约（HTML 结构已实证）：
+  - 每个 `.memo` 容器 = 一条 memo；`.time` 元素格式 `YYYY-MM-DD HH:MM:SS`（精确到秒，实测如 `2026-04-14 19:22:20`）；`.content` 内 p/ul/ol/li 文本为正文，`<br>` 转换行；`<img src="file/...">` 为图片引用（src 是相对导出根目录的路径）。
+  - 结构化输出字段：`id`（`flomo-<YYYY-MM-DD>-<序号>`）、`created_at`（ISO8601，+08:00）、`content`（纯文本，列表层级转缩进文本）、`images`（相对路径数组，保留原文件名）、`source`（导出文件相对路径 + HTML 内偏移，供溯源）。
+- **存储格式（2026-08-21 已裁决：SQLite）**：
+  - 理由（用户裁决 B：便于长期使用）：偏好域将跨季度积累问卷结果、快照、持仓，SQL 式关联查询（某季度快照 ↔ 该季度 memo ↔ 持仓变动）是长期主路径；SQLite 用 Python 标准库 `sqlite3`，**不新增第三方依赖**；单文件随 work-dir 隔离（`preferences.db` 在 `.fund_checklist*` 下，天然被 ignore）。
+  - 落盘：`preferences/preferences.db`，表结构草案：
+    - `memos(id, created_at, content, images_json, source)`——flomo 导入，`images_json` 存相对路径数组；
+    - `questionnaire_results(id, answered_at, dimension_scores_json, total_score, risk_level, answers_json)`；
+    - `preference_snapshots(id, quarter, created_at, questionnaire_result_id, behavior_summary_json, reflection_json, disclaimer)`；
+    - `holdings(id, fund_code, fund_name, shares, cost_price, buy_date, note, updated_at)`。
+- **图片处理（2026-08-21 已确认）**：首版仅引用路径，不解析内容，后续 opt-in OCR：
+  - 事实：管线 Docling 默认 `do_ocr=False`（OCR 非主路径）；Flomo 图片多为笔记截图。
+  - 口径：`images` 字段只保留相对路径，memo 文本已含主要信息；不新增 OCR 依赖与不确定性。
+  - 后续：若图片含正文未记录的关键信息（如持仓/交易截图），第二切片做 opt-in 单图提取（本地文件 → 复用 Docling 单图转换或显式不支持，明确分类）。
+- 幂等与校验：重复导入同一导出（按 `exported_at` + memo 数指纹）→ 报告 cached 不覆盖；HTML 结构不匹配 → `schema_drift` 分类失败，fail-closed。
+
+**Slice P1 实现设计（2026-08-21 落盘）**：
+
+- 解析器：Python 标准库 `html.parser.HTMLParser` 子类状态机（不新增第三方依赖）。状态 = 当前 `.memo` 容器 / `.time` / `.content` / `.files`；`<br>` → `\n`，`<li>` → 缩进项目符号，`<img src="file/...">` → 追加 images 数组（相对导出根路径）。正文纯文本化，列表层级转缩进。
+- 库表（`preferences/preferences.db`，`sqlite3` 标准库）：
+  - `memos(id TEXT PK, created_at TEXT, content TEXT, images_json TEXT DEFAULT '[]', source TEXT)`；
+  - `imports(id INTEGER PK AUTOINCREMENT, source_path TEXT, fingerprint TEXT UNIQUE, memo_count INTEGER, imported_at TEXT)`——导入事件表，`fingerprint = sha256(exported_at + 全部 memo 的 created_at+content 前 64 字符)`，用于幂等。
+- 导入流程：解析 HTML → 校验结构（无 `.memo` 或 `.time` → `schema_drift` fail-closed）→ 计算指纹 → 已存在则输出 cached（含首次导入时间与 memo 数，不覆盖）→ 否则事务写入 `memos` + `imports`，输出 imported（memo 数、图片引用数、db 路径）。
+- 失败分类：HTML 文件不存在 → `not_found`；结构不匹配 → `schema_drift`；SQLite 打开/写入失败 → `unavailable`；均 fail-closed，不产生部分导入。
+- 测试计划：① 单元——小型 HTML fixture（memo/time/content/br/ul/img）验证解析字段与图片数组；② 单元——结构不匹配 fixture → `schema_drift`；③ 单元——同 fixture 重复导入 → cached 不覆盖；④ 端到端——fixture HTML 经 `fund-checklist flomo-import` CLI → 验证 `memos` 行与 `imports` 幂等；⑤ 真实导出文件（331 条）作为手动 smoke 可选，默认测试不依赖私人数据。
+- 边界：不解析图片内容；不把 memo 写入任何 git 跟踪目录（写 `--work-dir` 下 `preferences/`，受 `.fund_checklist*/` ignore 覆盖）；不接 LLM。
+
+#### 6.26.5 持仓表格导入（xlsx，契约草案，待用户确认列）
+
+- 命令（后续 slice）：`portfolio-import --xlsx <path> --work-dir <dir>`。
+- 依赖：需新增 `openpyxl`（当前 pyproject 仅有 docling + rich，**无 xlsx 依赖**，待裁决）。
+- 表格列契约草案（单 sheet，首行表头）：
+
+  | 列 | 类型 | 必填 | 校验 |
+  |---|---|---|---|
+  | 基金代码 | str 6 位数字 | 是 | 正则 `^\d{6}$` |
+  | 基金名称 | str | 否 | 与代码不一致仅 warning |
+  | 份额 | float >0 | 是 | 缺失/非法 → `schema_drift` |
+  | 成本价 | float ≥0 | 否 | 缺失记 null，估值用最新净值 |
+  | 买入日期 | date YYYY-MM-DD | 否 | 非法 → `integrity_error` |
+  | 账户/备注 | str | 否 | 透传 |
+
+- 语义：持仓 = 用户自报组合，与基金文档 catalog 分离；后续估值用已导入快照/年报最新净值（或 akshare 日频，远期）。
+- 输出：`preferences/preferences.db` 的 `holdings` 表（fund_code → shares/cost/buy_date），重复导入按（fund_code + 买入日期）upsert。
+
+#### 6.26.6 问卷基线设计（Slice P2，有知有行板块结构 + 80 题，2026-08-21 裁决）
+
+- **题库口径（2026-08-21 用户裁决：融入有知有行板块结构，题库 80 道）**：
+  - 题库自建 80 题基线版，按有知有行「合格基金持有人测评」五大板块组织：基金常识 / 投前准备 / 系统投资 / 投资心态 / 实战经验（3 认知篇 + 2 行动篇）；难度三档递进；情境题与行为题（样题与考纲哲学见 §6.26.2）。
+  - 题库 JSON：仓库资产 `fund_agent/preferences/questionnaire/baseline-v1.json`（git 跟踪，题目/选项/分值/板块/难度/解释），标注"非官方、自行设计，考纲参考有知有行合格基金持有人测评"；答题结果才写 work-dir（`preferences/questionnaire/results/`），题库本身不是 work-dir 产物。
+- **评分（自建口径，标注非官方；有知有行未公开分值表）**：
+  - 输出形态 = 总分 100 + 五维子分（对齐有知有行实测输出：90 分 = 基金常识 79 / 投前准备 85 / 其余三维满分）。
+- 五维权重（2026-08-21 用户确认草案）：基金常识 25 / 投前准备 20 / 系统投资 20 / 投资心态 20 / 实战经验 15（合计 100）；权重记录在题目 JSON 中，可调；后续可寻找更多参考资料对齐有知有行。
+  - 板块得分 = 该板块题得分率 × 板块权重；总分 = 五维得分之和。
+- **C1-C5 档位（2026-08-21 用户裁决：选 A，保留为辅助输出）**：主输出 = 总分 100 + 五维子分；辅助输出 = C1-C5 风险等级（从投资心态/实战经验板块中风险承受相关题项映射，供季度快照"声明 vs 行为"对照基线）；原 AMAC 五维权重与 C 级档位（0-19/20-36/37-53/54-75/76-100）仅作历史参考，不再作为第一轮骨架；后续 slice 对齐有知有行（用户画像、成熟度等）。
+- 命令：`preference-questionnaire --work-dir <dir>`（交互答题，TTY 提示 / 非 TTY 读 JSON 答案文件 `--answers`）。
+- 产出：`preferences/questionnaire/results/YYYY-MM-DD.json`（五维子分/总分/逐题答案快照）+ `preferences.db` 的 `questionnaire_results` 表。
+- 频次约束：季度节奏可重测；每次结果带时间戳，不覆盖历史；报告中标注"自我认知用途，非机构适当性测评"。
+- 第二轮（待设计）：在有知有行结构上进一步丰富维度（候选：行为证据对照、个性化错题重测、难度自适应），逐个设计。
+
+#### 6.26.7 季度偏好快照（Slice P3）与合规边界
+
+- 命令：`preference-snapshot --work-dir <dir> --quarter 2026Q3`（MVP 仅确定性路径，不接 LLM）。
+- 节奏：复用 `snapshot-quarterly` 的季度节奏（每季度一份，时间戳命名）。
+- 报告内容：
+  1. 问卷基线（当时总分 + 五维子分 + 辅助 C1-C5）；
+  2. 本季度行为证据摘要（来自已导入 `preferences.db` 的 `memos` 表：季度内投资相关条目按关键词/日期过滤，引用原文 + 时间；不读原始 HTML）；
+  3. 四问反思（模板，问答形式）：本季度实际做了什么 → 与声明一致吗 → 偏差在哪 → 下季度调整什么；
+  4. （可选，后续 slice）组合体检对照：投资者年化收益 vs 基金收益、言行一致、完整成本（概念基准：有知有行基金 CT）。
+- 产出：`preferences/quarters/2026Q3/preference-snapshot.json` + markdown。
+- **合规硬边界**：
+  - 所有偏好画像/反思/配置建议输出必须附固定免责声明："本输出仅用于自我认知与组合检视，不构成投资建议，不预测收益。"
+  - MVP 只输出"声明 vs 行为"对照与反思，**不输出任何调仓/配置建议**（避免触碰 AGENTS.md 硬规则）。
+  - 若启用资产大类比例建议（远期），必须先完成 AGENTS.md 放宽（见下）。
+- **AGENTS.md 修改（2026-08-20 已裁决，已生效）**：裁决 = 方案 A（资产大类比例）+ 生效范围 = 所有 LLM 通道（interactive / ask 等）+ 免责声明文案确认。AGENTS.md 禁止事项已改为：
+  - "禁止对个股、单只基金输出买入/卖出/增持/减持等操作指令与择时建议。允许输出资产大类配置比例建议（债券基金 / 货币基金 / 股票指数基金 / 主动式权益基金 / FOF），适用于所有 LLM 通道（interactive / ask 等），前提：① 基于公开披露数据或用户自报持仓；② 输出必须附固定免责声明「本输出仅用于自我认知与组合检视，不构成投资建议，不预测收益」。"
+  - 保留不动："禁止预测未来收益或市场走势"；"禁止超出公开披露信息的因果推断"。
+  - 实现联动（另开 slice）：`llm_tool_loop.contains_investment_advice` 拦截口径需同步评估——资产大类比例建议含"建议"指令动词时当前守卫是否误拦/放行，须有明确口径，不能靠 AGENTS.md 文字与守卫实现漂移；落地前守卫行为不变。
+
+#### 6.26.8 第二切片与远期规划
+
+- Slice P5（第二切片，原 P4）：行为证据对照——memo / 思考记录 投资关键词抽取（买卖/加仓/减仓/亏损/收益 等）+ 持仓变动 vs 问卷声明一致性打分（确定性规则，不接 LLM）。
+- 远期（用户规划，逐个设计）：① 基金组合体检（投资者年化收益 vs 基金收益、言行一致、完整成本）；② 持仓估值（已导入净值 / akshare 日频）；③ 市场温度计（akshare 中证全指 000985 PE/PB 等权分位，自制非官方；温度不可得的备用计算方案见下）；④ 温度驱动持仓调整提示（仅提示过热风险与权益/债券/现金比例建议，不做具体操作）；⑤ 可视化工作台。
+  - **温度不可得备用计算方案（2026-08-20 补充，依据 youzhiyouxing.cn/data 与 `docs/research/fund-assistant-expansion-and-behavior-20260815.md` §1.3）**：fallback 链按失败分类显式驱动，**禁止用过期缓存冒充实时值**——
+    1. 主方案：akshare 中证全指 000985 日频 PE/PB → 等权分位合成（`0.5·PE分位+0.5·PB分位`）×100 → 官方三档温带；
+    2. 备 1（双源校验）：中证指数官网估值页（csindex）同口径 PE/PB 计算；
+    3. 备 2（替代数据源）：GitHub `hillerliao/index_valuation`（A 股指数估值实时+历史）或 defeatbeta-api 开源行情库；
+    4. 备 3（降级口径）：000985 数据缺失时改用沪深300 PE/PB 计算，输出必须标注"样本口径与官方不一致"；
+    5. 兜底（fail-closed）：全部数据源不可得时**不输出温度、不给出配置提示**，报告标注"温度数据不可得"；可附官方 app 当前展示值（如 49° 中估）作人工参考，必须标注"来源 = 官方 app 展示值，非自制计算"。
+- 温度计/组合体检涉及外部数据（akshare）与新增依赖，**不在 MVP 范围**；进入实施前单独裁决数据源合规与依赖准入。
+
+#### 6.26.9 裁决进度（2026-08-21 更新）
+
+- ✅ 已裁决（2026-08-21）：① 存储格式 = SQLite（见 6.26.4）；② 图片 = 仅引用路径，后续 opt-in OCR；③ 问卷题库口径 = 融入有知有行五大板块结构 + 自建 80 题（见 6.26.6）+ C1-C5 保留为辅助输出（选 A，见 6.26.6）+ 五维权重确认草案 25/20/20/20/15（见 6.26.6）；④ xlsx 列契约 = 按 6.26.5 草案；⑤ 命令 = `preference-snapshot --quarter YYYYQn`，每季度一份；⑥ `openpyxl` = 持仓导入 slice 开始时引入，不进 MVP；⑦ 温度计/组合体检 = 列入 MVP 之后的下一阶段规划，逐个设计。
+
+#### 6.26.10 智慧笔记数据导出导入（Slice P4：note-import，2026-08-22）
+
+- 数据源事实：用户邮箱（xingchen0150@agent.qq.com）2026-08-11 收到邮件「我的思考记录」（发件人 星辰 632217862@qq.com，智慧笔记小程序数据导出）。导出文件已保存为 `docs/note-export-20260811/思考记录-20260811.html`（`.gitignore` 已含 `docs/note-export-*/`）。正文为 div 包裹的 Markdown 渲染 HTML：`# 智慧笔记 - 数据导出` + `导出时间：YYYY-MM-DD HH:MM` + `总记录数：N 条` + `## 类别` + `### 序号. 标题` + `> 分析时间：` + `> 状态：` + `**原始问题：**` / `**分析结果：**` 分节。实测 65 条 = 分析记录 20 / 多维度分析 20 / 孵化报告 5 / 结构分析 20。
+- 隐私边界：与 Flomo 同口径（§6.26.3）——只本地处理、不进 git；导入写入 `--work-dir` 下 `preferences/preferences.db`（受 `.fund_checklist*/` ignore 覆盖），与 memos 同库。
+- 命令：`note-import --html <path> --work-dir <dir>`（对齐 `flomo-import`，不接 LLM）。
+- 解析契约：标准库实现（`</div>`→换行、去标签、HTML unescape 后按 Markdown 结构解析），产出 `ThoughtNote(id, category, title, created_at, status, content, source)`：
+  - `id` = `note-<导出日期 YYYYMMDD>-<category-key>-<序号>`（category-key：analysis / roundtable / incubator / structure，未知类别 fail-closed）；
+  - `created_at` = `> 分析时间：` 或 `> 生成时间：`（孵化报告用后者）→ ISO8601 +08:00；`status` = `> 状态：` 原文优先，无状态行时取 `> 类型：` 值（结构分析用），两者皆无 → `未知`；`content` = 该记录全文（保留 `**原始问题：**` / `**分析结果：**` 分节、多导师 `####` 子节、孵化/结构分析的 `## 一、` 子标题）；
+  - `##` 行规则：`## 目录` 跳过；`## 已知类别` 切换类别并结束当前记录；其他 `##`（记录已打开）归入当前记录 content 不结束记录；无记录打开时的未知 `##` → `schema_drift`；
+  - header 缺失「导出时间」/「总记录数」或声明条数与实解析数不一致 → `schema_drift` fail-closed（防静默丢记录）；无 `分析时间`/`生成时间` → `schema_drift`。
+- 存储：`preferences.db` 新增 `thought_records(id TEXT PK, category, title, created_at, status, content, source)` 与 `note_imports(id INTEGER PK AUTOINCREMENT, source_path, fingerprint TEXT UNIQUE, exported_at, record_count, imported_at)`；fingerprint = sha256(exported_at + 全部记录 title+created_at+content 前 64 字符)；同指纹重复导入 → cached 不覆盖，单事务写入。
+- 失败分类：文件不存在 → `not_found`；解析失败（结构/条数/必填元数据不符）→ `schema_drift`；SQLite 打开/写入失败 → `unavailable`；均 fail-closed，不产生部分导入。
+- 与第二切片关系：thought_records 为行为证据对照（Slice P5）新增证据源（投资关键词抽取范围扩到 memos + thought_records）。
+- 测试计划：构造样例 `tests/fund/preferences/fixtures/note_sample.html`（非私人数据，4 类别各含代表性记录）覆盖解析字段/类别映射/序号/幂等/声明条数不符/缺失分析时间；CLI e2e 覆盖成功/not_found/schema_drift/cached；真实导出（65 条）作为 controller 手动 smoke。
+
+#### 6.26.11 新增规划想法（2026-08-22，用户口述，待逐个设计）
+
+- **想法 A：每 6 个月一次的问卷调查定时任务**——主动收集用户最新风险偏好变化情况。
+  - 与现有节奏的关系：当前设计为「季度可重测、结果带时间戳」（§6.26.2，用户主动跑）；定时任务 = 主动提醒/调度，按 6 个月周期触发问卷。
+  - 待裁决：① 定时形态（CLI 提醒子命令 / 系统调度 crontab / 应用内提醒）；② 与适当性新规「测评有效期 ≤12 个月」的衔接（6 个月周期兼容，需在快照/报告中标注最近测评时间与有效期）；③ 复用 `baseline-v1` 80 题还是新增「风险偏好变化」专用短卷（对比上一轮结果输出变化轨迹）。
+- **想法 B：结合有知有行知识体系构建知识库，支持投资者学习与成长**。
+  - 合规边界（先决问题）：有知有行材料（materials / 播客 / 课程 / 付费内容）为第三方版权内容，**禁止未经许可复制付费/独家内容**；可行路径 = 自建摘要/结构化笔记 + 原文链接引用，题库沿用 §6.26.6「自建 + 标注非官方」口径。
+  - 待裁决：① 知识库形态（本地 SQLite 笔记 / 文档目录 + 检索，是否复用 `thought_records` / `memos` 统一存储）；② 内容来源准入（公开材料清单 + 版权审查）；③ 学习路径（按五维板块组织 + 答题后推荐阅读）。
+  - 定位：MVP 之后的下一阶段，与温度计/组合体检（§6.26.8）同属远期候选，进入实施前单独设计。
 
 ## 7. dayu 可迁移部分
 
@@ -1719,6 +1888,14 @@ uv run pytest tests/fund/document_tools tests/fund/agent/test_minimal_tool_loop.
 **Slice 17A**：报告 Markdown 持久化 + metadata sidecar。文件名 `{fund_code}-{year}-analysis.meta.json`，与 .md 同目录。字段：fund_code、fund_name、report_year、generation_time（ISO 8601）、audit_score（无审计 null）、signal、normalized_score。_export_markdown 增加 signal_judgment 参数。
 **Slice 17A**：报告 Markdown 持久化 + metadata sidecar。文件名 `{fund_code}-{year}-analysis.meta.json`，与 .md 同目录。字段：fund_code、fund_name、report_year、generation_time（ISO 8601）、audit_score（无审计 null）、signal、normalized_score。_export_markdown 增加 signal_judgment 参数。✅ 已完成。
 **Slice 17B**：citation 验证工具。输入必须为结构化 `Citation / Locator`；输出为 `ExcerptContent | ToolFailure`；验证口径仅限 locator 可回溯且可读取原文片段，不做内容语义真伪校验；实现层复用 `FundDocumentToolService.get_excerpt`，不新增 raw payload 暴露。
+
+### 投资者偏好分析（2026-08-20 讨论稿，详见 §6.26）
+
+- **Slice P1**：flomo import（HTML → SQLite，时间/内容/图片引用；gitignore）。存储格式 = SQLite、图片仅引用路径（2026-08-21 已裁决，见 §6.26.4）。
+- **Slice P2**：问卷基线（自建 20 题 + AMAC 100 分制 C1-C5，确定性 CLI）。
+- **Slice P3**：季度偏好快照（四问反思模板 + 免责声明，确定性，不接 LLM）。
+- **Slice P4（第二切片）**：行为证据对照（memo 关键词 + 持仓变动 vs 声明一致性）。
+- 后续切片：xlsx 持仓导入与估值、基金组合体检、市场温度计、温度驱动配置提示、可视化工作台（逐个设计）。
 
 ### 外部候选研究参考（非执行真源）
 

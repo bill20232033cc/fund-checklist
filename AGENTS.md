@@ -100,7 +100,7 @@ Phase 7.4 已实现（2026-08-02）：interactive e2e 失败修复 S0-S7 全部 
 - **失败轮可观测性**：失败轮成对持久化进 session（含 tool_calls/tool_trace）；被投资建议拦截的回答保留原文与触发词；`--enable-tool-trace` 可显示失败路径工具调用（注意 e276ff3 曾误用不存在的 `entry.status` 字段，实现以 `result_kind`/`failure_code` 为准）。
 - **tool call 容错**：`document_id` 缺失由 runner 用 expected 补全；工具名仅格式归一化（去空白/尾部括号参数）后白名单匹配，不做语义映射。
 - **prompt 硬规则**：无事实目标问题直接 final answer；空搜索最多换 1 次词后声明未找到；section_ref/table_ref 一律复制不猜测。
-- **投资建议判据（决策 A）**：弱词（买入/卖出/增持/减持）在 ±100 字符窗口内遇指令动词（建议/应当/可考虑/适合/值得持有/应买入/应卖出/应增持/应减持）拦截；否则窗口内含年报事实性上下文词（策略/报告期内/期末/持仓/重仓/股票投资明细/财务报表附注/买入返售/卖出回购/基金合同 等）放行；否则 fail-closed 兜底。强指令词与预期收益预测句式始终 fail-closed；main.py 用户输入预检已合一到 `llm_tool_loop.contains_investment_advice`（单一真源）。指令动词不使用单字「应」（会误命中 应付/应计）。
+- **投资建议判据（决策 A）**：弱词（买入/卖出/增持/减持）在 ±100 字符窗口内遇指令动词（建议/应当/可考虑/适合/值得持有/应买入/应卖出/应增持/应减持）拦截；否则窗口内含年报事实性上下文词（策略/报告期内/期末/持仓/重仓/股票投资明细/财务报表附注/买入返售/卖出回购/基金合同 等）放行；否则 fail-closed 兜底。强指令词与预期收益预测句式始终 fail-closed；main.py 用户输入预检已合一到 `llm_tool_loop.contains_investment_advice`（单一真源）。指令动词不使用单字「应」（会误命中 应付/应计）。注：2026-08-20 裁决「资产大类配置比例建议放行（见禁止事项）」后，守卫口径调整另开实现 slice；落地前本节仍为当前代码事实，守卫行为不变。
 - **provider malformed 有界重试**：DeepSeek response 不可解析时最多重试 1 次（stream + 非 stream），重试后仍 fail-closed；不回喂。
 - **interactive 终答守卫改写重试**：final answer 因投资建议关键词被拦时最多重答 1 次（重答仍过同一守卫）；ask/generate 不重试。
 - 计划与 goal 产物：`.sisyphus/plans/interactive-e2e-fix-20260802.md`、`.sisyphus/goals/phase7.4-goal.md`、`.sisyphus/plans/phase7.4-s3-caliber-proposal.md`（均经 Mimo review ACCEPTED）。
@@ -281,7 +281,7 @@ uv run pytest tests/fund/service/test_chat_service.py -k "compaction" -v --tb=sh
 
 ## 禁止事项
 
-- 禁止直接输出“买入”“卖出”投资建议。
+- 禁止对个股、单只基金输出买入/卖出/增持/减持等操作指令与择时建议。允许输出资产大类配置比例建议（债券基金 / 货币基金 / 股票指数基金 / 主动式权益基金 / FOF），适用于所有 LLM 通道（interactive / ask 等），前提：① 基于公开披露数据或用户自报持仓；② 输出必须附固定免责声明「本输出仅用于自我认知与组合检视，不构成投资建议，不预测收益」。
 - 禁止预测未来收益或市场走势。
 - 禁止超出公开披露信息的因果推断。
 - 禁止基金经理动机猜测。

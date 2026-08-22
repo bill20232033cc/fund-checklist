@@ -639,3 +639,288 @@ def test_data_rows_all_data_when_no_header() -> None:
         ("2", "数据B"),
     )
     assert _data_rows(rows) == rows
+
+
+# ── _section_ref_for_position 表格归属（页码 + 纵向位置）────────────────────
+
+
+def _positional_cells(rows: list[tuple[str, ...]]) -> list[dict[str, int | str]]:
+    """把二维行转换成 Docling table_cells 结构。"""
+
+    cells: list[dict[str, int | str]] = []
+    for row_index, row in enumerate(rows):
+        for col_index, text in enumerate(row):
+            cells.append(
+                {
+                    "start_row_offset_idx": row_index,
+                    "end_row_offset_idx": row_index + 1,
+                    "start_col_offset_idx": col_index,
+                    "end_col_offset_idx": col_index + 1,
+                    "text": text,
+                }
+            )
+    return cells
+
+
+def _write_docling_json_positional(
+    path: Path,
+    *,
+    headers: list[tuple[str, int, float]],
+    tables: list[tuple[int, float, list[tuple[str, ...]]]],
+    page_height: float = 842.0,
+    origin: str = "BOTTOMLEFT",
+) -> None:
+    """写入带 pages 与纵向 bbox 的 Docling-shaped JSON，用于归属逻辑测试。
+
+    参数:
+        headers: (title, page_no, bbox.t) 三元组。
+        tables: (page_no, bbox.t, rows) 三元组。
+        page_height: 每页高度（pages.size.height）。
+        origin: bbox.coord_origin，BOTTOMLEFT 或 TOPLEFT。
+    """
+
+    texts: list[dict[str, object]] = []
+    for index, (title, page_no, top) in enumerate(headers):
+        bottom = top - 20 if origin == "BOTTOMLEFT" else top + 20
+        texts.append(
+            {
+                "self_ref": f"#/texts/{index}",
+                "label": "section_header",
+                "text": title,
+                "level": 1,
+                "prov": [
+                    {
+                        "page_no": page_no,
+                        "bbox": {
+                            "l": 50,
+                            "t": top,
+                            "r": 500,
+                            "b": bottom,
+                            "coord_origin": origin,
+                        },
+                    }
+                ],
+            }
+        )
+    table_items: list[dict[str, object]] = []
+    for index, (page_no, top, rows) in enumerate(tables):
+        bottom = top - 20 if origin == "BOTTOMLEFT" else top + 20
+        table_items.append(
+            {
+                "self_ref": f"#/tables/{index}",
+                "label": "table",
+                "prov": [
+                    {
+                        "page_no": page_no,
+                        "bbox": {
+                            "l": 50,
+                            "t": top,
+                            "r": 500,
+                            "b": bottom,
+                            "coord_origin": origin,
+                        },
+                    }
+                ],
+                "captions": [],
+                "data": {"table_cells": _positional_cells(rows)},
+            }
+        )
+    max_page = max(
+        [page_no for _, page_no, _ in headers] + [page_no for page_no, _, _ in tables]
+    )
+    payload: dict[str, object] = {
+        "schema_name": "DoclingDocument",
+        "texts": texts,
+        "tables": table_items,
+        "pages": {
+            str(page_no): {
+                "size": {"width": 595.0, "height": page_height},
+                "page_no": page_no,
+            }
+            for page_no in range(1, max_page + 1)
+        },
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def test_table_belongs_to_nearest_preceding_header_on_same_page(tmp_path) -> None:
+    """同页多章节时表格必须归属纵向最近的前序 header（BOTTOMLEFT）。"""
+
+    json_path = tmp_path / "positional.docling.json"
+    _write_docling_json_positional(
+        json_path,
+        headers=[
+            ("5.2.2 港股通投资股票投资组合", 9, 611.97),
+            ("5.3 股票投资明细", 9, 553.86),
+            ("5.3.1 前十名股票投资明细", 9, 520.62),
+            ("5.4 债券投资组合", 9, 273.99),
+        ],
+        tables=[(9, 502.97, [("序号", "股票名称"), ("1", "立讯精密")])],
+    )
+    store = DoclingDocumentStore(identity=_identity(), json_path=json_path)
+
+    tables = store.list_tables()
+
+    assert len(tables) == 1
+    assert tables[0].table_ref == "table-0000"
+    assert tables[0].section_ref == "section-0002"
+
+
+def test_page_top_table_belongs_to_last_header_on_previous_page(tmp_path) -> None:
+    """页顶续表（同页无 header 在上方）必须归属上一页最后 header。"""
+
+    json_path = tmp_path / "positional.docling.json"
+    _write_docling_json_positional(
+        json_path,
+        headers=[
+            ("5.2.1 境内股票投资组合", 8, 353.44),
+            ("5.2.2 港股通投资股票投资组合", 9, 611.97),
+        ],
+        tables=[(9, 771.0, [("M", "科学研究和技术服务业")])],
+    )
+    store = DoclingDocumentStore(identity=_identity(), json_path=json_path)
+
+    tables = store.list_tables()
+
+    assert len(tables) == 1
+    assert tables[0].section_ref == "section-0000"
+
+
+def test_table_attribution_normalizes_topleft_coordinates(tmp_path) -> None:
+    """TOPLEFT 坐标必须按页内向下坐标解释（t 直接比较）。"""
+
+    json_path = tmp_path / "positional.docling.json"
+    _write_docling_json_positional(
+        json_path,
+        headers=[
+            ("章节甲", 1, 100.0),
+            ("章节乙", 1, 300.0),
+        ],
+        tables=[(1, 200.0, [("内容",)])],
+        origin="TOPLEFT",
+    )
+    store = DoclingDocumentStore(identity=_identity(), json_path=json_path)
+
+    tables = store.list_tables()
+
+    assert len(tables) == 1
+    assert tables[0].section_ref == "section-0000"
+
+
+def test_table_attribution_falls_back_to_page_only_without_origin(tmp_path) -> None:
+    """bbox 缺 coord_origin 时必须回退 page-only 归属（不猜测坐标系）。"""
+
+    json_path = tmp_path / "positional.docling.json"
+    payload = {
+        "schema_name": "DoclingDocument",
+        "texts": [
+            {
+                "self_ref": "#/texts/0",
+                "label": "section_header",
+                "text": "§1 重要提示",
+                "level": 1,
+                "prov": [{"page_no": 1, "bbox": {"l": 1, "t": 2, "r": 3, "b": 4}}],
+            },
+            {
+                "self_ref": "#/texts/2",
+                "label": "section_header",
+                "text": "§2 基金简介",
+                "level": 1,
+                "prov": [{"page_no": 2, "bbox": {"l": 1, "t": 2, "r": 3, "b": 4}}],
+            },
+        ],
+        "tables": [
+            {
+                "self_ref": "#/tables/0",
+                "label": "table",
+                "prov": [{"page_no": 2, "bbox": {"l": 10, "t": 20, "r": 30, "b": 40}}],
+                "captions": [],
+                "data": {"table_cells": [{"start_row_offset_idx": 0, "end_row_offset_idx": 1, "start_col_offset_idx": 0, "end_col_offset_idx": 1, "text": "内容"}]},
+            }
+        ],
+        "pages": {"1": {"size": {"width": 595.0, "height": 842.0}, "page_no": 1}, "2": {"size": {"width": 595.0, "height": 842.0}, "page_no": 2}},
+    }
+    json_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    store = DoclingDocumentStore(identity=_identity(), json_path=json_path)
+
+    tables = store.list_tables()
+
+    assert len(tables) == 1
+    assert tables[0].section_ref == "section-0001"
+
+
+def test_continuation_merge_survives_positional_attribution(tmp_path) -> None:
+    """纵向归属后同 section 同签名跨页续表仍按既有逻辑合并。"""
+
+    json_path = tmp_path / "positional.docling.json"
+    _write_docling_json_positional(
+        json_path,
+        headers=[("5.3.1 前十名股票投资明细", 1, 200.0)],
+        tables=[
+            (1, 150.0, [("序号", "债券代码", "债券名称"), ("1", "019709", "21国债09"), ("2", "019710", "21国债10")]),
+            (2, 700.0, [("3", "019711", "21国债11"), ("4", "019712", "21国债12")]),
+        ],
+    )
+    store = DoclingDocumentStore(identity=_identity(), json_path=json_path)
+
+    tables = store.list_tables()
+
+    assert len(tables) == 1
+    assert tables[0].table_ref == "table-0000"
+    assert tables[0].section_ref == "section-0000"
+    assert tables[0].row_count == 5
+
+
+_QUARTERLY_FIXTURE_DOC_ID = "005680-2026-Q2-quarterly_report-c04170add3a3cf98"
+_QUARTERLY_FIXTURE_JSON = Path(
+    ".fund_checklist_005680_snapshot/docling_json/005680-2026-Q2-quarterly_report-c04170add3a3cf98"
+    "/005680-2026-Q2-quarterly_report-c04170add3a3cf98.docling.json"
+)
+
+
+def _quarterly_identity() -> ReportIdentity:
+    """构造 005680 Q2 2026 季报真实 fixture 的报告身份。"""
+
+    return ReportIdentity(
+        fund_code="005680",
+        fund_name="财通资管价值成长混合",
+        year=2026,
+        report_type=ReportType.QUARTERLY_REPORT,
+        source_kind=SourceKind.LOCAL_PDF,
+        local_import_id="fixture",
+        content_fingerprint="fixture",
+        document_id=_QUARTERLY_FIXTURE_DOC_ID,
+    )
+
+
+def test_real_quarterly_fixture_attributes_top10_table_to_5_3_1() -> None:
+    """005680 Q2 季报真实 fixture：table-0010 归属 5.3.1，table-0009 归属 5.2.1。"""
+
+    assert _QUARTERLY_FIXTURE_JSON.is_file(), "005680 Q2 现成 docling JSON fixture 缺失"
+    store = DoclingDocumentStore(identity=_quarterly_identity(), json_path=_QUARTERLY_FIXTURE_JSON)
+
+    tables = store.list_tables()
+    section_by_ref = {table.table_ref: table.section_ref for table in tables}
+
+    assert section_by_ref["table-0010"] == "section-0097"
+    assert section_by_ref["table-0009"] == "section-0069"
+    assert section_by_ref["table-0007"] == "section-0067"
+
+
+def test_real_quarterly_fixture_top10_retrieval_chain() -> None:
+    """005680 Q2 季报真实 fixture：search -> list_tables(section) -> read_table 拿到持仓行。"""
+
+    assert _QUARTERLY_FIXTURE_JSON.is_file(), "005680 Q2 现成 docling JSON fixture 缺失"
+    store = DoclingDocumentStore(identity=_quarterly_identity(), json_path=_QUARTERLY_FIXTURE_JSON)
+
+    tables = store.list_tables(within_section_ref="section-0097")
+
+    assert [table.table_ref for table in tables] == ["table-0010"]
+    hits = store.search("前十名股票投资明细")
+    caption_hits = [hit for hit in hits if hit.table_ref == "table-0010"]
+    assert caption_hits, "前十名股票投资明细 必须命中 table-0010 caption"
+    content = store.read_table("table-0010")
+
+    assert len(content.rows) == 11
+    assert content.rows[0][0] == "序号"
+    assert content.rows[1][2] == "立讯精密"

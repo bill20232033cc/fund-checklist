@@ -51,6 +51,7 @@ class _ParsedSection:
     text: str
     locator: Locator
     source_index: int
+    reading_top: float | None = None
 
 
 @dataclass(frozen=True)
@@ -102,8 +103,11 @@ class DoclingDocumentStore:
         self._raw = _load_docling_json(Path(json_path))
         self._texts = _require_docling_list(self._raw, "texts")
         self._tables = _require_docling_list(self._raw, "tables")
-        self._sections = _parse_sections(identity, self._texts)
-        self._tables_model = _parse_tables(identity, self._tables, self._texts, self._sections)
+        page_heights = _page_heights(self._raw)
+        self._sections = _parse_sections(identity, self._texts, page_heights)
+        self._tables_model = _parse_tables(
+            identity, self._tables, self._texts, self._sections, page_heights
+        )
         self._health = _build_parser_health(self._texts, self._sections, self._tables_model)
         self._bm25f_scorer = BM25FScorer(
             _build_bm25f_units(self._sections, self._tables_model)
@@ -373,8 +377,16 @@ def _require_docling_list(payload: dict[str, object], key: str) -> list[dict[str
     return value
 
 
-def _parse_sections(identity: ReportIdentity, texts: list[dict[str, object]]) -> tuple[_ParsedSection, ...]:
-    """从 Docling texts[] 解析章节；无标题时用全文替代索引。"""
+def _parse_sections(
+    identity: ReportIdentity,
+    texts: list[dict[str, object]],
+    page_heights: dict[int, float],
+) -> tuple[_ParsedSection, ...]:
+    """从 Docling texts[] 解析章节；无标题时用全文替代索引。
+
+    参数:
+        page_heights: 页码到页面高度的映射，用于把 bbox 归一化为页内向下坐标。
+    """
 
     readable_indexes = [index for index, item in enumerate(texts) if _text_of(item)]
     header_indexes = [
@@ -400,6 +412,7 @@ def _parse_sections(identity: ReportIdentity, texts: list[dict[str, object]]) ->
                 text=text,
                 locator=locator,
                 source_index=readable_indexes[0],
+                reading_top=None,
             ),
         )
 
@@ -435,6 +448,7 @@ def _parse_sections(identity: ReportIdentity, texts: list[dict[str, object]]) ->
                 text=section_text,
                 locator=locator,
                 source_index=text_index,
+                reading_top=_reading_top(header, page_heights),
             )
         )
         parent_stack.append((level, section_ref))
@@ -461,6 +475,7 @@ def _parse_tables(
     tables: list[dict[str, object]],
     texts: list[dict[str, object]],
     sections: tuple[_ParsedSection, ...],
+    page_heights: dict[int, float],
 ) -> tuple[_ParsedTable, ...]:
     """从 Docling tables[] 解析有界表格投影。"""
 
@@ -470,7 +485,9 @@ def _parse_tables(
         rows = _table_rows(item)
         page_no = _first_page_no(item)
         table_ref = f"table-{index:04d}"
-        section_ref = _section_ref_for_page(sections, page_no)
+        section_ref = _section_ref_for_position(
+            sections, page_no, _reading_top(item, page_heights)
+        )
         locator = _locator_from_item(
             identity.document_id,
             LocatorKind.TABLE,
@@ -699,6 +716,54 @@ def _first_page_no(item: dict[str, object]) -> int | None:
     return page_no if isinstance(page_no, int) else None
 
 
+def _page_heights(raw: dict[str, object]) -> dict[int, float]:
+    """从 Docling pages 解析 page_no -> 页面高度；缺失时返回空映射。"""
+
+    pages = raw.get("pages")
+    if not isinstance(pages, dict):
+        return {}
+    heights: dict[int, float] = {}
+    for value in pages.values():
+        if not isinstance(value, dict):
+            continue
+        page_no = value.get("page_no")
+        size = value.get("size")
+        height = size.get("height") if isinstance(size, dict) else None
+        if isinstance(page_no, int) and isinstance(height, (int, float)):
+            heights[page_no] = float(height)
+    return heights
+
+
+def _reading_top(item: dict[str, object], page_heights: dict[int, float]) -> float | None:
+    """计算 item 的归一化页内纵向位置（向下坐标，越大越靠下）。
+
+    BOTTOMLEFT 坐标按页高翻转（t 越大越靠上），TOPLEFT 直接使用 t；bbox /
+    coord_origin / 页高任一缺失时返回 None，由调用方回退 page-only 归属。
+    """
+
+    page_no = _first_page_no(item)
+    if page_no is None:
+        return None
+    prov = item.get("prov")
+    if not isinstance(prov, list) or not prov or not isinstance(prov[0], dict):
+        return None
+    bbox = prov[0].get("bbox")
+    if not isinstance(bbox, dict):
+        return None
+    top = bbox.get("t")
+    if not isinstance(top, (int, float)):
+        return None
+    origin = bbox.get("coord_origin")
+    if origin == "BOTTOMLEFT":
+        height = page_heights.get(page_no)
+        if height is None:
+            return None
+        return height - float(top)
+    if origin == "TOPLEFT":
+        return float(top)
+    return None
+
+
 def _first_bbox(item: dict[str, object]) -> dict[str, float] | None:
     """读取 prov[0].bbox 中的数值字段。"""
 
@@ -845,6 +910,39 @@ def _section_ref_for_page(sections: tuple[_ParsedSection, ...], page_no: int | N
         if section_page is not None and section_page <= page_no:
             best = section
     return best.section_ref if best else (sections[0].section_ref if sections else None)
+
+
+def _section_ref_for_position(
+    sections: tuple[_ParsedSection, ...],
+    page_no: int | None,
+    reading_top: float | None,
+) -> str | None:
+    """按页码 + 纵向位置把表格归属到阅读顺序最近的前序章节。
+
+    候选为页码小于表格页的章节（同页内取纵向最靠下者）与同页且在表格上方的
+    章节；取 (page, reading_top) 最大者。表格位置信息不足或无可归属章节时
+    回退原 page-only 逻辑（_section_ref_for_page）。
+    """
+
+    if page_no is None or reading_top is None:
+        return _section_ref_for_page(sections, page_no)
+    best: tuple[tuple[int, float], _ParsedSection] | None = None
+    for section in sections:
+        section_page = section.locator.page_no
+        if section_page is None or section_page > page_no:
+            continue
+        if section_page == page_no:
+            section_top = section.reading_top
+            if section_top is None or not (section_top < reading_top):
+                continue
+        else:
+            section_top = section.reading_top if section.reading_top is not None else float("-inf")
+        key = (section_page, section_top)
+        if best is None or key > best[0]:
+            best = (key, section)
+    if best is None:
+        return _section_ref_for_page(sections, page_no)
+    return best[1].section_ref
 
 
 _HEADER_KEYWORDS = frozenset({"序号", "代码", "名称", "金额", "比例", "项目", "日期", "数量", "备注"})
